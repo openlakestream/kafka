@@ -503,6 +503,10 @@ public abstract class AbstractKafkaConfig extends AbstractConfig {
         return getInt(SocketServerConfigs.NUM_NETWORK_THREADS_CONFIG);
     }
 
+    public boolean socketServerEnableRequestPipelining() {
+        return getBoolean(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG);
+    }
+
     public long connectionSetupTimeoutMs() {
         return getLong(ServerConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG);
     }

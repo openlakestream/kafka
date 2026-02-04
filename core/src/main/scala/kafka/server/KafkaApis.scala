@@ -76,6 +76,7 @@ import org.apache.kafka.server.storage.log.{FetchIsolation, FetchParams, FetchPa
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
 import org.apache.kafka.storage.internals.log.{AppendOrigin, RecordValidationStats}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
+import org.apache.kafka.storage.diskless.{DisklessTopicMetadataTransformer, MetadataCacheDisklessStorageView}
 
 import java.util
 import java.util.concurrent.atomic.AtomicInteger
@@ -127,6 +128,23 @@ class KafkaApis(val requestChannel: RequestChannel,
   val describeTopicPartitionsRequestHandler = new DescribeTopicPartitionsRequestHandler(
     metadataCache, authHelper, config)
   val shareGroupConfigProvider = new ShareGroupConfigProvider(groupConfigManager)
+
+  private val disklessMetadataTransformer: Option[DisklessTopicMetadataTransformer] = {
+    if (config.ursaStorageEnable) {
+      val metadataView = new MetadataCacheDisklessStorageView(
+        (topic: String) => {
+          val props = metadataCache.topicConfig(topic)
+          props.stringPropertyNames().asScala.map(k => k -> props.getProperty(k)).toMap.asJava
+        },
+        (listenerName: ListenerName) => metadataCache.getAliveBrokerNodes(listenerName),
+        (topic: String) => metadataCache.getTopicId(topic),
+        true
+      )
+      Some(new DisklessTopicMetadataTransformer(metadataView))
+    } else {
+      None
+    }
+  }
 
   def close(): Unit = {
     aclApis.close()
@@ -994,6 +1012,8 @@ class KafkaApis(val requestChannel: RequestChannel,
     val completeTopicMetadata =  unknownTopicIdsTopicMetadata ++
       topicMetadata ++ unauthorizedForCreateTopicMetadata ++ unauthorizedForDescribeTopicMetadata
 
+    disklessMetadataTransformer.foreach(_.transformClusterMetadata(request.context.listenerName, completeTopicMetadata.asJava))
+
     val brokers = metadataCache.getAliveBrokerNodes(request.context.listenerName)
 
     trace("Sending topic metadata %s and brokers %s for correlation id %d to client %s".format(completeTopicMetadata.mkString(","),
@@ -1016,6 +1036,8 @@ class KafkaApis(val requestChannel: RequestChannel,
     val response = describeTopicPartitionsRequestHandler.handleDescribeTopicPartitionsRequest(request)
     trace("Sending topic partitions metadata %s for correlation id %d to client %s".format(response.topics().asScala.mkString(","),
       request.header.correlationId, request.header.clientId))
+
+    disklessMetadataTransformer.foreach(_.transformDescribeTopicResponse(request.context.listenerName, response))
 
     requestHelper.sendResponseMaybeThrottle(request, requestThrottleMs => {
       response.setThrottleTimeMs(requestThrottleMs)

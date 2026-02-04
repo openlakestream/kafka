@@ -1,0 +1,319 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+services:
+  oxia:
+    image: oxia/oxia:main
+    hostname: oxia
+    container_name: oxia
+    ports:
+      - 6648:6648
+    entrypoint: ["/oxia/bin/oxia"]
+    command: ["standalone", "--data-dir=/data", "--shards=8"]
+    volumes:
+      - oxia-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8080/metrics || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  localstack:
+    image: localstack/localstack:latest
+    hostname: localstack
+    container_name: localstack
+    ports:
+      - 4566:4566
+      - 4510-4559:4510-4559
+    environment:
+      SERVICES: s3
+      DEBUG: 0
+      PERSISTENCE: 1
+    volumes:
+      - localstack-data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  localstack-init:
+    image: amazon/aws-cli:latest
+    depends_on:
+      localstack:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: >
+      /bin/sh -c "
+      aws --endpoint-url=http://localstack:4566 s3 mb s3://kafka-ursa --region us-east-1 || true;
+      exit 0;
+      "
+
+  schema-registry:
+    image: streamnative/schema-registry:0.1.0
+    platform: linux/amd64
+    hostname: schema-registry
+    container_name: schema-registry
+    depends_on:
+      oxia:
+        condition: service_healthy
+    environment:
+      PULSAR_PREFIX_oxiaServiceUrl: oxia://oxia:6648
+      PULSAR_PREFIX_schemaRegistryListeners: http://0.0.0.0:8001
+      PULSAR_PREFIX_schemaRegistryProtocolMap: HTTP:http
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -euo pipefail
+        echo "Starting Schema Registry..."
+        bin/apply-config-from-env.py conf/sr.conf
+        bin/start.sh -d
+        echo "Schema Registry started."
+        tail -f /dev/null
+    ports:
+      - 8001:8001
+
+  compactor:
+    image: ${COMPACTOR_IMAGE:-ursa-compact:ue-s3-e2e}
+    platform: linux/amd64
+    hostname: compactor
+    container_name: compactor
+    depends_on:
+      oxia:
+        condition: service_healthy
+      localstack-init:
+        condition: service_completed_successfully
+      schema-registry:
+        condition: service_started
+    environment:
+      OTEL_SDK_DISABLED: "true"
+      PULSAR_MEM: "-Xmx1024M"
+      PULSAR_GC: "-XX:+UseZGC"
+
+      # Metadata store and topic discovery
+      PULSAR_PREFIX_metadataStoreUrl: oxia://oxia:6648/default
+      PULSAR_PREFIX_oxiaPulsarStorageUrl: oxia://oxia:6648/default
+      PULSAR_PREFIX_dataSourceForCompaction: URSA
+      PULSAR_PREFIX_metastoreRequestRateLimitPerSecond: "500"
+      PULSAR_PREFIX_refreshLocalTopicInternalInSeconds: "5"
+
+      # WAL backend (S3 via LocalStack)
+      PULSAR_PREFIX_backendStorageType: S3
+      PULSAR_PREFIX_bucket: kafka-ursa
+      # NOTE: keep empty to match current Ursa S3 object layout; override if your Ursa build uses a prefix.
+      PULSAR_PREFIX_prefix: ""
+      PULSAR_PREFIX_cloudStorageEndpoint: http://localstack:4566
+      PULSAR_PREFIX_region: us-east-1
+      PULSAR_PREFIX_s3AccessKeyId: test
+      PULSAR_PREFIX_s3SecretAccessKey: test
+
+      # Lakehouse (parquet) path resolution for v2 reader/writer
+      PULSAR_PREFIX_compactionBackendStorageType: S3
+      PULSAR_PREFIX_compactionBucket: kafka-ursa
+      PULSAR_PREFIX_compactionPrefix: ""
+      PULSAR_PREFIX_compactionBucketRegion: us-east-1
+
+      # Schema registry (required for Kafka parquet entry serde)
+      PULSAR_PREFIX_kopSchemaRegistryUrl: http://schema-registry:8001
+
+      # Force v2 compaction worker + kafka parquet serde
+      PULSAR_PREFIX_forceToUsePulsarCompactionWorker: "true"
+      PULSAR_PREFIX_managedTableSchemaEvolutionEnabled: "true"
+      PULSAR_PREFIX_entrySerDeType: KAFKA_BATCHED_RAW_PARQUET
+
+      # Keep the compaction cycle fast for demo/dev
+      PULSAR_PREFIX_compactedFileSizeLimit: "10240"
+      PULSAR_PREFIX_tailCompactDataVisibilityIntervalInSeconds: "5"
+
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    working_dir: /pulsar
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        conf=/tmp/ursa_storage.conf
+        : > "$$conf"
+        bin/apply-config-from-env.py "$$conf"
+        exec java -Dio.netty.tryReflectionSetAccessible=true -Djava.net.preferIPv4Stack=true \
+          -cp "/pulsar/lib/*" io.streamnative.ursa.compact.CompactionMain --conf "$$conf"
+    restart: unless-stopped
+
+  kafka-1:
+    image: ${IMAGE:-kafka-diskless:latest}
+    hostname: kafka-1
+    container_name: kafka-1
+    ports:
+      - 29092:9092
+    depends_on:
+      oxia:
+        condition: service_healthy
+      localstack-init:
+        condition: service_completed_successfully
+      schema-registry:
+        condition: service_started
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:19092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-1:19092,PLAINTEXT_HOST://localhost:29092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_LOG_DIRS: "/tmp/kraft-combined-logs"
+
+      # Diskless / Ursa storage
+      KAFKA_URSA_STORAGE_ENABLE: "true"
+      KAFKA_URSA_STORAGE_OXIA_SERVICE_URL: "oxia:6648"
+      KAFKA_URSA_STORAGE_BACKEND_TYPE: "S3"
+      KAFKA_URSA_STORAGE_S3_ENDPOINT: "http://localstack:4566"
+      KAFKA_URSA_STORAGE_S3_ACCESS_KEY: "test"
+      KAFKA_URSA_STORAGE_S3_SECRET_KEY: "test"
+      KAFKA_URSA_STORAGE_S3_BUCKET: "kafka-ursa"
+      KAFKA_URSA_STORAGE_S3_REGION: "us-east-1"
+      KAFKA_URSA_STORAGE_S3_PATH_STYLE_ACCESS: "true"
+      # NOTE: `ursa.storage.path` is treated as S3 key prefix.
+      # Keep empty to match current Ursa S3 object layout; override if your Ursa build uses a prefix.
+      KAFKA_URSA_STORAGE_PATH: ""
+      # Flush small batches quickly so the compactor won't see NoSuchKey on recently-written entries.
+      KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE: "4096"
+      KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: "100"
+
+      # Enable lakehouse reader for compacted(parquet) indexes.
+      # NOTE: the `kafka-diskless` image uses `KAFKA_JVM_PERFORMANCE_OPTS` (not `KAFKA_OPTS`) to pass JVM system properties.
+      KAFKA_JVM_PERFORMANCE_OPTS: >-
+        -Dursa.externalReaderFactoryClass=io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory
+        -DkopSchemaRegistryUrl=http://schema-registry:8001
+        -Daws.accessKeyId=test
+        -Daws.secretAccessKey=test
+    volumes:
+      - kafka-1-data:/var/lib/kafka/data
+
+  kafka-2:
+    image: ${IMAGE:-kafka-diskless:latest}
+    hostname: kafka-2
+    container_name: kafka-2
+    ports:
+      - 39092:9092
+    depends_on:
+      oxia:
+        condition: service_healthy
+      localstack-init:
+        condition: service_completed_successfully
+      schema-registry:
+        condition: service_started
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:19092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-2:19092,PLAINTEXT_HOST://localhost:39092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_LOG_DIRS: "/tmp/kraft-combined-logs"
+
+      KAFKA_URSA_STORAGE_ENABLE: "true"
+      KAFKA_URSA_STORAGE_OXIA_SERVICE_URL: "oxia:6648"
+      KAFKA_URSA_STORAGE_BACKEND_TYPE: "S3"
+      KAFKA_URSA_STORAGE_S3_ENDPOINT: "http://localstack:4566"
+      KAFKA_URSA_STORAGE_S3_ACCESS_KEY: "test"
+      KAFKA_URSA_STORAGE_S3_SECRET_KEY: "test"
+      KAFKA_URSA_STORAGE_S3_BUCKET: "kafka-ursa"
+      KAFKA_URSA_STORAGE_S3_REGION: "us-east-1"
+      KAFKA_URSA_STORAGE_S3_PATH_STYLE_ACCESS: "true"
+      KAFKA_URSA_STORAGE_PATH: ""
+      KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE: "4096"
+      KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: "100"
+
+      KAFKA_JVM_PERFORMANCE_OPTS: >-
+        -Dursa.externalReaderFactoryClass=io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory
+        -DkopSchemaRegistryUrl=http://schema-registry:8001
+        -Daws.accessKeyId=test
+        -Daws.secretAccessKey=test
+    volumes:
+      - kafka-2-data:/var/lib/kafka/data
+
+  kafka-3:
+    image: ${IMAGE:-kafka-diskless:latest}
+    hostname: kafka-3
+    container_name: kafka-3
+    ports:
+      - 49092:9092
+    depends_on:
+      oxia:
+        condition: service_healthy
+      localstack-init:
+        condition: service_completed_successfully
+      schema-registry:
+        condition: service_started
+    environment:
+      KAFKA_NODE_ID: 3
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:19092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-3:19092,PLAINTEXT_HOST://localhost:49092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_LOG_DIRS: "/tmp/kraft-combined-logs"
+
+      KAFKA_URSA_STORAGE_ENABLE: "true"
+      KAFKA_URSA_STORAGE_OXIA_SERVICE_URL: "oxia:6648"
+      KAFKA_URSA_STORAGE_BACKEND_TYPE: "S3"
+      KAFKA_URSA_STORAGE_S3_ENDPOINT: "http://localstack:4566"
+      KAFKA_URSA_STORAGE_S3_ACCESS_KEY: "test"
+      KAFKA_URSA_STORAGE_S3_SECRET_KEY: "test"
+      KAFKA_URSA_STORAGE_S3_BUCKET: "kafka-ursa"
+      KAFKA_URSA_STORAGE_S3_REGION: "us-east-1"
+      KAFKA_URSA_STORAGE_S3_PATH_STYLE_ACCESS: "true"
+      KAFKA_URSA_STORAGE_PATH: ""
+      KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE: "4096"
+      KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: "100"
+
+      KAFKA_JVM_PERFORMANCE_OPTS: >-
+        -Dursa.externalReaderFactoryClass=io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory
+        -DkopSchemaRegistryUrl=http://schema-registry:8001
+        -Daws.accessKeyId=test
+        -Daws.secretAccessKey=test
+    volumes:
+      - kafka-3-data:/var/lib/kafka/data
+
+volumes:
+  oxia-data:
+  localstack-data:
+  kafka-1-data:
+  kafka-2-data:
+  kafka-3-data:

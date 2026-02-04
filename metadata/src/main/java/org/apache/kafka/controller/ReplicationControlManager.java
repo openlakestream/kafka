@@ -120,11 +120,13 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.function.IntPredicate;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.clients.admin.AlterConfigOp.OpType.SET;
 import static org.apache.kafka.common.config.ConfigResource.Type.TOPIC;
 import static org.apache.kafka.common.config.TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG;
+import static org.apache.kafka.common.config.TopicConfig.URSA_STORAGE_ENABLE_CONFIG;
 import static org.apache.kafka.common.protocol.Errors.FENCED_LEADER_EPOCH;
 import static org.apache.kafka.common.protocol.Errors.INELIGIBLE_REPLICA;
 import static org.apache.kafka.common.protocol.Errors.INVALID_REQUEST;
@@ -156,6 +158,7 @@ public class ReplicationControlManager {
         private LogContext logContext = null;
         private short defaultReplicationFactor = (short) 3;
         private int defaultNumPartitions = 1;
+        private boolean disklessStorageSystemEnabled = false;
 
         private int maxElectionsPerImbalance = MAX_ELECTIONS_PER_IMBALANCE;
         private ConfigurationControlManager configurationControl = null;
@@ -208,6 +211,11 @@ public class ReplicationControlManager {
             return this;
         }
 
+        public Builder setDisklessStorageSystemEnabled(boolean disklessStorageSystemEnabled) {
+            this.disklessStorageSystemEnabled = disklessStorageSystemEnabled;
+            return this;
+        }
+
         ReplicationControlManager build() {
             if (configurationControl == null) {
                 throw new IllegalStateException("Configuration control must be set before building");
@@ -227,7 +235,8 @@ public class ReplicationControlManager {
                 configurationControl,
                 clusterControl,
                 createTopicPolicy,
-                featureControl);
+                featureControl,
+                disklessStorageSystemEnabled);
         }
     }
 
@@ -321,6 +330,11 @@ public class ReplicationControlManager {
     private final FeatureControlManager featureControl;
 
     /**
+     * Whether diskless storage system is enabled at the cluster level.
+     */
+    private final boolean disklessStorageSystemEnabled;
+
+    /**
      * Maps topic names to topic UUIDs.
      */
     private final TimelineHashMap<String, Uuid> topicsByName;
@@ -387,7 +401,8 @@ public class ReplicationControlManager {
         ConfigurationControlManager configurationControl,
         ClusterControlManager clusterControl,
         Optional<CreateTopicPolicy> createTopicPolicy,
-        FeatureControlManager featureControl
+        FeatureControlManager featureControl,
+        boolean disklessStorageSystemEnabled
     ) {
         this.snapshotRegistry = snapshotRegistry;
         this.log = logContext.logger(ReplicationControlManager.class);
@@ -398,6 +413,7 @@ public class ReplicationControlManager {
         this.createTopicPolicy = createTopicPolicy;
         this.featureControl = featureControl;
         this.clusterControl = clusterControl;
+        this.disklessStorageSystemEnabled = disklessStorageSystemEnabled;
         this.topicsByName = new TimelineHashMap<>(snapshotRegistry, 0);
         this.topicsWithCollisionChars = new TimelineHashMap<>(snapshotRegistry, 0);
         this.topics = new TimelineHashMap<>(snapshotRegistry, 0);
@@ -718,6 +734,13 @@ public class ReplicationControlManager {
                                  boolean authorizedToReturnConfigs) {
         Map<String, String> creationConfigs = translateCreationConfigs(topic.configs());
         Map<Integer, PartitionRegistration> newParts = new HashMap<>();
+
+        DisklessCreateTopicResult disklessCreateTopicResult = prepareDisklessCreateTopic(topic, creationConfigs);
+        if (disklessCreateTopicResult.error != null) {
+            return disklessCreateTopicResult.error;
+        }
+        final boolean disklessEnabled = disklessCreateTopicResult.disklessEnabled;
+
         if (!topic.assignments().isEmpty()) {
             if (topic.replicationFactor() != -1) {
                 return new ApiError(INVALID_REQUEST,
@@ -774,20 +797,29 @@ public class ReplicationControlManager {
             int numPartitions = topic.numPartitions() == -1 ?
                 defaultNumPartitions : topic.numPartitions();
             short replicationFactor = topic.replicationFactor() == -1 ?
-                defaultReplicationFactor : topic.replicationFactor();
+                (disklessEnabled ? (short) 1 : defaultReplicationFactor) : topic.replicationFactor();
             try {
-                TopicAssignment topicAssignment = clusterControl.replicaPlacer().place(new PlacementSpec(
-                    0,
-                    numPartitions,
-                    replicationFactor
-                ), clusterDescriber);
+                TopicAssignment topicAssignment;
+                Predicate<Integer> brokerFilter;
+                if (!disklessEnabled) {
+                    topicAssignment = clusterControl.replicaPlacer().place(new PlacementSpec(
+                        0,
+                        numPartitions,
+                        replicationFactor
+                    ), clusterDescriber);
+                    brokerFilter = clusterControl::isActive;
+                } else {
+                    topicAssignment = createDisklessAssignment(numPartitions);
+                    if (topicAssignment == null) {
+                        return new ApiError(Errors.BROKER_NOT_AVAILABLE, "No brokers available to create diskless topic.");
+                    }
+                    brokerFilter = x -> true;
+                }
+
                 for (int partitionId = 0; partitionId < topicAssignment.assignments().size(); partitionId++) {
                     PartitionAssignment partitionAssignment = topicAssignment.assignments().get(partitionId);
                     List<Integer> isr = partitionAssignment.replicas().stream().
-                        filter(clusterControl::isActive).toList();
-                    // If the ISR is empty, it means that all brokers are fenced or
-                    // in controlled shutdown. To be consistent with the replica placer,
-                    // we reject the create topic request with INVALID_REPLICATION_FACTOR.
+                        filter(brokerFilter).toList();
                     if (isr.isEmpty()) {
                         return new ApiError(Errors.INVALID_REPLICATION_FACTOR,
                             "Unable to replicate the partition " + replicationFactor +
@@ -857,6 +889,51 @@ public class ReplicationControlManager {
         return ApiError.NONE;
     }
 
+    private DisklessCreateTopicResult prepareDisklessCreateTopic(CreatableTopic topic, Map<String, String> creationConfigs) {
+        String disklessEnableConfigValue = creationConfigs.get(URSA_STORAGE_ENABLE_CONFIG);
+        boolean disklessConfigEnabled = disklessEnableConfigValue != null && Boolean.parseBoolean(disklessEnableConfigValue);
+
+        if (Topic.isInternal(topic.name()) && disklessConfigEnabled) {
+            return DisklessCreateTopicResult.error(new ApiError(INVALID_REQUEST,
+                "Internal topics cannot be diskless topics."));
+        }
+
+        boolean disklessEnabled = disklessConfigEnabled && !Topic.isInternal(topic.name());
+        if (disklessEnabled) {
+            if (!disklessStorageSystemEnabled) {
+                return DisklessCreateTopicResult.error(new ApiError(INVALID_REQUEST,
+                    "Cannot create diskless topics " +
+                        "when the diskless storage system is disabled. " +
+                        "Please enable the diskless storage system to create diskless topics."));
+            }
+            if (Math.abs(topic.replicationFactor()) != 1) {
+                return DisklessCreateTopicResult.error(new ApiError(Errors.INVALID_REPLICATION_FACTOR,
+                    "Replication factor for diskless topics must be 1 or -1 to use the default value (1)."));
+            }
+            topic.assignments().clear();
+        }
+
+        return DisklessCreateTopicResult.success(disklessEnabled);
+    }
+
+    private static final class DisklessCreateTopicResult {
+        final boolean disklessEnabled;
+        final ApiError error;
+
+        private DisklessCreateTopicResult(boolean disklessEnabled, ApiError error) {
+            this.disklessEnabled = disklessEnabled;
+            this.error = error;
+        }
+
+        static DisklessCreateTopicResult success(boolean disklessEnabled) {
+            return new DisklessCreateTopicResult(disklessEnabled, null);
+        }
+
+        static DisklessCreateTopicResult error(ApiError error) {
+            return new DisklessCreateTopicResult(false, error);
+        }
+    }
+
     private static PartitionRegistration buildPartitionRegistration(
         PartitionAssignment partitionAssignment,
         List<Integer> isr
@@ -888,6 +965,20 @@ public class ReplicationControlManager {
             }
         }
         return ApiError.NONE;
+    }
+
+    private TopicAssignment createDisklessAssignment(int numPartitions) {
+        final Iterator<UsableBroker> usableBrokers = clusterControl.usableBrokers();
+        if (!usableBrokers.hasNext()) {
+            return null;
+        }
+        final int brokerId = usableBrokers.next().id();
+
+        List<PartitionAssignment> assignments = new ArrayList<>();
+        for (int partition = 0; partition < numPartitions; partition++) {
+            assignments.add(new PartitionAssignment(List.of(brokerId), clusterDescriber));
+        }
+        return new TopicAssignment(assignments);
     }
 
     static void validateNewTopicNames(Map<String, ApiError> topicErrors,

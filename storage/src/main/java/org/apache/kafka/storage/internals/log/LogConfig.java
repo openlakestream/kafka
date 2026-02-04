@@ -190,7 +190,29 @@ public class LogConfig extends AbstractConfig {
             .define(ServerLogConfigs.CREATE_TOPIC_POLICY_CLASS_NAME_CONFIG, CLASS, null, LOW, ServerLogConfigs.CREATE_TOPIC_POLICY_CLASS_NAME_DOC)
             .define(ServerLogConfigs.ALTER_CONFIG_POLICY_CLASS_NAME_CONFIG, CLASS, null, LOW, ServerLogConfigs.ALTER_CONFIG_POLICY_CLASS_NAME_DOC)
             .define(ServerLogConfigs.LOG_DIR_FAILURE_TIMEOUT_MS_CONFIG, LONG, ServerLogConfigs.LOG_DIR_FAILURE_TIMEOUT_MS_DEFAULT, atLeast(1), LOW, ServerLogConfigs.LOG_DIR_FAILURE_TIMEOUT_MS_DOC)
-            .defineInternal(ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_CONFIG, LONG, ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_DEFAULT, atLeast(0), LOW, ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_DOC);
+            .defineInternal(ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_CONFIG, LONG, ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_DEFAULT, atLeast(0), LOW, ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_DOC)
+            // Ursa Storage configurations
+            .define(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG, BOOLEAN, ServerLogConfigs.URSA_STORAGE_ENABLE_DEFAULT, HIGH, ServerLogConfigs.URSA_STORAGE_ENABLE_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_DEFAULT,
+                    new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_DEFAULT,
+                    new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_NAMESPACE_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_NAMESPACE_DEFAULT,
+                    new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_NAMESPACE_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_DEFAULT,
+                    ConfigDef.ValidString.in("LOCAL", "S3", "AZURE_BLOB"),
+                    LOW, ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_PATH_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_PATH_DEFAULT,
+                    new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_PATH_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_CONFIG, LONG, ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DEFAULT, atLeast(0), LOW, ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_CONFIG, LONG, ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DEFAULT, atLeast(0), LOW, ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_DEFAULT, LOW, ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_S3_ACCESS_KEY_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_S3_ACCESS_KEY_DEFAULT, LOW, ServerLogConfigs.URSA_STORAGE_S3_ACCESS_KEY_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_S3_SECRET_KEY_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_S3_SECRET_KEY_DEFAULT, LOW, ServerLogConfigs.URSA_STORAGE_S3_SECRET_KEY_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_S3_BUCKET_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_S3_BUCKET_DEFAULT,
+                    new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_S3_BUCKET_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_S3_REGION_DEFAULT,
+                    new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_S3_REGION_DOC);
 
     private static final LogConfigDef CONFIG = new LogConfigDef();
     static {
@@ -263,6 +285,7 @@ public class LogConfig extends AbstractConfig {
                 .define(TopicConfig.REMOTE_COPY_LAG_BYTES_CONFIG, LONG, RemoteLogManagerConfig.DEFAULT_LOG_REMOTE_COPY_LAG_BYTES, atLeast(RemoteLogManagerConfig.MAX_LOG_REMOTE_COPY_LAG_BYTES), MEDIUM, TopicConfig.REMOTE_COPY_LAG_BYTES_DOC)
                 .define(TopicConfig.REMOTE_LOG_DELETE_ON_DISABLE_CONFIG, BOOLEAN, DEFAULT_REMOTE_LOG_DELETE_ON_DISABLE, MEDIUM, TopicConfig.REMOTE_LOG_DELETE_ON_DISABLE_DOC)
                 .define(TopicConfig.ERRORS_DEADLETTERQUEUE_GROUP_ENABLE_CONFIG, BOOLEAN, DEFAULT_ERRORS_DEADLETTERQUEUE_GROUP_ENABLE, MEDIUM, TopicConfig.ERRORS_DEADLETTERQUEUE_GROUP_ENABLE_DOC)
+                .define(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, BOOLEAN, false, MEDIUM, TopicConfig.URSA_STORAGE_ENABLE_DOC)
                 .defineInternal(INTERNAL_SEGMENT_BYTES_CONFIG, INT, null, null, MEDIUM, INTERNAL_SEGMENT_BYTES_DOC);
     }
 

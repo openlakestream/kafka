@@ -341,6 +341,9 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _], enforceProv
   val unstableApiVersionsEnabled = getBoolean(ServerConfigs.UNSTABLE_API_VERSIONS_ENABLE_CONFIG)
   val unstableFeatureVersionsEnabled = getBoolean(ServerConfigs.UNSTABLE_FEATURE_VERSIONS_ENABLE_CONFIG)
 
+  /** Diskless Storage Configurations **/
+  val ursaStorageEnable: Boolean = getBoolean(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG)
+
   override def addReconfigurable(reconfigurable: Reconfigurable): Unit = {
     dynamicConfig.addReconfigurable(reconfigurable)
   }

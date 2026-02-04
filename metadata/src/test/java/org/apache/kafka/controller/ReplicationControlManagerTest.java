@@ -128,6 +128,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.apache.kafka.common.config.TopicConfig.SEGMENT_BYTES_CONFIG;
+import static org.apache.kafka.common.config.TopicConfig.URSA_STORAGE_ENABLE_CONFIG;
 import static org.apache.kafka.common.metadata.MetadataRecordType.CLEAR_ELR_RECORD;
 import static org.apache.kafka.common.protocol.Errors.ELECTION_NOT_NEEDED;
 import static org.apache.kafka.common.protocol.Errors.ELIGIBLE_LEADERS_NOT_AVAILABLE;
@@ -174,6 +175,7 @@ public class ReplicationControlManagerTest {
             private MetadataVersion metadataVersion = MetadataVersion.latestTesting();
             private MockTime mockTime = new MockTime();
             private boolean isElrEnabled = false;
+            private boolean disklessStorageSystemEnabled = false;
             private final Map<String, Object> staticConfig = new HashMap<>();
 
             Builder setCreateTopicPolicy(CreateTopicPolicy createTopicPolicy) {
@@ -188,6 +190,11 @@ public class ReplicationControlManagerTest {
 
             Builder setIsElrEnabled(boolean isElrEnabled) {
                 this.isElrEnabled = isElrEnabled;
+                return this;
+            }
+
+            Builder setDisklessStorageSystemEnabled(boolean disklessStorageSystemEnabled) {
+                this.disklessStorageSystemEnabled = disklessStorageSystemEnabled;
                 return this;
             }
 
@@ -206,6 +213,7 @@ public class ReplicationControlManagerTest {
                     createTopicPolicy,
                     mockTime,
                     isElrEnabled,
+                    disklessStorageSystemEnabled,
                     staticConfig);
             }
         }
@@ -231,6 +239,7 @@ public class ReplicationControlManagerTest {
             Optional<CreateTopicPolicy> createTopicPolicy,
             MockTime time,
             boolean isElrEnabled,
+            boolean disklessStorageSystemEnabled,
             Map<String, Object> staticConfig
         ) {
             this.time = time;
@@ -275,6 +284,7 @@ public class ReplicationControlManagerTest {
                 setClusterControl(clusterControl).
                 setCreateTopicPolicy(createTopicPolicy).
                 setFeatureControl(featureControl).
+                setDisklessStorageSystemEnabled(disklessStorageSystemEnabled).
                 build();
             clusterControl.activate();
         }
@@ -3712,5 +3722,154 @@ public class ReplicationControlManagerTest {
         int partitionEpoch = ctx.replicationControl.getPartition(fooId, 0).partitionEpoch;
         ctx.replay(List.of(new ApiMessageAndVersion(new ClearElrRecord(), CLEAR_ELR_RECORD.highestSupportedVersion())));
         assertEquals(partitionEpoch, ctx.replicationControl.getPartition(fooId, 0).partitionEpoch);
+    }
+
+    @Test
+    public void testCreateDisklessTopicWithDefaultReplicationFactor() {
+        ReplicationControlTestContext ctx = new ReplicationControlTestContext.Builder().
+            setDisklessStorageSystemEnabled(true).
+            build();
+        ctx.registerBrokers(0, 1, 2);
+        ctx.unfenceBrokers(0, 1, 2);
+
+        CreateTopicsRequestData request = new CreateTopicsRequestData();
+        CreatableTopic topic = new CreatableTopic().setName("diskless-topic").
+            setNumPartitions(3).setReplicationFactor((short) -1);
+        topic.configs().add(new CreateTopicsRequestData.CreatableTopicConfig().
+            setName(URSA_STORAGE_ENABLE_CONFIG).setValue("true"));
+        request.topics().add(topic);
+
+        ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
+        ControllerResult<CreateTopicsResponseData> result =
+            ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"));
+
+        CreatableTopicResult topicResult = result.response().topics().find("diskless-topic");
+        assertNotNull(topicResult);
+        assertEquals(NONE.code(), topicResult.errorCode());
+        assertEquals(3, topicResult.numPartitions());
+        assertEquals(1, topicResult.replicationFactor());
+
+        ctx.replay(result.records());
+
+        Uuid topicId = topicResult.topicId();
+        for (int partition = 0; partition < 3; partition++) {
+            PartitionRegistration partitionReg = ctx.replicationControl.getPartition(topicId, partition);
+            assertNotNull(partitionReg);
+            assertEquals(1, partitionReg.replicas.length);
+            assertEquals(1, partitionReg.isr.length);
+        }
+    }
+
+    @Test
+    public void testCreateDisklessTopicWithExplicitReplicationFactor1() {
+        ReplicationControlTestContext ctx = new ReplicationControlTestContext.Builder().
+            setDisklessStorageSystemEnabled(true).
+            build();
+        ctx.registerBrokers(0, 1, 2);
+        ctx.unfenceBrokers(0, 1, 2);
+
+        CreateTopicsRequestData request = new CreateTopicsRequestData();
+        CreatableTopic topic = new CreatableTopic().setName("diskless-topic").
+            setNumPartitions(2).setReplicationFactor((short) 1);
+        topic.configs().add(new CreateTopicsRequestData.CreatableTopicConfig().
+            setName(URSA_STORAGE_ENABLE_CONFIG).setValue("true"));
+        request.topics().add(topic);
+
+        ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
+        ControllerResult<CreateTopicsResponseData> result =
+            ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"));
+
+        CreatableTopicResult topicResult = result.response().topics().find("diskless-topic");
+        assertNotNull(topicResult);
+        assertEquals(NONE.code(), topicResult.errorCode());
+        assertEquals(2, topicResult.numPartitions());
+        assertEquals(1, topicResult.replicationFactor());
+    }
+
+    @Test
+    public void testCreateDisklessTopicWithInvalidReplicationFactor() {
+        ReplicationControlTestContext ctx = new ReplicationControlTestContext.Builder().
+            setDisklessStorageSystemEnabled(true).
+            build();
+        ctx.registerBrokers(0, 1, 2);
+        ctx.unfenceBrokers(0, 1, 2);
+
+        CreateTopicsRequestData request = new CreateTopicsRequestData();
+        CreatableTopic topic = new CreatableTopic().setName("diskless-topic").
+            setNumPartitions(2).setReplicationFactor((short) 3);
+        topic.configs().add(new CreateTopicsRequestData.CreatableTopicConfig().
+            setName(URSA_STORAGE_ENABLE_CONFIG).setValue("true"));
+        request.topics().add(topic);
+
+        ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
+        ControllerResult<CreateTopicsResponseData> result =
+            ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"));
+
+        CreatableTopicResult topicResult = result.response().topics().find("diskless-topic");
+        assertNotNull(topicResult);
+        assertEquals(INVALID_REPLICATION_FACTOR.code(), topicResult.errorCode());
+        assertEquals("Replication factor for diskless topics must be 1 or -1 to use the default value (1).",
+            topicResult.errorMessage());
+    }
+
+    @Test
+    public void testCreateDisklessTopicWithPolicyReceivesCorrectReplicationFactor() {
+        AtomicLong policyReplicationFactor = new AtomicLong(-1);
+        CreateTopicPolicy policy = new CreateTopicPolicy() {
+            @Override
+            public void validate(RequestMetadata requestMetadata) throws PolicyViolationException {
+                policyReplicationFactor.set(requestMetadata.replicationFactor());
+            }
+
+            @Override
+            public void close() { }
+
+            @Override
+            public void configure(Map<String, ?> configs) { }
+        };
+
+        ReplicationControlTestContext ctx = new ReplicationControlTestContext.Builder().
+            setDisklessStorageSystemEnabled(true).
+            setCreateTopicPolicy(policy).
+            build();
+        ctx.registerBrokers(0, 1, 2);
+        ctx.unfenceBrokers(0, 1, 2);
+
+        CreateTopicsRequestData request = new CreateTopicsRequestData();
+        CreatableTopic topic = new CreatableTopic().setName("diskless-topic").
+            setNumPartitions(2).setReplicationFactor((short) -1);
+        topic.configs().add(new CreateTopicsRequestData.CreatableTopicConfig().
+            setName(URSA_STORAGE_ENABLE_CONFIG).setValue("true"));
+        request.topics().add(topic);
+
+        ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
+        ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"));
+
+        assertEquals(1, policyReplicationFactor.get());
+    }
+
+    @Test
+    public void testCreateDisklessTopicWithoutSystemEnabled() {
+        ReplicationControlTestContext ctx = new ReplicationControlTestContext.Builder().
+            setDisklessStorageSystemEnabled(false).
+            build();
+        ctx.registerBrokers(0, 1, 2);
+        ctx.unfenceBrokers(0, 1, 2);
+
+        CreateTopicsRequestData request = new CreateTopicsRequestData();
+        CreatableTopic topic = new CreatableTopic().setName("diskless-topic").
+            setNumPartitions(2).setReplicationFactor((short) -1);
+        topic.configs().add(new CreateTopicsRequestData.CreatableTopicConfig().
+            setName(URSA_STORAGE_ENABLE_CONFIG).setValue("true"));
+        request.topics().add(topic);
+
+        ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
+        ControllerResult<CreateTopicsResponseData> result =
+            ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"));
+
+        CreatableTopicResult topicResult = result.response().topics().find("diskless-topic");
+        assertNotNull(topicResult);
+        assertEquals(Errors.INVALID_REQUEST.code(), topicResult.errorCode());
+        assertTrue(topicResult.errorMessage().contains("diskless storage system is disabled"));
     }
 }
