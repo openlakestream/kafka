@@ -29,6 +29,7 @@ import org.apache.kafka.metadata.MetadataCache;
 import org.apache.kafka.server.DelayedActionQueue;
 import org.apache.kafka.server.common.DirectoryEventHandler;
 import org.apache.kafka.server.util.Scheduler;
+import org.apache.kafka.storage.diskless.DisklessStorageReplicaManagerSupport;
 import org.apache.kafka.storage.internals.log.LogDirFailureChannel;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
@@ -47,6 +48,7 @@ public class ReplicaManagerBuilder {
     private LogDirFailureChannel logDirFailureChannel = null;
     private AlterPartitionManager alterPartitionManager = null;
     private BrokerTopicStats brokerTopicStats = null;
+    private DisklessStorageReplicaManagerSupport disklessStorageSupport = null;
 
     public ReplicaManagerBuilder setConfig(KafkaConfig config) {
         this.config = config;
@@ -98,6 +100,11 @@ public class ReplicaManagerBuilder {
         return this;
     }
 
+    public ReplicaManagerBuilder setDirectStorageSupport(DisklessStorageReplicaManagerSupport disklessStorageSupport) {
+        this.disklessStorageSupport = disklessStorageSupport;
+        return this;
+    }
+
     public ReplicaManager build() {
         if (config == null) config = new KafkaConfig(Map.of());
         if (logManager == null) throw new IllegalStateException("You must set logManager");
@@ -105,6 +112,7 @@ public class ReplicaManagerBuilder {
         if (logDirFailureChannel == null) throw new IllegalStateException("You must set logDirFailureChannel");
         if (alterPartitionManager == null) throw new IllegalStateException("You must set alterIsrManager");
         if (brokerTopicStats == null) brokerTopicStats = new BrokerTopicStats(config.remoteLogManagerConfig().isRemoteStorageSystemEnabled());
+        if (disklessStorageSupport == null) disklessStorageSupport = new DisklessStorageReplicaManagerSupport();
         // Initialize metrics in the end just before passing it to ReplicaManager to ensure ReplicaManager closes the
         // metrics correctly. There might be a resource leak if it is initialized and an exception occurs between
         // its initialization and creation of ReplicaManager.
@@ -129,6 +137,7 @@ public class ReplicaManagerBuilder {
                              () ->  -1L,
                              Option.empty(),
                              DirectoryEventHandler.NOOP,
-                             new DelayedActionQueue());
+                             new DelayedActionQueue(),
+                             disklessStorageSupport);
     }
 }

@@ -56,6 +56,14 @@ inputs:
     description: "Run tests marked as flaky"
     required: true
     default: "false"
+  max-parallel-forks:
+    description: "Value for -PmaxParallelForks"
+    required: false
+    default: "4"
+  gradle-args:
+    description: "Extra arguments appended to the Gradle invocation (space-separated)"
+    required: false
+    default: ""
 
 outputs:
   gradle-exitcode:
@@ -83,15 +91,22 @@ runs:
         RUN_FLAKY_TESTS: ${{ inputs.run-flaky-tests }}
         TEST_XML_OUTPUT_DIR: ${{ inputs.test-xml-output }}
         TEST_VERBOSE: ${{ inputs.test-verbose }}
+        MAX_PARALLEL_FORKS: ${{ inputs.max-parallel-forks }}
+        GRADLE_ARGS: ${{ inputs.gradle-args }}
       # This build step is invoked by build.yml to run junit tests only,
       # Spotbugs is being run by that workflow via the "check" task and does not need to also be run here,
       # since that is redundant.
       run: |
         set +e
+        EXTRA_GRADLE_ARGS=()
+        if [ -n "$GRADLE_ARGS" ]; then
+          # shellcheck disable=SC2206
+          EXTRA_GRADLE_ARGS=($GRADLE_ARGS)
+        fi
         ./.github/scripts/thread-dump.sh &
         timeout ${TIMEOUT_MINUTES}m ./gradlew --build-cache --continue --no-scan \
         -PtestLoggingEvents=started,passed,skipped,failed \
-        -PmaxParallelForks=4 \
+        -PmaxParallelForks=$MAX_PARALLEL_FORKS \
         -PmaxTestRetries=$TEST_RETRIES -PmaxTestRetryFailures=10 \
         -Pkafka.test.catalog.file=$TEST_CATALOG \
         -Pkafka.test.run.new=$RUN_NEW_TESTS \
@@ -102,6 +117,7 @@ runs:
         -PcommitId=xxxxxxxxxxxxxxxx \
         -x spotbugsMain \
         -x spotbugsTest \
+        "${EXTRA_GRADLE_ARGS[@]}" \
         $TEST_TASK
         exitcode="$?"
         echo "exitcode=$exitcode" >> $GITHUB_OUTPUT

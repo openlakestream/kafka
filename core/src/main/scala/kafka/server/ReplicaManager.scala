@@ -70,6 +70,8 @@ import org.apache.kafka.server.{ActionQueue, DelayedActionQueue, HostedPartition
 import org.apache.kafka.storage.internals.checkpoint.{LazyOffsetCheckpoints, OffsetCheckpointFile, OffsetCheckpoints}
 import org.apache.kafka.storage.internals.log.{AppendOrigin, FetchDataInfo, FetchPartitionStatus, LeaderHwChange, LogAppendInfo, LogConfig, LogDirFailureChannel, LogOffsetMetadata, LogReadInfo, LogReadResult, OffsetResultHolder, RecordValidationException, RecordValidationStats, RemoteLogReadResult, RemoteStorageFetchInfo, UnifiedLog, VerificationGuard}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
+import org.apache.kafka.storage.diskless.{DisklessStorageReplicaManagerSupport, ListOffsetsPartitionRequest}
+import org.apache.kafka.storage.diskless.{ListOffsetsPartitionResponse => DirectStorageListOffsetsResponse}
 
 import java.io.File
 import java.lang.{Long => JLong}
@@ -170,7 +172,8 @@ class ReplicaManager(val config: KafkaConfig,
                      val brokerEpochSupplier: () => Long = () => -1,
                      addPartitionsToTxnManager: Option[AddPartitionsToTxnManager] = None,
                      val directoryEventHandler: DirectoryEventHandler = DirectoryEventHandler.NOOP,
-                     val defaultActionQueue: ActionQueue = new DelayedActionQueue
+                     val defaultActionQueue: ActionQueue = new DelayedActionQueue,
+                     val disklessStorageSupport: DisklessStorageReplicaManagerSupport = new DisklessStorageReplicaManagerSupport()
                      ) extends Logging {
   // Changing the package or class name may cause incompatibility with existing code and metrics configuration
   private val metricsPackage = "kafka.server"
@@ -649,11 +652,59 @@ class ReplicaManager(val config: KafkaConfig,
       return
     }
 
+    val responseCallbackOnRequestThread: Map[TopicIdPartition, PartitionResponse] => Unit =
+      try {
+        KafkaRequestHandler.wrapAsyncCallback[Map[TopicIdPartition, PartitionResponse]](
+          (_, responses) => responseCallback(responses),
+          requestLocal
+        )
+      } catch {
+        case _: IllegalStateException => responseCallback
+      }
+
+    val requestOrder = entriesPerPartition.keys.toSeq
+
+    // Partition entries by storage mode: diskless storage vs classic
+    val partitionedEntries = disklessStorageSupport.partitionAppendEntries(entriesPerPartition.asJava)
+    val disklessEntries = partitionedEntries.diskless().asScala.toMap
+    val classicEntries = partitionedEntries.classic().asScala.toMap
+
+    // Handle diskless storage entries asynchronously
+    val disklessResponsesFuture: CompletableFuture[util.Map[TopicIdPartition, PartitionResponse]] = 
+      if (disklessEntries.nonEmpty) {
+        debug(s"Diskless storage append path: ${disklessEntries.size} partitions")
+        disklessStorageSupport.handleAppend(disklessEntries.asJava)
+      } else {
+        CompletableFuture.completedFuture(util.Map.of[TopicIdPartition, PartitionResponse]())
+      }
+
+    // Callback wrapper to combine diskless and classic results
+    def classicResponseCallback(classicResult: Map[TopicIdPartition, PartitionResponse]): Unit = {
+      disklessResponsesFuture.whenComplete { case (result, e) =>
+        val disklessResult: Map[TopicIdPartition, PartitionResponse] = if (result != null) result.asScala.toMap else {
+          error("Diskless storage append future failed", e)
+          disklessEntries.map { case (tp, _) => tp -> new PartitionResponse(Errors.UNKNOWN_SERVER_ERROR) }
+        }
+
+        // Preserve the original request order (as much as the input Map provides).
+        val combinedSeq = requestOrder.map { tp =>
+          tp -> disklessResult.getOrElse(tp, classicResult.getOrElse(tp, new PartitionResponse(Errors.UNKNOWN_SERVER_ERROR)))
+        }
+        responseCallbackOnRequestThread(immutable.ListMap.from(combinedSeq))
+      }
+    }
+
+    // If only diskless entries exist, no need for classic path
+    if (classicEntries.isEmpty) {
+      classicResponseCallback(Map.empty)
+      return
+    }
+
     val localProduceResults = appendRecordsToLeader(
       requiredAcks,
       internalTopicsAllowed,
       origin,
-      entriesPerPartition,
+      classicEntries,
       requestLocal,
       defaultActionQueue,
       verificationGuards,
@@ -669,10 +720,10 @@ class ReplicaManager(val config: KafkaConfig,
     maybeAddDelayedProduce(
       requiredAcks,
       timeout,
-      entriesPerPartition,
+      classicEntries,
       localProduceResults,
       produceStatus,
-      responseCallback
+      classicResponseCallback
     )
   }
 
@@ -1465,6 +1516,170 @@ class ReplicaManager(val config: KafkaConfig,
                   buildErrorResponse: (Errors, ListOffsetsPartition) => ListOffsetsPartitionResponse,
                   responseCallback: Consumer[util.Collection[ListOffsetsTopicResponse]],
                   timeoutMs: Int = 0): Unit = {
+
+    // Partition topics by storage mode: diskless storage vs classic
+    val disklessStorageRequests = new util.HashMap[TopicIdPartition, ListOffsetsPartitionRequest]()
+    val disklessStoragePartitionInfo = new util.HashMap[TopicIdPartition, ListOffsetsPartition]()
+    // Pre-computed error responses for diskless partitions (duplicates, unsupported timestamps)
+    val disklessErrorResponses = new util.HashMap[TopicPartition, ListOffsetsPartitionResponse]()
+    val classicTopics = mutable.ListBuffer[ListOffsetsTopic]()
+
+    topics.foreach { topic =>
+      if (disklessStorageSupport.isDisklessStorageTopic(topic.name)) {
+        // Collect diskless storage partitions with validation
+        topic.partitions.asScala.foreach { partition =>
+          val tp = new TopicPartition(topic.name, partition.partitionIndex)
+          val tip = topicIdPartition(tp)
+          if (duplicatePartitions.contains(tp)) {
+            // Duplicate partition in request - return INVALID_REQUEST
+            debug(s"OffsetRequest with correlation id $correlationId from client $clientId on partition $tp " +
+              s"failed because the partition is duplicated in the request.")
+            disklessErrorResponses.put(tp, buildErrorResponse(Errors.INVALID_REQUEST, partition))
+            disklessStoragePartitionInfo.put(tip, partition)
+          } else if (isListOffsetsTimestampUnsupported(partition.timestamp(), version)) {
+            // Unsupported timestamp for this request version - return UNSUPPORTED_VERSION
+            disklessErrorResponses.put(tp, buildErrorResponse(Errors.UNSUPPORTED_VERSION, partition))
+            disklessStoragePartitionInfo.put(tip, partition)
+          } else {
+            val currentLeaderEpoch = if (partition.currentLeaderEpoch == ListOffsetsResponse.UNKNOWN_EPOCH)
+              Optional.empty[Integer]()
+            else
+              Optional.of(Integer.valueOf(partition.currentLeaderEpoch))
+            disklessStorageRequests.put(tip,
+              new ListOffsetsPartitionRequest(tip, partition.timestamp, currentLeaderEpoch))
+            disklessStoragePartitionInfo.put(tip, partition)
+          }
+        }
+      } else {
+        classicTopics += topic
+      }
+    }
+
+    if (disklessStorageRequests.isEmpty && disklessErrorResponses.isEmpty) {
+      fetchOffsetClassic(classicTopics.toSeq, duplicatePartitions, isolationLevel, replicaId,
+        clientId, correlationId, version, buildErrorResponse, responseCallback, timeoutMs)
+      return
+    }
+
+    val disklessFetchFuture: CompletableFuture[util.Map[TopicIdPartition, DirectStorageListOffsetsResponse]] =
+      if (disklessStorageRequests.isEmpty) {
+        CompletableFuture.completedFuture(new util.HashMap[TopicIdPartition, DirectStorageListOffsetsResponse]())
+      } else {
+        disklessStorageSupport.handleListOffsets(disklessStorageRequests)
+      }
+
+    if (classicTopics.isEmpty) {
+      disklessFetchFuture.whenComplete { case (result, e) =>
+        val storageResponses: Map[TopicPartition, ListOffsetsPartitionResponse] = if (result != null) {
+          result.asScala.map { case (tip, resp) =>
+            val kafkaResponse = new ListOffsetsPartitionResponse()
+              .setPartitionIndex(tip.partition)
+              .setErrorCode(resp.error.code)
+              .setTimestamp(resp.timestamp)
+              .setOffset(resp.offset)
+            if (resp.leaderEpoch >= 0 && version >= 4) {
+              kafkaResponse.setLeaderEpoch(resp.leaderEpoch)
+            }
+            tip.topicPartition -> kafkaResponse
+          }.toMap
+        } else {
+          error("Diskless storage listOffsets future failed", e)
+          disklessStorageRequests.asScala.map { case (tip, _) =>
+            val partition = disklessStoragePartitionInfo.get(tip)
+            tip.topicPartition -> buildErrorResponse(Errors.UNKNOWN_SERVER_ERROR, partition)
+          }.toMap
+        }
+
+        val allPartitionResponses = storageResponses ++ disklessErrorResponses.asScala
+
+        // Preserve topic/partition request order.
+        val orderedTopics = topics.map { topic =>
+          val seenPartitions = mutable.HashSet.empty[Int]
+          val orderedPartitions = topic.partitions.asScala.flatMap { partition =>
+            if (seenPartitions.add(partition.partitionIndex)) {
+              val tp = new TopicPartition(topic.name, partition.partitionIndex)
+              Some(allPartitionResponses.getOrElse(tp, buildErrorResponse(Errors.UNKNOWN_SERVER_ERROR, partition)))
+            } else {
+              None
+            }
+          }
+          new ListOffsetsTopicResponse().setName(topic.name).setPartitions(orderedPartitions.asJava)
+        }
+
+        responseCallback.accept(orderedTopics.asJava)
+      }
+      return
+    }
+
+    val classicResponseCallback: Consumer[util.Collection[ListOffsetsTopicResponse]] = { classicResult =>
+      disklessFetchFuture.whenComplete { case (result, e) =>
+        val storageResponses: Map[TopicPartition, ListOffsetsPartitionResponse] = if (result != null) {
+          result.asScala.map { case (tip, resp) =>
+            val kafkaResponse = new ListOffsetsPartitionResponse()
+              .setPartitionIndex(tip.partition)
+              .setErrorCode(resp.error.code)
+              .setTimestamp(resp.timestamp)
+              .setOffset(resp.offset)
+            if (resp.leaderEpoch >= 0 && version >= 4) {
+              kafkaResponse.setLeaderEpoch(resp.leaderEpoch)
+            }
+            tip.topicPartition -> kafkaResponse
+          }.toMap
+        } else {
+          error("Diskless storage listOffsets future failed", e)
+          disklessStorageRequests.asScala.map { case (tip, _) =>
+            val partition = disklessStoragePartitionInfo.get(tip)
+            tip.topicPartition -> buildErrorResponse(Errors.UNKNOWN_SERVER_ERROR, partition)
+          }.toMap
+        }
+
+        val allDisklessResponses = storageResponses ++ disklessErrorResponses.asScala
+
+        // Flatten classic results to partition-level responses for ordered reconstruction.
+        val classicPartitionResponses: Map[TopicPartition, ListOffsetsPartitionResponse] =
+          classicResult.asScala.flatMap { topicResp =>
+            topicResp.partitions.asScala.map { partitionResp =>
+              new TopicPartition(topicResp.name, partitionResp.partitionIndex) -> partitionResp
+            }
+          }.toMap
+
+        val allPartitionResponses = classicPartitionResponses ++ allDisklessResponses
+
+        // Preserve topic/partition request order across classic + diskless topics.
+        val orderedTopics = topics.map { topic =>
+          val seenPartitions = mutable.HashSet.empty[Int]
+          val orderedPartitions = topic.partitions.asScala.flatMap { partition =>
+            if (seenPartitions.add(partition.partitionIndex)) {
+              val tp = new TopicPartition(topic.name, partition.partitionIndex)
+              Some(allPartitionResponses.getOrElse(tp, buildErrorResponse(Errors.UNKNOWN_SERVER_ERROR, partition)))
+            } else {
+              None
+            }
+          }
+          new ListOffsetsTopicResponse().setName(topic.name).setPartitions(orderedPartitions.asJava)
+        }
+
+        responseCallback.accept(orderedTopics.asJava)
+      }
+    }
+
+    fetchOffsetClassic(classicTopics.toSeq, duplicatePartitions, isolationLevel, replicaId,
+      clientId, correlationId, version, buildErrorResponse, classicResponseCallback, timeoutMs)
+  }
+
+  /**
+   * Classic fetchOffset implementation for non-DirectStorage partitions.
+   */
+  private def fetchOffsetClassic(topics: Seq[ListOffsetsTopic],
+                  duplicatePartitions: Set[TopicPartition],
+                  isolationLevel: IsolationLevel,
+                  replicaId: Int,
+                  clientId: String,
+                  correlationId: Int,
+                  version: Short,
+                  buildErrorResponse: (Errors, ListOffsetsPartition) => ListOffsetsPartitionResponse,
+                  responseCallback: Consumer[util.Collection[ListOffsetsTopicResponse]],
+                  timeoutMs: Int): Unit = {
     val statusByPartition = mutable.Map[TopicPartition, ListOffsetsPartitionStatus]()
     topics.foreach { topic =>
       topic.partitions.asScala.foreach { partition =>
@@ -1665,6 +1880,80 @@ class ReplicaManager(val config: KafkaConfig,
                     fetchInfos: Seq[(TopicIdPartition, PartitionData)],
                     quota: ReplicaQuota,
                     responseCallback: Seq[(TopicIdPartition, FetchPartitionData)] => Unit): Unit = {
+
+    // Partition fetch infos by storage mode: diskless storage vs classic
+    val requestOrder = fetchInfos.map(_._1)
+    val fetchInfosMap = new util.LinkedHashMap[TopicIdPartition, PartitionData](fetchInfos.size)
+    fetchInfos.foreach { case (tp, data) => fetchInfosMap.put(tp, data) }
+    val partitionedFetchInfos = disklessStorageSupport.partitionFetchInfos(fetchInfosMap)
+    val disklessFetchInfos = partitionedFetchInfos.diskless().asScala.toSeq
+    val classicFetchInfos = partitionedFetchInfos.classic().asScala.toSeq
+
+    if (disklessFetchInfos.nonEmpty) {
+      debug(s"Diskless storage fetch path: ${disklessFetchInfos.size} partitions")
+    }
+
+    // Handle diskless storage fetches asynchronously
+    val disklessFetchFuture: CompletableFuture[util.Map[TopicIdPartition, FetchPartitionData]] =
+      if (disklessFetchInfos.nonEmpty) {
+        disklessStorageSupport.handleFetch(params, partitionedFetchInfos.diskless())
+      } else {
+        CompletableFuture.completedFuture(util.Map.of[TopicIdPartition, FetchPartitionData]())
+      }
+
+    def unknownErrorPartitionData: FetchPartitionData =
+      new FetchPartitionData(Errors.UNKNOWN_SERVER_ERROR, 0, 0, MemoryRecords.EMPTY,
+        Optional.empty(), OptionalLong.empty(), Optional.empty(), OptionalInt.empty(), false)
+
+    // If only diskless entries exist, handle and return
+    if (classicFetchInfos.isEmpty) {
+      disklessFetchFuture.whenComplete { case (result, e) =>
+        val directMap: Map[TopicIdPartition, FetchPartitionData] = if (result != null) {
+          result.asScala.toMap
+        } else {
+          error("Diskless storage fetch future failed", e)
+          disklessFetchInfos.map { case (tp, _) => tp -> unknownErrorPartitionData }.toMap
+        }
+
+        val orderedResult = requestOrder.map { tp =>
+          tp -> directMap.getOrElse(tp, unknownErrorPartitionData)
+        }
+        responseCallback(orderedResult)
+      }
+      return
+    }
+
+    // Wrapper callback to combine direct and classic results
+    def classicResponseCallback(classicResult: Seq[(TopicIdPartition, FetchPartitionData)]): Unit = {
+      disklessFetchFuture.whenComplete { case (result, e) =>
+        val directMap: Map[TopicIdPartition, FetchPartitionData] = if (result != null) {
+          result.asScala.toMap
+        } else {
+          error("Diskless storage fetch future failed", e)
+          disklessFetchInfos.map { case (tp, _) => tp -> unknownErrorPartitionData }.toMap
+        }
+
+        val classicMap = classicResult.toMap
+
+        // Preserve the original request order (critical for FetchRequestTest and remote fetch ordering tests).
+        val orderedResult = requestOrder.map { tp =>
+          tp -> directMap.getOrElse(tp, classicMap.getOrElse(tp, unknownErrorPartitionData))
+        }
+        responseCallback(orderedResult)
+      }
+    }
+
+    // Process classic fetch path
+    fetchMessagesClassic(params, classicFetchInfos, quota, classicResponseCallback)
+  }
+
+  /**
+   * Classic fetch implementation for non-DirectStorage partitions.
+   */
+  private def fetchMessagesClassic(params: FetchParams,
+                                   fetchInfos: Seq[(TopicIdPartition, PartitionData)],
+                                   quota: ReplicaQuota,
+                                   responseCallback: Seq[(TopicIdPartition, FetchPartitionData)] => Unit): Unit = {
 
     // check if this fetch request can be satisfied right away
     val logReadResults = readFromLog(params, fetchInfos, quota, readFromPurgatory = false)
@@ -2227,6 +2516,7 @@ class ReplicaManager(val config: KafkaConfig,
     replicaSelectorPlugin.foreach(_.close)
     removeAllTopicMetrics()
     addPartitionsToTxnManager.foreach(_.shutdown())
+    disklessStorageSupport.close()
     info("Shut down completely")
   }
 
@@ -2479,8 +2769,15 @@ class ReplicaManager(val config: KafkaConfig,
           } else if (isNewLeaderEpoch) {
             // Invoke the follower transition listeners for the partition.
             partition.invokeOnBecomingFollowerListeners()
-            // Otherwise, fetcher is restarted if the leader epoch has changed.
-            partitionsToStartFetching.put(tp, partition)
+
+            // Skip starting fetcher for diskless storage topics - Ursa handles durability
+            if (disklessStorageSupport.isDisklessStorageTopic(tp.topic)) {
+              stateChangeLogger.info(s"Skipping fetcher for diskless storage partition $tp - " +
+                "Ursa storage handles durability, ISR replication not needed")
+            } else {
+              // Otherwise, fetcher is restarted if the leader epoch has changed.
+              partitionsToStartFetching.put(tp, partition)
+            }
           }
 
           changedPartitions.add(partition)

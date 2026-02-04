@@ -113,6 +113,26 @@ ext {
 
   commitId = determineCommitId()
 
+  // Closure to exclude ursa-storage and pulsar dependencies from test classpath.
+  // These dependencies significantly slow down ClassGraph.scan() during plugin discovery
+  // and are not needed for most integration tests.
+  excludeUrsaStorageDeps = { configuration ->
+    configuration.exclude group: 'io.streamnative', module: 'ursa-storage-core'
+    configuration.exclude group: 'io.streamnative', module: 'ursa-storage-common'
+    configuration.exclude group: 'io.streamnative', module: 'ursa-storage-lakehouse'
+    configuration.exclude group: 'io.streamnative', module: 'ursa-storage-ml'
+    configuration.exclude group: 'io.streamnative', module: 'pulsar-broker-common'
+    configuration.exclude group: 'io.streamnative', module: 'pulsar-common'
+    configuration.exclude group: 'io.streamnative', module: 'pulsar-metadata'
+    configuration.exclude group: 'io.streamnative', module: 'pulsar-client-api'
+    configuration.exclude group: 'io.streamnative', module: 'pulsar-client-admin-api'
+    configuration.exclude group: 'io.streamnative', module: 'pulsar-opentelemetry'
+    configuration.exclude group: 'io.streamnative', module: 'managed-ledger'
+    configuration.exclude group: 'io.streamnative.oxia', module: 'oxia-testcontainers'
+    configuration.exclude group: 'io.github.oxia-db', module: 'oxia-client-api'
+    configuration.exclude group: 'io.github.oxia-db', module: 'oxia-client'
+  }
+
   configureJavaCompiler = { name, options, projectPath ->
     // -parameters generates arguments with parameter names in TestInfo#getDisplayName.
     // ref: https://github.com/junit-team/junit5/blob/4c0dddad1b96d4a20e92a2cd583954643ac56ac0/junit-jupiter-params/src/main/java/org/junit/jupiter/params/ParameterizedTest.java#L161-L164
@@ -167,7 +187,21 @@ ext {
 allprojects {
 
   repositories {
+    mavenLocal()
     mavenCentral()
+
+    // Resolve StreamNative snapshots from GitHub Packages (used by storage module).
+    // CI provides SNBOT_GITHUB_TOKEN (read:packages + SSO authorized).
+    def githubPackagesToken = System.getenv('SNBOT_GITHUB_TOKEN')
+    if (githubPackagesToken != null && !githubPackagesToken.isBlank()) {
+      maven {
+        url = uri('https://maven.pkg.github.com/streamnative/pulsar')
+        credentials {
+          username = 'streamnativebot'
+          password = githubPackagesToken
+        }
+      }
+    }
   }
 
   dependencyUpdates {
@@ -197,7 +231,46 @@ allprojects {
           // ensure we have a single version in the classpath despite transitive dependencies
           libs.scalaLibrary,
           libs.scalaReflect,
-          libs.jacksonAnnotations
+          libs.jacksonAnnotations,
+          libs.commonsLang,
+
+          // Force log4j2 version to avoid conflicts with transitive dependencies from bookkeeper
+          libs.slf4jLog4j2,
+          libs.log4j2Api,
+          libs.log4j2Core,
+
+          // Force Jetty version to avoid conflicts with transitive dependencies from pulsar-broker-common
+          // which brings in Jetty 12.1.x that is incompatible with Kafka's jetty-ee10-* modules at 12.0.x
+          libs.jettyServer,
+          libs.jettyClient,
+          libs.jettyServlet,
+          libs.jettyServlets,
+          "org.eclipse.jetty:jetty-http:$versions.jetty",
+          "org.eclipse.jetty:jetty-io:$versions.jetty",
+          "org.eclipse.jetty:jetty-util:$versions.jetty",
+          "org.eclipse.jetty:jetty-security:$versions.jetty",
+          "org.eclipse.jetty:jetty-session:$versions.jetty",
+          "org.eclipse.jetty:jetty-alpn-client:$versions.jetty",
+
+          // Keep dependency resolution deterministic across environments (CI vs local)
+          // when consuming SNAPSHOT-based StreamNative/Pulsar artifacts.
+          // These versions are expected to be present in the binary distribution's ./libs.
+          'org.apache.bookkeeper:bookkeeper-common:4.17.3',
+          'org.apache.bookkeeper:bookkeeper-common-allocator:4.17.3',
+          'org.apache.bookkeeper:bookkeeper-proto:4.17.3',
+          'org.apache.bookkeeper:bookkeeper-server:4.17.3',
+          'org.apache.bookkeeper:bookkeeper-slogger-api:4.17.3',
+          'org.apache.bookkeeper:bookkeeper-slogger-slf4j:4.17.3',
+          'org.apache.bookkeeper:bookkeeper-stats-api:4.17.3',
+          'org.apache.bookkeeper:bookkeeper-tools-framework:4.17.3',
+          'org.apache.bookkeeper:http-server:4.17.3',
+
+          'io.opentelemetry:opentelemetry-api:1.56.0',
+          'io.opentelemetry:opentelemetry-common:1.56.0',
+          'io.opentelemetry:opentelemetry-context:1.56.0',
+
+          // Avoid multiple versions of the same jar being bundled in ./libs.
+          'com.google.errorprone:error_prone_annotations:2.45.0'
         )
       }
     }
@@ -205,6 +278,11 @@ allprojects {
   task printAllDependencies(type: DependencyReportTask) {}
 
   tasks.withType(Javadoc) {
+    // Some environments (e.g. corporate networks / restricted CI) may block external Javadoc link resolution
+    // (e.g. https://docs.oracle.com). We keep Javadoc strict in GitHub Actions, but avoid failing local builds
+    // on external link fetch errors.
+    failOnError = isGithubActions
+
     options.charSet = 'UTF-8'
     options.docEncoding = 'UTF-8'
     options.encoding = 'UTF-8'
@@ -524,6 +602,27 @@ subprojects {
   // The suites are for running sets of tests in IDEs.
   // Gradle will run each test class, so we exclude the suites to avoid redundantly running the tests twice.
   def testsToExclude = ['**/*Suite.class']
+
+  // Some integration-style tests are isolated in CI to avoid impacting the main test suite.
+  // Set `-Pkafka.ci.isolated.tests=exclude` to exclude them from all Test tasks, and
+  // `-Pkafka.ci.isolated.tests=only` to run only these tests.
+  def isolatedCiTestsMode = project.findProperty('kafka.ci.isolated.tests')?.toString()
+  def isolatedCiTestsPatterns = [
+    'org/apache/kafka/server/ursa/integration/**',
+    'org/apache/kafka/storage/diskless/**'
+  ]
+  tasks.withType(Test).configureEach { t ->
+    if (isolatedCiTestsMode == null) {
+      return
+    }
+    if (isolatedCiTestsMode == 'exclude') {
+      isolatedCiTestsPatterns.each { pattern -> t.exclude(pattern) }
+    } else if (isolatedCiTestsMode == 'only') {
+      isolatedCiTestsPatterns.each { pattern -> t.include(pattern) }
+    } else {
+      throw new GradleException("Invalid value for -Pkafka.ci.isolated.tests: '${isolatedCiTestsMode}'. Expected 'exclude' or 'only'.")
+    }
+  }
 
   // This task will copy JUnit XML files out of the sub-project's build directory and into
   // a top-level build/junit-xml directory. This is necessary to avoid reporting on tests which
@@ -1003,6 +1102,31 @@ project(':server') {
     testImplementation project(':test-common:test-common-runtime')
     testImplementation project(':storage:storage-api').sourceSets.test.output
     testImplementation project(':server-common').sourceSets.test.output
+    testImplementation 'io.streamnative.oxia:oxia-testcontainers:0.5.1'
+    testImplementation 'io.github.oxia-db:oxia-client-api:0.7.0'
+    testImplementation 'org.testcontainers:testcontainers:1.19.3'
+    testImplementation 'org.testcontainers:junit-jupiter:1.19.3'
+    testImplementation 'org.testcontainers:localstack:1.19.3'
+    testImplementation 'org.awaitility:awaitility:4.2.0'
+    // Needed by `PulsarStorageConfig` (depends on `PulsarConfiguration` interface).
+    testImplementation 'io.streamnative:pulsar-broker-common:4.2.0-SNAPSHOT'
+    testImplementation('io.streamnative:ursa-storage-core:4.2.0-SNAPSHOT') {
+      exclude group: 'io.streamnative', module: 'pulsar-broker'
+      exclude group: 'io.streamnative', module: 'pulsar-client-original'
+      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
+      exclude group: 'io.streamnative.pulsar.handlers', module: 'pulsar-kafka-common'
+      exclude group: 'io.confluent', module: 'kafka-schema-registry-client'
+      exclude group: 'org.apache.kafka', module: 'kafka-clients'
+    }
+    // Required at runtime for parquet reads (loaded via `-Dursa.externalReaderFactoryClass=...`).
+    testRuntimeOnly('io.streamnative:ursa-storage-lakehouse:4.2.0-SNAPSHOT') {
+      // Reuse the project's Kafka client classes to avoid version conflicts.
+      exclude group: 'org.apache.kafka', module: 'kafka-clients'
+      // Avoid pulling in StreamNative Pulsar broker/client artifacts that are not resolvable in this build.
+      exclude group: 'io.streamnative', module: 'pulsar-broker'
+      exclude group: 'io.streamnative', module: 'pulsar-client-original'
+      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
+    }
 
     testRuntimeOnly runtimeTestLibs
   }
@@ -2094,6 +2218,9 @@ project(':clients:clients-integration-tests') {
     testRuntimeOnly runtimeTestLibs
   }
 
+  // Exclude ursa-storage and pulsar dependencies from test classpath
+  excludeUrsaStorageDeps(configurations.testRuntimeClasspath)
+
   checkstyle {
     configProperties = checkstyleConfigProperties("import-control-clients-integration-tests.xml")
   }
@@ -2343,6 +2470,28 @@ project(':storage') {
     implementation libs.slf4jApi
     implementation libs.jacksonDatabind
     implementation libs.metrics
+    implementation('io.streamnative:ursa-storage-core:4.2.0-SNAPSHOT') {
+      exclude group: 'io.streamnative', module: 'pulsar-broker'
+      exclude group: 'io.streamnative', module: 'pulsar-client-original'
+      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
+    }
+    implementation('io.streamnative:ursa-storage-ml:4.2.0-SNAPSHOT') {
+      exclude group: 'io.streamnative', module: 'pulsar-broker'
+      exclude group: 'io.streamnative', module: 'pulsar-client-original'
+      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
+    }
+    implementation('io.streamnative:managed-ledger:4.2.0-SNAPSHOT')
+    implementation('io.streamnative:pulsar-broker-common:4.2.0-SNAPSHOT') {
+      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
+      exclude group: 'io.streamnative', module: 'pulsar-client-original'
+    }
+    implementation('io.streamnative:pulsar-broker:4.2.0-SNAPSHOT') {
+      // Only used for a small set of API types (e.g. ManagedLedgerStorage / BookKeeperClientFactory).
+      // Avoid pulling the broker dependency graph (Jetty/Jersey, etc.) into Kafka's binary distribution.
+      transitive = false
+    }
+    implementation 'io.github.oxia-db:oxia-client-api:0.7.0'
+    implementation 'io.netty:netty-buffer:4.1.115.Final'
 
     testImplementation project(':clients')
     testImplementation project(':clients').sourceSets.test.output
@@ -2361,6 +2510,7 @@ project(':storage') {
     testImplementation libs.junitJupiter
     testImplementation libs.mockitoCore
     testImplementation libs.bcpkix
+    testImplementation 'io.github.oxia-db:oxia-client-api:0.7.0'
     testImplementation testLog4j2Libs
 
     testRuntimeOnly runtimeTestLibs
@@ -2573,6 +2723,9 @@ project(':tools') {
     testRuntimeOnly runtimeTestLibs
     testRuntimeOnly libs.hamcrest
   }
+
+  // Exclude ursa-storage and pulsar dependencies from test classpath
+  excludeUrsaStorageDeps(configurations.testRuntimeClasspath)
 
   javadoc {
     enabled = false
@@ -2940,6 +3093,9 @@ project(':streams:integration-tests') {
 
     testRuntimeOnly runtimeTestLibs
   }
+
+  // Exclude ursa-storage and pulsar dependencies from test classpath
+  excludeUrsaStorageDeps(configurations.testRuntimeClasspath)
 
   sourceSets {
     // Set java/scala source folders in the `scala` block to enable joint compilation
@@ -3683,6 +3839,9 @@ project(':connect:runtime') {
     testRuntimeOnly runtimeTestLibs
   }
 
+  // Exclude ursa-storage and pulsar dependencies from test classpath
+  excludeUrsaStorageDeps(configurations.testRuntimeClasspath)
+
   javadoc {
     enabled = false
   }
@@ -3792,6 +3951,9 @@ project(':connect:file') {
     testRuntimeOnly runtimeTestLibs
   }
 
+  // Exclude ursa-storage and pulsar dependencies from test classpath
+  excludeUrsaStorageDeps(configurations.testRuntimeClasspath)
+
   javadoc {
     enabled = false
   }
@@ -3900,6 +4062,9 @@ project(':connect:mirror') {
     testRuntimeOnly libs.bcpkix
     testRuntimeOnly runtimeTestLibs
   }
+
+  // Exclude ursa-storage and pulsar dependencies from test classpath
+  excludeUrsaStorageDeps(configurations.testRuntimeClasspath)
 
   javadoc {
     enabled = false

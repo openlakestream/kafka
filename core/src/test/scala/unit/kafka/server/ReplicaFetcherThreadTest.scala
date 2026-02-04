@@ -41,13 +41,14 @@ import org.apache.kafka.server.PartitionFetchState
 import org.apache.kafka.server.config.ReplicationConfigs
 import org.apache.kafka.storage.internals.log.{LogAppendInfo, LogConfig, RecordValidationStats, UnifiedLog}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
+import org.apache.kafka.storage.diskless.DisklessStorageReplicaManagerSupport
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.{AfterEach, Test}
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.{CsvSource, ValueSource}
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.{any, anyBoolean, anyLong}
-import org.mockito.Mockito.{mock, times, verify, when}
+import org.mockito.Mockito.{mock, never, times, verify, when}
 
 import java.lang.{Long => JLong}
 import java.nio.charset.StandardCharsets
@@ -881,5 +882,42 @@ class ReplicaFetcherThreadTest {
     val thread = new ReplicaFetcherThread("test-fetcher", leader, config, failedPartitions, replicaManager, UNBOUNDED_QUOTA, logContext.logPrefix)
 
     assertEquals(expected, thread.shouldFetchFromLastTieredOffset(tp, leaderEndOffset, replicaEndOffset))
+  }
+
+  @Test
+  def testProcessPartitionDataSkipsDisklessTopic(): Unit = {
+    val props = TestUtils.createBrokerConfig(1)
+    val config = KafkaConfig.fromProps(props)
+    val mockBlockingSend = mock(classOf[BlockingSend])
+    when(mockBlockingSend.brokerEndPoint()).thenReturn(brokerEndPoint)
+
+    val replicaManager = mock(classOf[ReplicaManager])
+    val mockDisklessStorageSupport = mock(classOf[DisklessStorageReplicaManagerSupport])
+
+    when(mockDisklessStorageSupport.isDisklessStorageTopic("diskless-topic")).thenReturn(true)
+    when(replicaManager.disklessStorageSupport).thenReturn(mockDisklessStorageSupport)
+    when(replicaManager.brokerTopicStats).thenReturn(mock(classOf[BrokerTopicStats]))
+
+    val thread = createReplicaFetcherThread(
+      "test",
+      0,
+      config,
+      failedPartitions,
+      replicaManager,
+      UNBOUNDED_QUOTA,
+      mockBlockingSend
+    )
+
+    val disklessPartition = new TopicPartition("diskless-topic", 0)
+    val partitionData = new FetchResponseData.PartitionData()
+      .setPartitionIndex(0)
+      .setHighWatermark(100)
+      .setLogStartOffset(0)
+      .setRecords(MemoryRecords.EMPTY)
+
+    val result = thread.processPartitionData(disklessPartition, 0L, 0, partitionData)
+
+    assertEquals(None, result)
+    verify(replicaManager, never()).getPartitionOrException(any(classOf[TopicPartition]))
   }
 }

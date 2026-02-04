@@ -85,6 +85,11 @@ public class TopicConfig {
             "To disable tiered storage for a topic that has it enabled, set this configuration to false. " +
             "When disabling, you must also set <code>remote.log.delete.on.disable</code> to true.";
 
+    public static final String URSA_STORAGE_ENABLE_CONFIG = "ursa.storage.enable";
+    public static final String URSA_STORAGE_ENABLE_DOC = "To enable ursa storage mode for a topic, set this configuration to true. " +
+            "Ursa storage mode bypasses local disk and stores records directly in the configured storage backend. " +
+            "This is useful for topics that require alternative storage strategies.";
+
     public static final String LOCAL_LOG_RETENTION_MS_CONFIG = "local.retention.ms";
     public static final String LOCAL_LOG_RETENTION_MS_DOC = "The number of milliseconds to keep the local log segment before it gets deleted. " +
             "Default value is -2, it represents <code>retention.ms</code> value is to be used. The effective value should always be less than or equal " +

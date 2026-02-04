@@ -57,8 +57,10 @@ import org.apache.kafka.server.util.timer.{SystemTimer, SystemTimerReaper}
 import org.apache.kafka.server.util.{Deadline, FutureUtils, KafkaScheduler, NetworkPartitionMetadataClient, PartitionMetadataClient}
 import org.apache.kafka.server.{AssignmentsManager, BrokerFeatures, BrokerLifecycleManager, ClientMetricsManager, DefaultApiVersionManager, DelayedActionQueue, FetchManager, FetchSessionCacheShard, KRaftTopicCreator, NodeToControllerChannelManagerImpl, ProcessRole, RaftControllerNodeProvider}
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
+import org.apache.kafka.storage.diskless.DisklessStorageReplicaManagerSupport
 import org.apache.kafka.storage.internals.log.LogDirFailureChannel
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
+import org.apache.kafka.storage.diskless.handlers.UrsaStorageConfig
 
 import java.time.Duration
 import java.util
@@ -344,6 +346,20 @@ class BrokerServer(
        */
       val defaultActionQueue = new DelayedActionQueue
 
+      val ursaStorageConfig = UrsaStorageConfig.fromConfigs(config.props.asInstanceOf[util.Map[String, _]])
+      val disklessStorageSupport = new DisklessStorageReplicaManagerSupport(
+        time,
+        config.brokerId,
+        ursaStorageConfig,
+        brokerTopicStats,
+        (topic: String) => {
+          val props = metadataCache.topicConfig(topic)
+          val result = new util.HashMap[String, String]()
+          props.forEach((k, v) => result.put(k.toString, v.toString))
+          result
+        }
+      )
+
       this._replicaManager = new ReplicaManager(
         config = config,
         metrics = metrics,
@@ -360,7 +376,8 @@ class BrokerServer(
         brokerEpochSupplier = () => lifecycleManager.brokerEpoch,
         addPartitionsToTxnManager = Some(addPartitionsToTxnManager),
         directoryEventHandler = directoryEventHandler,
-        defaultActionQueue = defaultActionQueue
+        defaultActionQueue = defaultActionQueue,
+        disklessStorageSupport = disklessStorageSupport
       )
 
       /* start token manager */

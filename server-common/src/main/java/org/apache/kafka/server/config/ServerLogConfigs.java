@@ -177,4 +177,80 @@ public class ServerLogConfigs {
     public static final int MAX_MESSAGE_BYTES_DEFAULT = 1024 * 1024 + Records.LOG_OVERHEAD;
     public static final int MAX_DECOMPRESSED_MESSAGE_BYTES_DEFAULT = Records.SOFT_MAX_ARRAY_LENGTH;
     public static final String COMPRESSION_TYPE_DEFAULT = BrokerCompressionType.PRODUCER.name;
+
+    // Ursa Storage configurations
+    public static final String URSA_STORAGE_ENABLE_CONFIG = "ursa.storage.enable";
+    public static final boolean URSA_STORAGE_ENABLE_DEFAULT = false;
+    public static final String URSA_STORAGE_ENABLE_DOC = "Enable Ursa storage mode instead of object storage. " +
+            "When enabled, diskless storage will use Ursa StorageApi for stream-based storage.";
+
+    public static final String URSA_STORAGE_OXIA_SERVICE_URL_CONFIG = "ursa.storage.oxia.service.url";
+    public static final String URSA_STORAGE_OXIA_SERVICE_URL_DEFAULT = "localhost:6648";
+    public static final String URSA_STORAGE_OXIA_SERVICE_URL_DOC = "The Oxia service URL for Ursa storage metadata.";
+
+    public static final String URSA_STORAGE_WAL_DIRECTORY_CONFIG = "ursa.storage.wal.directory";
+    public static final String URSA_STORAGE_WAL_DIRECTORY_DEFAULT = "/tmp/ursa-wal";
+    public static final String URSA_STORAGE_WAL_DIRECTORY_DOC = "The directory for Ursa storage write-ahead log.";
+
+    public static final String URSA_STORAGE_NAMESPACE_CONFIG = "ursa.storage.namespace";
+    public static final String URSA_STORAGE_NAMESPACE_DEFAULT = "default";
+    public static final String URSA_STORAGE_NAMESPACE_DOC = "The namespace for Ursa storage streams.";
+
+    public static final String URSA_STORAGE_BACKEND_TYPE_CONFIG = "ursa.storage.backend.type";
+    public static final String URSA_STORAGE_BACKEND_TYPE_DEFAULT = "LOCAL";
+    public static final String URSA_STORAGE_BACKEND_TYPE_DOC = "The backend storage type for Ursa storage. " +
+            "Supported values: LOCAL, S3, AZURE_BLOB.";
+
+    public static final String URSA_STORAGE_PATH_CONFIG = "ursa.storage.path";
+    public static final String URSA_STORAGE_PATH_DEFAULT = "/tmp/ursa-data";
+    public static final String URSA_STORAGE_PATH_DOC = "The path for Ursa storage data files.";
+
+    public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_CONFIG = "ursa.storage.write.buffer.flush.interval.ms";
+    public static final long URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DEFAULT = 250L;
+    public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DOC = "The interval in milliseconds for flushing the write buffer.";
+
+    public static final String URSA_STORAGE_WRITE_BUFFER_SIZE_CONFIG = "ursa.storage.write.buffer.size";
+    public static final int URSA_STORAGE_WRITE_BUFFER_SIZE_DEFAULT = 4 * 1024 * 1024;
+    public static final String URSA_STORAGE_WRITE_BUFFER_SIZE_DOC = "The size in bytes of each WAL write buffer segment. "
+            + "Increasing this can reduce per-request flush behavior for large produce requests.";
+
+    public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_CONFIG = "ursa.storage.write.buffer.flush.size";
+    public static final long URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DEFAULT = 256 * 1024 * 1024L;
+    public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DOC = "The size in bytes for triggering a write buffer flush.";
+
+    public static final String URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_APPENDS_PER_PARTITION_CONFIG =
+            "ursa.storage.non.idempotent.max.in.flight.appends.per.partition";
+    public static final int URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_APPENDS_PER_PARTITION_DEFAULT = 16;
+    public static final String URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_APPENDS_PER_PARTITION_DOC =
+            "Maximum number of in-flight non-idempotent appends per partition (stream). Higher values can improve throughput and latency "
+                    + "when the storage backend flushes periodically, but increase memory retained by in-flight produce requests.";
+
+    public static final String URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_BYTES_PER_PARTITION_CONFIG =
+            "ursa.storage.non.idempotent.max.in.flight.bytes.per.partition";
+    public static final long URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_BYTES_PER_PARTITION_DEFAULT = -1L;
+    public static final String URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_BYTES_PER_PARTITION_DOC =
+            "Maximum total bytes of in-flight non-idempotent appends per partition (stream). Set to a positive value to bound memory; "
+                    + "non-positive disables the byte limit.";
+
+    // S3 Storage Configuration
+    public static final String URSA_STORAGE_S3_ENDPOINT_CONFIG = "ursa.storage.s3.endpoint";
+    public static final String URSA_STORAGE_S3_ENDPOINT_DEFAULT = "";
+    public static final String URSA_STORAGE_S3_ENDPOINT_DOC = "The S3 endpoint URL for Ursa storage. " +
+            "Used when backend type is S3.";
+
+    public static final String URSA_STORAGE_S3_ACCESS_KEY_CONFIG = "ursa.storage.s3.access.key";
+    public static final String URSA_STORAGE_S3_ACCESS_KEY_DEFAULT = "";
+    public static final String URSA_STORAGE_S3_ACCESS_KEY_DOC = "The S3 access key ID for Ursa storage.";
+
+    public static final String URSA_STORAGE_S3_SECRET_KEY_CONFIG = "ursa.storage.s3.secret.key";
+    public static final String URSA_STORAGE_S3_SECRET_KEY_DEFAULT = "";
+    public static final String URSA_STORAGE_S3_SECRET_KEY_DOC = "The S3 secret access key for Ursa storage.";
+
+    public static final String URSA_STORAGE_S3_BUCKET_CONFIG = "ursa.storage.s3.bucket";
+    public static final String URSA_STORAGE_S3_BUCKET_DEFAULT = "kafka-ursa-storage";
+    public static final String URSA_STORAGE_S3_BUCKET_DOC = "The S3 bucket name for Ursa storage.";
+
+    public static final String URSA_STORAGE_S3_REGION_CONFIG = "ursa.storage.s3.region";
+    public static final String URSA_STORAGE_S3_REGION_DEFAULT = "us-east-1";
+    public static final String URSA_STORAGE_S3_REGION_DOC = "The S3 region for Ursa storage.";
 }

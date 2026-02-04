@@ -301,6 +301,7 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _], enforceProv
   val queuedMaxRequests = getInt(SocketServerConfigs.QUEUED_MAX_REQUESTS_CONFIG)
   val queuedMaxBytes = getLong(SocketServerConfigs.QUEUED_MAX_BYTES_CONFIG)
   def numNetworkThreads = getInt(SocketServerConfigs.NUM_NETWORK_THREADS_CONFIG)
+  val socketServerEnableRequestPipelining = getBoolean(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG)
 
   /***************** rack configuration **************/
   val replicaSelectorClassName = Option(getString(ReplicationConfigs.REPLICA_SELECTOR_CLASS_CONFIG))
@@ -434,6 +435,9 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _], enforceProv
   /** Internal Configurations **/
   val unstableApiVersionsEnabled = getBoolean(ServerConfigs.UNSTABLE_API_VERSIONS_ENABLE_CONFIG)
   val unstableFeatureVersionsEnabled = getBoolean(ServerConfigs.UNSTABLE_FEATURE_VERSIONS_ENABLE_CONFIG)
+
+  /** Diskless Storage Configurations **/
+  val ursaStorageEnable: Boolean = getBoolean(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG)
 
   override def addReconfigurable(reconfigurable: Reconfigurable): Unit = {
     dynamicConfig.addReconfigurable(reconfigurable)

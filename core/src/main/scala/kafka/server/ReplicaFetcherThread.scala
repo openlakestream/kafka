@@ -115,6 +115,15 @@ class ReplicaFetcherThread(name: String,
     partitionLeaderEpoch: Int,
     partitionData: FetchData
   ): Option[LogAppendInfo] = {
+    // Defense-in-depth: skip append for diskless storage topics
+    // NOTE: replicaMgr can be a Mockito mock in unit tests. Un-stubbed methods return null, so we must
+    // treat a null disklessStorageSupport as "not diskless".
+    val disklessSupport = replicaMgr.disklessStorageSupport
+    if (disklessSupport != null && disklessSupport.isDisklessStorageTopic(topicPartition.topic)) {
+      debug(s"Unexpectedly received fetch data for diskless partition $topicPartition - ignoring")
+      return None
+    }
+
     val logTrace = isTraceEnabled
     val partition = replicaMgr.getPartitionOrException(topicPartition)
     val log = partition.localLogOrException

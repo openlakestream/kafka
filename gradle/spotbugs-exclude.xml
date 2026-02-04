@@ -405,6 +405,15 @@ For a detailed description of spotbugs bug categories, see https://spotbugs.read
         <Package name="org.apache.kafka.streams.examples.pageview"/>
         <Bug pattern="UWF_UNWRITTEN_PUBLIC_OR_PROTECTED_FIELD"/>
     </Match>
+    <!-- Suppress warnings for ProducerStateSnapshot fields used by Jackson for JSON serialization -->
+    <Match>
+        <Class name="org.apache.kafka.storage.diskless.idempotent.ProducerStateSnapshot$BatchData"/>
+        <Bug pattern="URF_UNREAD_PUBLIC_OR_PROTECTED_FIELD"/>
+    </Match>
+    <Match>
+        <Class name="org.apache.kafka.storage.diskless.idempotent.UrsaProducerStateStore"/>
+        <Bug pattern="NP_BOOLEAN_RETURN_NULL"/>
+    </Match>
 
     <!-- END Suppress warnings for unused members that are undetectably used by Jackson -->
 

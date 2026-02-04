@@ -902,6 +902,18 @@ class KafkaConfigTest {
         case ServerLogConfigs.LOG_RETENTION_BYTES_CONFIG => assertPropertyInvalid(baseProperties, name, "not_a_number")
         case ServerLogConfigs.LOG_CLEANUP_INTERVAL_MS_CONFIG => assertPropertyInvalid(baseProperties, name, "not_a_number", "0")
         case ServerLogConfigs.LOG_CLEANUP_POLICY_CONFIG => assertPropertyInvalid(baseProperties, name, "unknown_policy", "0")
+
+        // Ursa storage configs: many are plain strings, so do not treat "not_a_number" as invalid.
+        case ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_NAMESPACE_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_PATH_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_S3_ACCESS_KEY_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_S3_SECRET_KEY_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_S3_BUCKET_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG => // ignore string
+
         case CleanerConfig.LOG_CLEANER_IO_MAX_BYTES_PER_SECOND_PROP => assertPropertyInvalid(baseProperties, name, "not_a_number")
         case CleanerConfig.LOG_CLEANER_DEDUPE_BUFFER_SIZE_PROP => assertPropertyInvalid(baseProperties, name, "not_a_number", "1024")
         case CleanerConfig.LOG_CLEANER_DEDUPE_BUFFER_LOAD_FACTOR_PROP => assertPropertyInvalid(baseProperties, name, "not_a_number")

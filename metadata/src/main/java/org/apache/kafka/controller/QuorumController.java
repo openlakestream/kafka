@@ -222,6 +222,7 @@ public final class QuorumController implements Controller {
         private long delegationTokenExpiryTimeMs;
         private long delegationTokenExpiryCheckIntervalMs = TimeUnit.MINUTES.toMillis(5);
         private long uncleanLeaderElectionCheckIntervalMs = TimeUnit.MINUTES.toMillis(5);
+        private boolean disklessStorageSystemEnabled = false;
 
         public Builder(int nodeId, String clusterId) {
             this.nodeId = nodeId;
@@ -387,6 +388,11 @@ public final class QuorumController implements Controller {
             return this;
         }
 
+        public Builder setDisklessStorageSystemEnabled(boolean disklessStorageSystemEnabled) {
+            this.disklessStorageSystemEnabled = disklessStorageSystemEnabled;
+            return this;
+        }
+
 
         public QuorumController build() throws Exception {
             if (raftClient == null) {
@@ -454,7 +460,8 @@ public final class QuorumController implements Controller {
                     delegationTokenExpiryCheckIntervalMs,
                     uncleanLeaderElectionCheckIntervalMs,
                     controllerPerformanceSamplePeriodMs,
-                    controllerPerformanceAlwaysLogThresholdMs
+                    controllerPerformanceAlwaysLogThresholdMs,
+                    disklessStorageSystemEnabled
                 );
             } catch (Exception e) {
                 Utils.closeQuietly(queue, "event queue");
@@ -1510,7 +1517,8 @@ public final class QuorumController implements Controller {
         long delegationTokenExpiryCheckIntervalMs,
         long uncleanLeaderElectionCheckIntervalMs,
         long controllerPerformanceSamplePeriodMs,
-        long controllerPerformanceAlwaysLogThresholdMs
+        long controllerPerformanceAlwaysLogThresholdMs,
+        boolean disklessStorageSystemEnabled
     ) {
         this.nonFatalFaultHandler = nonFatalFaultHandler;
         this.fatalFaultHandler = fatalFaultHandler;
@@ -1579,6 +1587,7 @@ public final class QuorumController implements Controller {
             setClusterControl(clusterControl).
             setCreateTopicPolicy(createTopicPolicy).
             setFeatureControl(featureControl).
+            setDisklessStorageSystemEnabled(disklessStorageSystemEnabled).
             build();
         this.scramControlManager = new ScramControlManager.Builder().
             setLogContext(logContext).

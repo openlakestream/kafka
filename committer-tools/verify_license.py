@@ -27,12 +27,16 @@ import subprocess
 import argparse
 
 # Constant: Regex to extract dependency tokens from the LICENSE file.
-# Matches lines that start with a dash and then a dependency token of the form:
-#   DependencyName-x.y, DependencyName-x.y.z, or DependencyName-x.y.z.w
-# Optionally, a trailing suffix (e.g., "-alpha") is captured.
+#
+# In Kafka binary distributions, some jar basenames include additional suffixes
+# beyond the semantic version (e.g. platform classifiers like "-linux-x86_64",
+# or multi-part suffixes like "-empty-to-avoid-conflict-with-guava").
+#
+# We extract the full token after the leading dash up to the next comma/whitespace
+# and require it to include a version-like pattern ("-<digits>.<...>") to avoid
+# matching non-dependency bullet points.
 LICENSE_DEP_PATTERN = re.compile(
-    r'^\s*-\s*([A-Za-z0-9_.+-]+-[0-9]+\.[0-9]+(?:\.[0-9]+){0,2}(?:[-.][A-Za-z0-9]+)?)',
-    re.MULTILINE
+    r"^\s*-\s*([A-Za-z0-9_.+-]+-[0-9]+\.[^\s,]+)", re.MULTILINE
 )
 
 def run_gradlew(project_dir):

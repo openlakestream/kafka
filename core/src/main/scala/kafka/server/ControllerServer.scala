@@ -20,7 +20,7 @@ package kafka.server
 import kafka.network.SocketServer
 import kafka.raft.KafkaRaftManager
 import kafka.server.QuotaFactory.QuotaManagers
-import kafka.server.metadata.{ClientQuotaMetadataManager, DynamicConfigPublisher, KRaftMetadataCachePublisher}
+import kafka.server.metadata.{ClientQuotaMetadataManager, DynamicConfigPublisher, KRaftMetadataCachePublisher, UrsaPartitionedTopicsPublisher}
 
 import scala.collection.immutable
 import kafka.utils.Logging
@@ -260,7 +260,8 @@ class ControllerServer(
           setDelegationTokenExpiryCheckIntervalMs(delegationTokenManagerConfigs.delegationTokenExpiryCheckIntervalMs).
           setUncleanLeaderElectionCheckIntervalMs(config.uncleanLeaderElectionCheckIntervalMs).
           setControllerPerformanceSamplePeriodMs(config.controllerPerformanceSamplePeriodMs).
-          setControllerPerformanceAlwaysLogThresholdMs(config.controllerPerformanceAlwaysLogThresholdMs)
+          setControllerPerformanceAlwaysLogThresholdMs(config.controllerPerformanceAlwaysLogThresholdMs).
+          setDisklessStorageSystemEnabled(config.ursaStorageEnable)
       }
       controller = controllerBuilder.build()
 
@@ -330,6 +331,16 @@ class ControllerServer(
           ConfigType.BROKER -> new BrokerConfigHandler(config, quotaManagers)
         ),
         "controller"))
+
+      // Mirror diskless topic lifecycle into Oxia for downstream topic discovery.
+      if (config.ursaStorageEnable) {
+        metadataPublishers.add(new UrsaPartitionedTopicsPublisher(
+          config.nodeId,
+          config.getString(org.apache.kafka.server.config.ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG),
+          config.getString(org.apache.kafka.server.config.ServerLogConfigs.URSA_STORAGE_NAMESPACE_CONFIG),
+          sharedServer.metadataPublishingFaultHandler,
+        ))
+      }
 
       // Register this instance for dynamic config changes to the KafkaConfig. This must be called
       // after the authorizer and quotaManagers are initialized, since it references those objects.

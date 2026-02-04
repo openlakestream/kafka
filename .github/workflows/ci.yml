@@ -32,7 +32,12 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+  # Only auto-cancel in-progress runs when new commits are pushed (synchronize).
+  # This avoids canceling runs triggered by non-code PR events like ready_for_review/reopened.
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') && github.event.action == 'synchronize' }}
+
+permissions:
+  contents: write
 
 jobs:
   build:

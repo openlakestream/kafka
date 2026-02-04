@@ -108,6 +108,38 @@
         <allow pkg="com.yammer.metrics" />
     </subpackage>
 
+    <subpackage name="storage.directstorage">
+        <allow pkg="org.apache.kafka.common" />
+        <allow pkg="org.apache.kafka.server.config" />
+        <allow pkg="org.apache.kafka.server.storage.log" />
+        <allow pkg="org.apache.kafka.storage.diskless" />
+        <allow pkg="org.apache.kafka.storage.log.metrics" />
+        <allow pkg="io.streamnative.ursa.storage" />
+        <allow pkg="io.netty.buffer" />
+        <allow pkg="io.oxia.client.api" />
+        <allow pkg="io.opentelemetry.api" />
+    </subpackage>
+
+	    <subpackage name="storage.diskless">
+	        <allow pkg="org.apache.kafka.common" />
+	        <allow pkg="org.apache.kafka.server.config" />
+	        <allow pkg="org.apache.kafka.server.storage.log" />
+	        <allow pkg="org.apache.kafka.server.util" />
+	        <allow pkg="org.apache.kafka.storage.diskless" />
+	        <allow pkg="org.apache.kafka.storage.log.metrics" />
+	        <allow pkg="com.fasterxml.jackson" />
+	        <allow pkg="io.streamnative.ursa.storage" />
+	        <allow pkg="io.streamnative.ursa.metrics" />
+	        <allow pkg="io.streamnative.ursa.mledger" />
+	        <allow pkg="io.netty.buffer" />
+	        <allow pkg="io.oxia.client.api" />
+	        <allow pkg="io.opentelemetry.api" />
+	        <allow pkg="org.apache.pulsar.common" />
+	        <allow pkg="org.apache.bookkeeper.mledger" />
+	        <allow pkg="org.apache.pulsar.broker" />
+	        <allow pkg="org.apache.pulsar.metadata" />
+	    </subpackage>
+
     <!-- START OF TIERED STORAGE INTEGRATION TEST IMPORT DEPENDENCIES -->
     <subpackage name="tiered.storage">
         <allow pkg="scala" />

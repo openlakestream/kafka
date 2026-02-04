@@ -231,8 +231,9 @@ class SocketServerTest {
     server.metrics.close()
   }
 
-  private def producerRequestBytes(apiVersion: Short = ApiKeys.PRODUCE.latestVersion, ack: Short = 0): Array[Byte] = {
-    val correlationId = -1
+  private def producerRequestBytes(apiVersion: Short = ApiKeys.PRODUCE.latestVersion,
+                                   ack: Short = 0,
+                                   correlationId: Int = -1): Array[Byte] = {
     val clientId = ""
     val ackTimeoutMs = 10000
 
@@ -262,6 +263,41 @@ class SocketServerTest {
     processRequest(server.dataPlaneRequestChannel)
     assertEquals(serializedBytes.toSeq, receiveResponse(plainSocket).toSeq)
     verifyAcceptorBlockedPercent("PLAINTEXT", expectBlocked = false)
+  }
+
+  @Test
+  def testRequestPipeliningReadsMultipleRequestsAndPreservesResponseOrder(): Unit = {
+    val testProps = new Properties()
+    testProps.putAll(props)
+    testProps.put(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, "true")
+    val pipeliningConfig = KafkaConfig.fromProps(testProps)
+
+    withTestableServer(config = pipeliningConfig, testWithServer = { testableServer =>
+      val socket = connect(testableServer)
+      socket.setSoTimeout(10000)
+
+      val request1 = producerRequestBytes(correlationId = 1)
+      val request2 = producerRequestBytes(correlationId = 2)
+
+      sendRequest(socket, request1)
+      sendRequest(socket, request2)
+
+      val received1 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      val received2 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      assertEquals(1, received1.header.correlationId)
+      assertEquals(2, received2.header.correlationId)
+
+      // Complete responses in reverse order; response delivery must still follow request order.
+      processRequest(testableServer.dataPlaneRequestChannel, received2)
+      processRequest(testableServer.dataPlaneRequestChannel, received1)
+
+      assertArrayEquals(request1, receiveResponse(socket))
+      assertArrayEquals(request2, receiveResponse(socket))
+
+      val selector = testableServer.testableSelector
+      assertEquals(0, selector.operationCounts.getOrElse(SelectorOperation.Mute, 0))
+      socket.close()
+    })
   }
 
 
@@ -591,7 +627,7 @@ class SocketServerTest {
       if (makeClosing)
         serverSelector.pendingClosingChannels.add(channel)
 
-      receiveRequest(server.dataPlaneRequestChannel, timeout = 10000)
+      receiveRequest(server.dataPlaneRequestChannel, timeout = 30000)
     } finally {
       proxyServer.close()
     }

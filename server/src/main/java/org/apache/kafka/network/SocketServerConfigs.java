@@ -35,6 +35,7 @@ import static org.apache.kafka.common.config.ConfigDef.Importance.HIGH;
 import static org.apache.kafka.common.config.ConfigDef.Importance.LOW;
 import static org.apache.kafka.common.config.ConfigDef.Importance.MEDIUM;
 import static org.apache.kafka.common.config.ConfigDef.Range.atLeast;
+import static org.apache.kafka.common.config.ConfigDef.Type.BOOLEAN;
 import static org.apache.kafka.common.config.ConfigDef.Type.INT;
 import static org.apache.kafka.common.config.ConfigDef.Type.LIST;
 import static org.apache.kafka.common.config.ConfigDef.Type.LONG;
@@ -152,6 +153,12 @@ public class SocketServerConfigs {
     public static final int NUM_NETWORK_THREADS_DEFAULT = 3;
     public static final String NUM_NETWORK_THREADS_DOC = "The number of threads that the server uses for receiving requests from the network and sending responses to the network. Noted: each listener (except for controller listener) creates its own thread pool.";
 
+    public static final String SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG = "socket.server.enable.request.pipelining";
+    public static final boolean SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_DEFAULT = false;
+    public static final String SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_DOC = "Enable request pipelining on a single TCP connection. When enabled, the broker can "
+            + "read and process multiple requests from the same connection concurrently while still sending responses in request order. "
+            + "This can reduce latency amplification for storage backends that have periodic commit/flush cycles.";
+
     public static final ConfigDef CONFIG_DEF = new ConfigDef()
             .define(LISTENERS_CONFIG, LIST, LISTENERS_DEFAULT, ConfigDef.ValidList.anyNonDuplicateValues(false, false), HIGH, LISTENERS_DOC)
             .define(ADVERTISED_LISTENERS_CONFIG, LIST, null, ConfigDef.ValidList.anyNonDuplicateValues(false, true), HIGH, ADVERTISED_LISTENERS_DOC)
@@ -168,7 +175,8 @@ public class SocketServerConfigs {
             .define(FAILED_AUTHENTICATION_DELAY_MS_CONFIG, INT, FAILED_AUTHENTICATION_DELAY_MS_DEFAULT, atLeast(0), LOW, FAILED_AUTHENTICATION_DELAY_MS_DOC)
             .define(QUEUED_MAX_REQUESTS_CONFIG, INT, QUEUED_MAX_REQUESTS_DEFAULT, atLeast(1), HIGH, QUEUED_MAX_REQUESTS_DOC)
             .define(QUEUED_MAX_BYTES_CONFIG, LONG, QUEUED_MAX_REQUEST_BYTES_DEFAULT, MEDIUM, QUEUED_MAX_REQUEST_BYTES_DOC)
-            .define(NUM_NETWORK_THREADS_CONFIG, INT, NUM_NETWORK_THREADS_DEFAULT, atLeast(1), HIGH, NUM_NETWORK_THREADS_DOC);
+            .define(NUM_NETWORK_THREADS_CONFIG, INT, NUM_NETWORK_THREADS_DEFAULT, atLeast(1), HIGH, NUM_NETWORK_THREADS_DOC)
+            .define(SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, BOOLEAN, SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_DEFAULT, MEDIUM, SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_DOC);
 
     private static final Pattern URI_PARSE_REGEXP = Pattern.compile(
         "^(.*)://\\[?([0-9a-zA-Z\\-%._:]*)\\]?:(-?[0-9]+)");

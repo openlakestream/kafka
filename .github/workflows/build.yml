@@ -127,6 +127,47 @@ jobs:
       - name: Check Python dependency conflicts
         shell: bash
         run: pip install --dry-run ./tests
+
+      # Install ursa-storage artifacts into mavenLocal so :storage can resolve
+      # io.streamnative:ursa-storage-*:4.2.0-SNAPSHOT during this build.
+      - name: Checkout ursa-storage
+        if: ${{ !inputs.is-public-fork }}
+        uses: actions/checkout@v5
+        with:
+          repository: ursaio/ursa-storage
+          path: ursa-storage
+          token: ${{ secrets.SNBOT_GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup Java (for ursa-storage build)
+        if: ${{ !inputs.is-public-fork }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Configure Maven settings for GitHub Packages
+        if: ${{ !inputs.is-public-fork }}
+        uses: s4u/maven-settings-action@v3.1.0
+        with:
+          servers: |
+            [{
+                "id": "github",
+                "username": "streamnativebot",
+                "password": "${{ secrets.SNBOT_GITHUB_TOKEN }}"
+            }]
+
+      - name: Install ursa-storage into Maven Local
+        if: ${{ !inputs.is-public-fork }}
+        working-directory: ursa-storage
+        run: mvn -ntp -B -DskipTests install -U
+
+      # Ensure the checked-out ursa-storage source tree does not affect Rat/license checks
+      # executed as part of the Gradle build in this repo.
+      - name: Remove ursa-storage source tree
+        if: ${{ !inputs.is-public-fork }}
+        run: rm -rf ursa-storage
+
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
         with:
@@ -137,6 +178,7 @@ jobs:
       - name: Compile and validate
         env:
           SCAN_ARG: ${{ inputs.is-public-fork && '--no-scan' || '--scan' }}
+          SNBOT_GITHUB_TOKEN: ${{ secrets.SNBOT_GITHUB_TOKEN }}
         # Gradle flags
         # --build-cache:  Let Gradle restore the build cache
         # --info:         For now, we'll generate lots of logs while setting up the GH Actions
@@ -166,6 +208,8 @@ jobs:
       - name: Check generated documentation
         # Check if there are any empty files under ./site-docs/generated, If any empty files are found, print an error 
         # message and list the empty files
+        env:
+          SNBOT_GITHUB_TOKEN: ${{ secrets.SNBOT_GITHUB_TOKEN }}
         run: |
           tar zxvf core/build/distributions/kafka_2.13-$(./gradlew properties | grep version: | awk '{print $NF}' | head -n 1)-site-docs.tgz
           if find ./site-docs/generated -type f -exec grep -L "." {} \; | grep -q "."; then
@@ -201,6 +245,47 @@ jobs:
           ref: ${{ needs.configure.outputs.sha }}
       - name: Setup Python
         uses: ./.github/actions/setup-python
+
+      # Install ursa-storage artifacts into mavenLocal so tests can resolve
+      # io.streamnative:ursa-storage-*:4.2.0-SNAPSHOT during this build.
+      - name: Checkout ursa-storage
+        if: ${{ !inputs.is-public-fork }}
+        uses: actions/checkout@v5
+        with:
+          repository: ursaio/ursa-storage
+          path: ursa-storage
+          token: ${{ secrets.SNBOT_GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup Java (for ursa-storage build)
+        if: ${{ !inputs.is-public-fork }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Configure Maven settings for GitHub Packages
+        if: ${{ !inputs.is-public-fork }}
+        uses: s4u/maven-settings-action@v3.1.0
+        with:
+          servers: |
+            [{
+                "id": "github",
+                "username": "streamnativebot",
+                "password": "${{ secrets.SNBOT_GITHUB_TOKEN }}"
+            }]
+
+      - name: Install ursa-storage into Maven Local
+        if: ${{ !inputs.is-public-fork }}
+        working-directory: ursa-storage
+        run: mvn -ntp -B -DskipTests install -U
+
+      # Ensure the checked-out ursa-storage source tree does not affect Rat/license checks
+      # executed as part of the Gradle build in this repo.
+      - name: Remove ursa-storage source tree
+        if: ${{ !inputs.is-public-fork }}
+        run: rm -rf ursa-storage
+
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
         with:
@@ -221,9 +306,12 @@ jobs:
       - name: JUnit Tests
         id: junit-test
         uses: ./.github/actions/run-gradle
+        env:
+          SNBOT_GITHUB_TOKEN: ${{ secrets.SNBOT_GITHUB_TOKEN }}
         with:
           test-task: test
-          timeout-minutes: 180  # 3 hours
+          # NOTE: GitHub-hosted runners enforce a 6-hour job timeout, so keep headroom for setup + uploads.
+          timeout-minutes: 330  # 5 hours 30 minutes
           test-catalog-path: ${{ steps.load-test-catalog.outputs.download-path }}/combined-test-catalog.txt
           build-scan-artifact-name: build-scan-${{ env.job-variation }}
           run-new-tests: ${{ matrix.run-new }}
@@ -232,6 +320,7 @@ jobs:
           test-xml-output: ${{ env.job-variation }}
           test-repeat: ${{ !inputs.is-trunk && matrix.run-new && '3' || '1' }}
           test-verbose: ${{ runner.debug == '1' }}
+          gradle-args: -Pkafka.ci.isolated.tests=exclude
 
       - name: Archive JUnit HTML reports
         uses: actions/upload-artifact@v4
@@ -268,6 +357,124 @@ jobs:
           GITHUB_WORKSPACE: ${{ github.workspace }}
           JUNIT_REPORT_URL: ${{ steps.archive-junit-html.outputs.artifact-url }}
           THREAD_DUMP_URL: ${{ steps.archive-thread-dump.outputs.artifact-url }}
+          GRADLE_TEST_EXIT_CODE: ${{ steps.junit-test.outputs.gradle-exitcode }}
+        run: |
+          python .github/scripts/junit.py \
+           --path build/junit-xml >> $GITHUB_STEP_SUMMARY
+
+  isolated_tests:
+    needs: [configure, validate]
+    if: ${{ ! needs.configure.outputs.is-draft }}
+    runs-on: ubuntu-latest
+    name: Isolated JUnit tests (ursa storage)
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          ref: ${{ needs.configure.outputs.sha }}
+      - name: Setup Python
+        uses: ./.github/actions/setup-python
+
+      # Install ursa-storage artifacts into mavenLocal so tests can resolve
+      # io.streamnative:ursa-storage-*:4.2.0-SNAPSHOT during this build.
+      - name: Checkout ursa-storage
+        if: ${{ !inputs.is-public-fork }}
+        uses: actions/checkout@v5
+        with:
+          repository: ursaio/ursa-storage
+          path: ursa-storage
+          token: ${{ secrets.SNBOT_GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup Java (for ursa-storage build)
+        if: ${{ !inputs.is-public-fork }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Configure Maven settings for GitHub Packages
+        if: ${{ !inputs.is-public-fork }}
+        uses: s4u/maven-settings-action@v3.1.0
+        with:
+          servers: |
+            [{
+                "id": "github",
+                "username": "streamnativebot",
+                "password": "${{ secrets.SNBOT_GITHUB_TOKEN }}"
+            }]
+
+      - name: Install ursa-storage into Maven Local
+        if: ${{ !inputs.is-public-fork }}
+        working-directory: ursa-storage
+        run: mvn -ntp -B -DskipTests install -U
+
+      # Ensure the checked-out ursa-storage source tree does not affect Rat/license checks
+      # executed as part of the Gradle build in this repo.
+      - name: Remove ursa-storage source tree
+        if: ${{ !inputs.is-public-fork }}
+        run: rm -rf ursa-storage
+
+      - name: Setup Gradle
+        uses: ./.github/actions/setup-gradle
+        with:
+          java-version: 17
+          gradle-cache-read-only: ${{ !inputs.is-trunk }}
+          gradle-cache-write-only: ${{ inputs.is-trunk }}
+          develocity-access-key: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
+
+      - name: Isolated JUnit Tests
+        id: junit-test
+        uses: ./.github/actions/run-gradle
+        env:
+          SNBOT_GITHUB_TOKEN: ${{ secrets.SNBOT_GITHUB_TOKEN }}
+        with:
+          # Restrict to relevant modules to avoid compiling/running tests across the whole repo.
+          test-task: :server:test :storage:test
+          timeout-minutes: 180  # 3 hours
+          test-catalog-path: ""
+          build-scan-artifact-name: build-scan-isolated-17
+          run-new-tests: "false"
+          run-flaky-tests: "false"
+          test-retries: "1"
+          test-xml-output: isolated-17
+          test-repeat: "1"
+          test-verbose: ${{ runner.debug == '1' }}
+          max-parallel-forks: "1"
+          gradle-args: --no-parallel -Pkafka.ci.isolated.tests=only
+
+      - name: Archive JUnit HTML reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-reports-isolated-17
+          path: |
+            **/build/reports/tests/*
+          compression-level: 9
+          if-no-files-found: ignore
+
+      - name: Archive JUnit XML
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-xml-isolated-17
+          path: |
+            build/junit-xml/**/*.xml
+          compression-level: 9
+          if-no-files-found: ignore
+
+      - name: Archive Thread Dumps
+        if: steps.junit-test.outputs.gradle-exitcode == '124'
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-thread-dumps-isolated-17
+          path: |
+            thread-dumps/*
+          compression-level: 9
+          if-no-files-found: ignore
+
+      - name: Parse JUnit tests
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
           GRADLE_TEST_EXIT_CODE: ${{ steps.junit-test.outputs.gradle-exitcode }}
         run: |
           python .github/scripts/junit.py \
@@ -368,7 +575,7 @@ jobs:
 
   checks-complete:
     name: "CI checks completed"
-    needs: [configure, validate, test]
+    needs: [configure, validate, test, isolated_tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -383,7 +590,7 @@ jobs:
           exit 1
       - name: Check Dependency Outcomes
         run: |
-          if [[ "${{ needs.validate.result }}" == "success" && "${{ needs.test.result }}" == "success" ]]; then
+          if [[ "${{ needs.validate.result }}" == "success" && "${{ needs.test.result }}" == "success" && "${{ needs.isolated_tests.result }}" == "success" ]]; then
             echo "Required jobs completed successfully!"
             exit 0
           else
