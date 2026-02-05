@@ -219,6 +219,9 @@ jobs:
           fi
       - name: Verify license file
         run: python committer-tools/verify_license.py --skip-build
+      - name: Docker compose smoke (localstack compaction)
+        if: ${{ !inputs.is-public-fork }}
+        run: python committer-tools/docker_compaction_cluster_smoke.py --skip-build
 
   test:
     needs: [configure, validate, load-catalog]

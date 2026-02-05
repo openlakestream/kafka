@@ -118,8 +118,8 @@ services:
       # WAL backend (S3 via LocalStack)
       PULSAR_PREFIX_backendStorageType: S3
       PULSAR_PREFIX_bucket: kafka-ursa
-      # NOTE: keep empty to match current Ursa S3 object layout; override if your Ursa build uses a prefix.
-      PULSAR_PREFIX_prefix: ""
+      # NOTE: must match Kafka brokers' `ursa.storage.path` (S3 key prefix) to avoid NoSuchKey(404).
+      PULSAR_PREFIX_prefix: "${URSA_STORAGE_PATH:-ursa}"
       PULSAR_PREFIX_cloudStorageEndpoint: http://localstack:4566
       PULSAR_PREFIX_region: us-east-1
       PULSAR_PREFIX_s3AccessKeyId: test
@@ -128,7 +128,7 @@ services:
       # Lakehouse (parquet) path resolution for v2 reader/writer
       PULSAR_PREFIX_compactionBackendStorageType: S3
       PULSAR_PREFIX_compactionBucket: kafka-ursa
-      PULSAR_PREFIX_compactionPrefix: ""
+      PULSAR_PREFIX_compactionPrefix: "${URSA_STORAGE_PATH:-ursa}"
       PULSAR_PREFIX_compactionBucketRegion: us-east-1
 
       # Schema registry (required for Kafka parquet entry serde)
@@ -197,8 +197,9 @@ services:
       KAFKA_URSA_STORAGE_S3_REGION: "us-east-1"
       KAFKA_URSA_STORAGE_S3_PATH_STYLE_ACCESS: "true"
       # NOTE: `ursa.storage.path` is treated as S3 key prefix.
-      # Keep empty to match current Ursa S3 object layout; override if your Ursa build uses a prefix.
-      KAFKA_URSA_STORAGE_PATH: ""
+      # Kafka validates it as a non-empty string, so the docker demo must set a non-empty value.
+      # Override by exporting `URSA_STORAGE_PATH` before running docker compose.
+      KAFKA_URSA_STORAGE_PATH: "${URSA_STORAGE_PATH:-ursa}"
       # Flush small batches quickly so the compactor won't see NoSuchKey on recently-written entries.
       KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE: "4096"
       KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: "100"
@@ -250,7 +251,7 @@ services:
       KAFKA_URSA_STORAGE_S3_BUCKET: "kafka-ursa"
       KAFKA_URSA_STORAGE_S3_REGION: "us-east-1"
       KAFKA_URSA_STORAGE_S3_PATH_STYLE_ACCESS: "true"
-      KAFKA_URSA_STORAGE_PATH: ""
+      KAFKA_URSA_STORAGE_PATH: "${URSA_STORAGE_PATH:-ursa}"
       KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE: "4096"
       KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: "100"
 
@@ -299,7 +300,7 @@ services:
       KAFKA_URSA_STORAGE_S3_BUCKET: "kafka-ursa"
       KAFKA_URSA_STORAGE_S3_REGION: "us-east-1"
       KAFKA_URSA_STORAGE_S3_PATH_STYLE_ACCESS: "true"
-      KAFKA_URSA_STORAGE_PATH: ""
+      KAFKA_URSA_STORAGE_PATH: "${URSA_STORAGE_PATH:-ursa}"
       KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE: "4096"
       KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: "100"
 
