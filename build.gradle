@@ -1122,7 +1122,7 @@ project(':server') {
     testRuntimeOnly('io.streamnative:ursa-storage-lakehouse:4.2.0-SNAPSHOT') {
       // Reuse the project's Kafka client classes to avoid version conflicts.
       exclude group: 'org.apache.kafka', module: 'kafka-clients'
-      // Avoid pulling in StreamNative Pulsar broker/client artifacts that are not resolvable in this build.
+      // Avoid pulling in StreamNative Pulsar broker/client artifacts that are unused in this build.
       exclude group: 'io.streamnative', module: 'pulsar-broker'
       exclude group: 'io.streamnative', module: 'pulsar-client-original'
       exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
@@ -2476,6 +2476,16 @@ project(':storage') {
       exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
     }
     implementation('io.streamnative:ursa-storage-ml:4.2.0-SNAPSHOT') {
+      exclude group: 'io.streamnative', module: 'pulsar-broker'
+      exclude group: 'io.streamnative', module: 'pulsar-client-original'
+      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
+    }
+    // Required at runtime for parquet reads when `-Dursa.externalReaderFactoryClass=...LakehouseReaderFactory` is set
+    // (e.g. `docker-compose-localstack-compaction.yml`).
+    runtimeOnly('io.streamnative:ursa-storage-lakehouse:4.2.0-SNAPSHOT') {
+      // Reuse the project's Kafka client classes to avoid version conflicts.
+      exclude group: 'org.apache.kafka', module: 'kafka-clients'
+      // Avoid pulling in StreamNative Pulsar broker/client artifacts that are unused in this build.
       exclude group: 'io.streamnative', module: 'pulsar-broker'
       exclude group: 'io.streamnative', module: 'pulsar-client-original'
       exclude group: 'io.streamnative', module: 'bouncy-castle-bc'

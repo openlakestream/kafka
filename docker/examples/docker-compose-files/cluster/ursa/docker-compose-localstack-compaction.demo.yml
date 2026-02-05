@@ -148,6 +148,8 @@ services:
       AWS_SECRET_ACCESS_KEY: test
       AWS_DEFAULT_REGION: us-east-1
       S3_BUCKET: ${S3_BUCKET:-}
+      # Must match Kafka brokers/compactor S3 key prefix (`URSA_STORAGE_PATH`).
+      URSA_STORAGE_PATH: ${URSA_STORAGE_PATH:-ursa}
       S3_PREFIX: ${S3_PREFIX:-}
     entrypoint: ["/bin/bash", "-c"]
     command:
@@ -155,7 +157,7 @@ services:
         set -euo pipefail
         echo "Waiting for parquet files to appear in LocalStack S3..."
         bucket="$${S3_BUCKET:-kafka-ursa}"
-        prefix="$${S3_PREFIX:-}"
+        prefix="$${S3_PREFIX:-$${URSA_STORAGE_PATH}}"
         for i in $(seq 1 180); do
           if [[ -n "$$prefix" ]]; then
             keys="$$(aws --endpoint-url=http://localstack:4566 s3api list-objects-v2 \

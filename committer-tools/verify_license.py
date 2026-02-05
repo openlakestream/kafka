@@ -32,11 +32,13 @@ import argparse
 # beyond the semantic version (e.g. platform classifiers like "-linux-x86_64",
 # or multi-part suffixes like "-empty-to-avoid-conflict-with-guava").
 #
-# We extract the full token after the leading dash up to the next comma/whitespace
-# and require it to include a version-like pattern ("-<digits>.<...>") to avoid
-# matching non-dependency bullet points.
+# We extract the full token after the leading dash up to the next comma/whitespace.
+# Most jar basenames include a semantic version with dots (e.g. "-1.2.3"), but a
+# small number may use a numeric version without dots (e.g. "javax.inject-1",
+# "json-20250517"). We accept both forms while still requiring a trailing
+# version-like suffix to avoid matching non-dependency bullet points.
 LICENSE_DEP_PATTERN = re.compile(
-    r"^\s*-\s*([A-Za-z0-9_.+-]+-[0-9]+\.[^\s,]+)", re.MULTILINE
+    r"^\s*-\s*([A-Za-z0-9_.+-]+-(?:[0-9]+\.[^\s,]+|[0-9]+))", re.MULTILINE
 )
 
 def run_gradlew(project_dir):
@@ -151,4 +153,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
