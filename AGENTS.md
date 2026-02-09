@@ -1,159 +1,151 @@
-<!--
- Licensed to the Apache Software Foundation (ASF) under one or more
- contributor license agreements.  See the NOTICE file distributed with
- this work for additional information regarding copyright ownership.
- The ASF licenses this file to You under the Apache License, Version 2.0
- (the "License"); you may not use this file except in compliance with
- the License.  You may obtain a copy of the License at
+# AGENTS.md
 
-    http://www.apache.org/licenses/LICENSE-2.0
+This file provides guidance to AI coding agents (Codex CLI, OpenCode, Claude Code) when working with code in this repository.
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
--->
+## Agent Compatibility
 
-# Agent Guide for Apache Kafka
+- Canonical instruction file: AGENTS.md
+- Backward compatibility alias: CLAUDE.md (symlink to AGENTS.md)
+- When updating instructions, edit AGENTS.md only
+- Applies to Codex, OpenCode, and Claude-style repository agents
+- If nested AGENTS.md files exist in subdirectories, prefer the nearest one in scope
 
-This file is read by automated agents (security scanners, code analyzers,
-AI assistants) operating on this repository.
+## Project Overview
 
-## Project overview
+Fork of Apache Kafka (4.3.0-SNAPSHOT) with **Diskless Storage** via **StreamNative Ursa**. When enabled, Kafka brokers become stateless — message durability is offloaded to Ursa's distributed storage layer and producer state to **Oxia** (a distributed KV store). The primary goal is to maintain compatibility with upstream Kafka while adding the Ursa storage bypass layer.
 
-Apache Kafka is a distributed event streaming platform. This repo is a **Gradle**
-build in **Java** and **Scala 2.13**.
+Design document: `docs/SNIP-diskless-storage-with-ursa-integration.md`
 
-- **Supported JDK**: 11+ for `clients`, `generator`, and `streams`; 17+ for other modules.
-- **Build/test JDK**: Java 17 and 25.
-- **Build tool**: Gradle, wrapper `./gradlew` is recommended.
-
-## Repository layout (high level)
-
-| Path                                                                                          | Purpose                                                                                            |
-|-----------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------|
-| `clients/`                                                                                    | Producer, consumer, admin client APIs and protocol messages                                        |
-| `core/`                                                                                       | Broker runtime, log, replication, request handling (gradually being removed along with Scala code) |
-| `server/`, `server-common/`                                                                   | Broker/server components and shared server code                                                    |
-| `metadata/`, `raft/`                                                                          | KRaft metadata layer and Raft implementation                                                       |
-| `storage/`, `storage/api/`                                                                    | Log segments, checkpoints, tiered storage APIs                                                     |
-| `group-coordinator/`, `share-coordinator/`, `transaction-coordinator/`, `coordinator-common/` | Coordinators                                                                                       |
-| `connect/`                                                                                    | Kafka Connect (api, runtime, plugins, transforms)                                                  |
-| `streams/`                                                                                    | Kafka Streams (+ Scala, examples, upgrade system tests)                                            |
-| `generator/`                                                                                  | RPC/message code generation                                                                        |
-| `tools/`, `shell/`                                                                            | CLI tools and kafka metadata shell                                                                 |
-| `examples/`                                                                                   | Kafka producer and consumer examples                                                               |
-| `jmh-benchmarks/`                                                                             | Kafka benchmarks tests                                                                             |
-| `trogdor/`                                                                                    | test framework                                                                                     |
-| `tests/`                                                                                      | System test harness (see `tests/README.md`)                                                        |
-| `config/`                                                                                     | Sample broker/controller configuration                                                             |
-| `checkstyle/`                                                                                 | Checkstyle rules and import-control XML                                                            |
-| `docs/`                                                                                       | Documentation sources                                                                              |
-| `docker/`                                                                                     | Docker images, build/test scripts, and examples for JVM and native Kafka           |
-
-
-## Build commands
+## Build Commands
 
 ```bash
-# Compile jars
+# Full build (jar only, skip tests)
 ./gradlew jar
 
-# Release tarball (output under core/build/distributions/)
-./gradlew clean releaseTarGz
+# Compile check (fast feedback loop)
+./gradlew :clients:compileJava :core:compileScala :storage:compileJava :server:compileJava
 
-# Publish to local Maven (skip signing for local dev)
-./gradlew -PskipSigning=true publishToMavenLocal
-
-# Regenerate RPC/message classes after branch switches
-./gradlew processMessages processTestMessages
-
-# List tasks
-./gradlew tasks
-```
-
-Module-scoped build:
-
-```bash
-./gradlew core:jar
-./gradlew clients:jar
-./gradlew :streams:testAll
-```
-
-## Test commands
-
-```bash
-# All unit + integration tests
+# Run all tests
 ./gradlew test
 
-# Split suites
-./gradlew unitTest
-./gradlew integrationTest
+# Run a specific test class
+./gradlew :core:test --tests "kafka.network.SocketServerTest"
+./gradlew :server:test --tests "org.apache.kafka.server.ursa.integration.UrsaStorageE2ETest"
 
-# Include flaky tests (marked @Flaky)
-./gradlew test -Pkafka.test.run.flaky=true
+# Run a specific test method
+./gradlew :core:test --tests "kafka.api.ProducerFailureHandlingTest.testCannotSendToInternalTopic"
 
-# Re-run without considering up-to-date
-./gradlew test --rerun-tasks
+# Run only Ursa integration tests (isolated from main suite)
+./gradlew test -Pkafka.ci.isolated.tests=only
 
-# Single test class
-./gradlew clients:test --tests RequestResponseTest
+# Run main tests excluding Ursa integration tests
+./gradlew test -Pkafka.ci.isolated.tests=exclude
 
-# Single test method
-./gradlew clients:clients-integration-tests:test --tests org.apache.kafka.clients.producer.ProducerFailureHandlingTest.testCannotSendToInternalTopic
-
-# Coverage (whole project or one module)
-./gradlew reportCoverage -PenableTestCoverage=true -Dorg.gradle.parallel=false
-./gradlew clients:reportCoverage -PenableTestCoverage=true -Dorg.gradle.parallel=false
+# Checkstyle / SpotBugs / Spotless (run automatically with test)
+./gradlew :storage:checkstyleMain
+./gradlew :core:checkstyleMain
+./gradlew spotlessCheck        # import order check
+./gradlew spotlessApply        # auto-fix import order
 ```
 
-**Test retries** (optional): `-PmaxTestRetries=1 -PmaxTestRetryFailures=3`
+## Code Quality
 
-**Logging**: adjust `log4j2.yaml` under `<module>/src/test/resources/` for verbose test logs.
+- **Checkstyle**: Each module has its own import-control XML (`checkstyle/import-control-*.xml`). The `storage` module uses `import-control-storage.xml` which defines allowed package dependencies per subpackage.
+- **SpotBugs**: Exclusions in `gradle/spotbugs-exclude.xml`.
+- **Spotless**: Enforces import order: `kafka`, `org.apache.kafka`, `com`, `net`, `org`, `java`, `javax`, then static imports.
+- **Compiler**: `-Werror` is enabled for main sources. Java release target is 17 (except clients/streams which target 11).
+- **Imports**: Always use `import` statements instead of fully-qualified class names in code (e.g., write `import java.util.HashMap;` and use `HashMap`, not `java.util.HashMap` inline).
 
-**System tests**: see [tests/README.md](tests/README.md).
+## Architecture: Diskless Storage Integration
 
-## Code quality
+### How Ursa Integrates with Kafka
 
-Run before submitting Java changes:
+The diskless layer is a **bypass** in `ReplicaManager` that routes storage operations to Ursa instead of local logs, on a per-topic basis (`ursa.storage.enable=true` topic config).
+
+```
+KafkaApis → ReplicaManager → DisklessStorageReplicaManagerSupport
+                                  ├── diskless topics → UrsaManagedLedgerWriter / UrsaManagedLedgerReader → Ursa
+                                  └── classic topics  → local Log (unchanged)
+```
+
+### Key Modules
+
+| Module | Language | Ursa Role |
+|--------|----------|-----------|
+| `storage/` | Java | Diskless storage core: Writer, Reader, ProducerStateStore, config |
+| `core/` | Scala | Broker: `ReplicaManager`, `KafkaApis`, `SocketServer`, `BrokerServer` |
+| `server/` | Java | Server configs (`SocketServerConfigs`), Ursa E2E integration tests |
+| `clients/` | Java | Network layer: `KafkaChannel`, `NetworkReceive`, `Selector` |
+
+### Key Source Files
+
+**Diskless storage** (`storage/src/main/java/org/apache/kafka/storage/diskless/`):
+- `DisklessStorageReplicaManagerSupport.java` — Entry point; partitions requests between diskless and classic paths
+- `handlers/UrsaManagedLedgerWriter.java` — Write path (async append via ManagedLedger)
+- `handlers/UrsaManagedLedgerReader.java` — Read path (Fetch + ListOffsets)
+- `handlers/UrsaStorageState.java` — Stream IDs, offset tracking, shared state
+- `handlers/UrsaStorageConfig.java` — Configuration holder
+- `handlers/NonIdempotentPartitionAppendPipeline.java` — Per-partition append pipelining
+- `idempotent/UrsaProducerStateStore.java` — Producer state persistence to Oxia
+
+**Broker integration** (`core/src/main/scala/kafka/server/`):
+- `ReplicaManager.scala` — Calls `DisklessStorageReplicaManagerSupport` for diskless topics
+- `KafkaApis.scala` — Request handling, async produce/fetch for diskless
+- `BrokerServer.scala` — Initializes diskless storage support
+- `ReplicaFetcherThread.scala` — Skips fetching for diskless partitions
+
+**Network / Pipelining** (`core/src/main/scala/kafka/network/`):
+- `SocketServer.scala` — Request pipelining support (`socket.server.enable.request.pipelining`)
+
+### Design Principles
+
+1. **Topic-level granularity**: Diskless mode per-topic; mixed deployments supported
+2. **Async-first**: All Ursa operations return `CompletableFuture`; never block request handler threads
+3. **RF=1**: Ursa handles durability; Kafka-level ISR replication bypassed for diskless topics
+4. **Transparent clients**: No protocol changes; existing producers/consumers work unmodified
+5. **Avoid code duplication**: Extract common logic into helper methods
+6. **Follow existing Kafka code conventions and patterns when possible**
+
+### Limitations
+
+- No transactional producer support for diskless topics
+- No K/V log compaction (only external Ursa compaction to Parquet)
+- Internal topics (`__consumer_offsets`, `__transaction_state`) always use local storage
+
+## Critical Patterns
+
+### Ursa Dependencies
+The `storage` module depends on `io.streamnative:ursa-storage-core`, `ursa-storage-ml`, `managed-ledger`, and `io.github.oxia-db:oxia-client-api`. These are excluded from most test classpaths via `excludeUrsaStorageDeps` (defined in root `build.gradle`) because they slow down ClassGraph scanning.
+
+### Isolated CI Tests
+Ursa integration tests (`org/apache/kafka/server/ursa/integration/**`, `org/apache/kafka/storage/diskless/**`) are isolated from the main test suite. Use `-Pkafka.ci.isolated.tests=only` to run them, or `=exclude` to skip them.
+
+### Verify License After Dependency Changes
+When adding, removing, or upgrading dependencies in `build.gradle`, the binary distribution's `LICENSE-binary` file must be kept in sync. `LICENSE-binary` lists every third-party jar bundled under `./libs` in the release tarball, grouped by license type (Apache 2.0, MIT, BSD, etc.). Run the verification script to check for mismatches:
+```bash
+# Full check: builds releaseTarGz, extracts tarball, compares libs/ against LICENSE-binary
+python committer-tools/verify_license.py
+
+# Skip the build if you already have a tarball from a previous build
+python committer-tools/verify_license.py --skip-build
+```
+The script reports jars missing from `LICENSE-binary` (need to add) and stale entries in `LICENSE-binary` no longer in `./libs` (need to remove). If adding a dependency with a non-Apache license, also add the license text to the `licenses/` directory and reference it in the appropriate section of `LICENSE-binary`.
+
+## Docker Demo
 
 ```bash
-./gradlew spotlessApply          # fix import order / formatting
-./gradlew checkstyleMain checkstyleTest spotlessCheck
-./gradlew spotbugsMain spotbugsTest -x test   # optional static analysis
+cd docker/examples/docker-compose-files/cluster/ursa
+./build-image.sh          # Build kafka-diskless:latest
+make demo                 # Full demo: 3-broker cluster + Oxia + MinIO + perf test
+make up                   # Start cluster only
+make create-topic         # Create diskless topic
 ```
 
-Checkstyle reports: `<module>/build/reports/checkstyle/`.
+Architecture: 3 Kafka brokers + Oxia (metadata) + MinIO (S3 storage). Ports: kafka-1:29092, kafka-2:39092, kafka-3:49092, oxia:6648, minio:19000/19001.
 
-## Coding conventions
+## Upstream Compatibility
 
-- **Commits / PR titles**: Start with `KAFKA-XXXXX`, `MINOR`, or `HOTFIX`. Use `KAFKA-XXXXX` only when there is a valid Jira ticket for the change.
-- **AI-generated contributions**: Follow the [AI-Generated Contributions](CONTRIBUTING.md#ai-generated-contributions) section in `CONTRIBUTING.md` — add a `Co-Authored-By` or `Generated-by` commit trailer for AI-assisted changes.
-- **Public API / KIP**: Changes to public interfaces, wire protocol, configurations, or metrics generally require a [KIP](https://cwiki.apache.org/confluence/display/KAFKA/Kafka+Improvement+Proposals). See the `javadoc` `include` list in [build.gradle](build.gradle) for packages treated as public API.
-- **License header**: New source files need the standard ASF license header (see existing files in the same module).
-- **Checkstyle**: Enforced on main and test sources; rules in `checkstyle/`. Import order is checked via Spotless.
-- **Generated code**: Do not hand-edit generated RPC/message sources. Regenerate with `processMessages` / `processTestMessages`. See [clients/src/main/resources/common/message/README.md](clients/src/main/resources/common/message/README.md).
-- **Scope**: Prefer targeted unit tests in the module you change; integration/system tests for cross-component behavior.
-- **Compatibility**: clients, generator, and streams modules support Java 11+; all other modules require Java 17+. Avoid APIs that break those release levels.
-
-## Security
-
-See [SECURITY.md](./SECURITY.md) for how to report a vulnerability and for links
-to the Apache Kafka security model under [docs/security/](./docs/security/).
-
-Agents that scan this repository should consult `SECURITY.md` and the linked
-security model before reporting issues. In particular, the core model defines
-what is in and out of scope, how reports are classified, and a list of known
-non-findings; each component page adds its own known non-findings.
-
-## Reference docs
-
-| Topic                          | Location |
-|--------------------------------|----------|
-| Build, test, broker quickstart | [README.md](README.md) |
-| Contributing                   | [CONTRIBUTING.md](CONTRIBUTING.md), https://kafka.apache.org/contributing.html |
-| Message protocol / codegen     | [clients/src/main/resources/common/message/README.md](clients/src/main/resources/common/message/README.md) |
-| System tests                   | [tests/README.md](tests/README.md) |
-| JMH benchmarks                 | [jmh-benchmarks/README.md](jmh-benchmarks/README.md) |
-| Client examples                | [examples/README.md](examples/README.md) |
-| Security                       | [SECURITY.md](SECURITY.md) |
+This is a fork — changes should minimize divergence from upstream Apache Kafka. When modifying core Kafka code:
+- Prefer additive changes (new methods, new config options) over modifying existing behavior
+- Keep diskless logic behind `isDisklessTopic()` checks
+- Ensure all existing Kafka tests continue to pass with diskless disabled
