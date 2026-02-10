@@ -98,7 +98,7 @@ Apache Kafka's KIP-405 introduced tiered storage, where older log segments are m
 
 2. **Internal Topics**: System topics like `__consumer_offsets` and `__transaction_state` remain on traditional local storage.
 
-3. **Compacted Topics**: Log compaction is not supported for diskless topics in this phase.
+3. **Compacted Topics**: Kafka key-based log compaction semantics are not supported for diskless topics in this phase. Only external WAL-to-Parquet style compaction in the Ursa storage layer (for storage/analytics) is available.
 
 4. **Consumer Group Offset Storage**: Consumer offsets continue to use the traditional `__consumer_offsets` topic.
 
@@ -106,7 +106,7 @@ Apache Kafka's KIP-405 introduced tiered storage, where older log segments are m
 
 The diskless storage architecture introduces a **bypass layer** that intercepts storage operations in the `ReplicaManager` and routes them to Ursa instead of local logs.
 
-In this SNIP, diskless topics are primarily handled by the ManagedLedger-based implementations `UrsaManagedLedgerWriter` / `UrsaManagedLedgerReader`. The direct `StorageApi` implementations `UrsaManagedLedgerWriter` / `UrsaStorageReader` are an alternative when `ursa.storage.use.managed.ledger=false`.
+In this SNIP, diskless topics are handled by the ManagedLedger-based implementations `UrsaManagedLedgerWriter` / `UrsaManagedLedgerReader`.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -135,7 +135,7 @@ In this SNIP, diskless topics are primarily handled by the ManagedLedger-based i
 │   │  │              │                   │                   │      │    │   │
 │   │  │              ▼                   ▼                   ▼      │    │   │
 │   │  │    ┌─────────────────┐ ┌─────────────────┐ ┌────────────┐   │    │   │
-│   │  │    │ UrsaManagedLedgerWriter│ │ UrsaStorageReader│ │ Classic Log│   │    │   │
+│   │  │    │UrsaML Writer    │ │UrsaML Reader    │ │ Classic Log│   │    │   │
 │   │  │    └────────┬────────┘ └────────┬────────┘ └─────┬──────┘   │    │   │
 │   │  └─────────────┼───────────────────┼────────────────┼──────────┘    │   │
 │   └────────────────┼───────────────────┼────────────────┼───────────────┘   │
@@ -229,11 +229,9 @@ ReplicaManager.appendRecords()
 - Producer state validation and updates are async operations to Oxia
 - Callback composition using `thenCompose` and `whenComplete`
 
-#### Performance Note (): Why `flush.interval=250ms` Can Become `~1000ms+` Produce Latency
+#### Performance Note: Why `flush.interval=250ms` Can Become `~1000ms+` Produce Latency
 
-This section applies to the direct `StorageApi` mode (`ursa.storage.use.managed.ledger=false`).
-
-Ursa’s write buffer is flushed periodically (`ursa.storage.write.buffer.flush.interval.ms`). In isolation, a single append typically completes within:
+Ursa's write buffer is flushed periodically (`ursa.storage.write.buffer.flush.interval.ms`). In isolation, a single append typically completes within:
 - **best case**: just after a flush (near-0 additional wait)
 - **worst case**: just before a flush (up to ~`flush.interval` additional wait)
 - **average**: ~`flush.interval / 2` additional wait (assuming uniform arrival within the cycle)
@@ -261,9 +259,9 @@ We make two complementary changes:
    - Preserve correctness by enforcing **in-order responses per connection** (buffer completed responses until earlier responses are sent).
    - Keep throttling semantics: throttled requests still apply backpressure via mute/unmute during the throttle window.
 
-2. **Per-partition Non-idempotent Append Pipelining (UrsaManagedLedgerWriter)**:
-   - For non-idempotent producers, allow multiple `StorageApi.append(streamId, …)` calls in-flight per partition (bounded concurrency).
-   - Rely on Ursa’s stream property: for the same `streamId`, `append()` calls can be concurrent and their futures complete **in invocation order**, which preserves Kafka partition ordering.
+2. **Per-partition Non-idempotent Append Pipelining (NonIdempotentPartitionAppendPipeline)**:
+   - For non-idempotent producers, allow multiple `ManagedLedger.asyncAddEntry()` calls in-flight per partition (bounded concurrency).
+   - Rely on ManagedLedger's guarantee: append responses complete **in invocation order**, which preserves Kafka partition ordering.
    - For idempotent producers, keep per-partition serialization around sequence validation/state updates.
 
 #### Threading Model (What Runs Where)
@@ -371,7 +369,7 @@ ReplicaManager.fetchOffset()
    - Duplicate partition check → `INVALID_REQUEST`
    - Unsupported timestamp for protocol version → `UNSUPPORTED_VERSION`
 
-2. **EARLIEST/LATEST Optimization**: In ManagedLedger mode, EARLIEST/LATEST are served from ManagedLedger positions (first position and last confirmed entry). In direct `StorageApi` mode, `StreamBoundaryCache` caches first/last entry metadata to avoid full stream reads.
+2. **EARLIEST/LATEST Optimization**: EARLIEST/LATEST are served from ManagedLedger positions (first position and last confirmed entry).
 
 3. **Timestamp Search**: Uses publishTime to narrow the candidate start entry (binary search), then scans Kafka records to compare actual record timestamps.
 
@@ -439,7 +437,10 @@ No protocol changes required.
 | `ursa.storage.namespace` | string | `default` | Namespace for Ursa streams |
 | `ursa.storage.wal.directory` | string | `/tmp/ursa-wal` | Write-ahead log directory |
 | `ursa.storage.write.buffer.flush.interval.ms` | long | `250` | Write buffer flush interval |
+| `ursa.storage.write.buffer.size` | int | `4194304` (4MB) | Size of each WAL write buffer segment |
 | `ursa.storage.write.buffer.flush.size` | long | `268435456` (256MB) | Write buffer flush size threshold |
+| `ursa.storage.non.idempotent.max.in.flight.appends.per.partition` | int | `16` | Maximum in-flight non-idempotent appends per partition |
+| `ursa.storage.non.idempotent.max.in.flight.bytes.per.partition` | long | `-1` | Maximum bytes of in-flight non-idempotent appends per partition (-1 disables) |
 | `ursa.storage.s3.endpoint` | string | `""` | S3 endpoint URL |
 | `ursa.storage.s3.bucket` | string | `kafka-ursa-storage` | S3 bucket name |
 | `ursa.storage.s3.region` | string | `us-east-1` | S3 region |
@@ -622,13 +623,59 @@ For diskless topics:
 ### Limitations
 
 1. **No Transactions**: Transactional produce is rejected
-2. **No Compaction**: Log compaction not supported
+2. **No K/V Compaction**: K/V Log compaction is not supported
 3. **RF=1 Only**: Multi-replica diskless topics not supported
 4. **No Internal Topics**: System topics use traditional storage
 
 ### Future Enhancements
 
 1. **Transaction Support**: Integrate with Ursa's transaction capabilities
-2. **Compaction**: Implement remote compaction in Ursa
-3. **Multi-Region**: Cross-region replication via Ursa
-4. **Long-Poll Fetch**: Implement Ursa-aware fetch waiting
+2. **Multi-Region**: Cross-region replication via Ursa
+3. **Long-Poll Fetch**: Implement Ursa-aware fetch waiting
+
+### Compaction Support
+
+Diskless topics support **external compaction** via the Ursa compactor. In this mode, the compactor runs as a separate container and performs offline batch processing of WAL data, materializing it into Parquet files for efficient storage and analytical querying.
+
+This external compaction is **not** Kafka key/value log compaction and does **not** change consumer semantics for diskless topics. Kafka-side K/V log compaction remains unsupported for diskless topics (see **Limitations** → **No K/V Compaction**).
+**Architecture**:
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Kafka Broker   │────▶│   Ursa WAL      │────▶│  Ursa Compactor │
+│  (writes data)  │     │   (S3/Local)    │     │  (external)     │
+└─────────────────┘     └─────────────────┘     └────────┬────────┘
+                                                         │
+                                                         ▼
+                                               ┌─────────────────┐
+                                               │  Parquet Files  │
+                                               │  (S3/Local)     │
+                                               └─────────────────┘
+```
+
+**Docker Demo**:
+
+The repository includes Docker Compose files for running a compaction demo:
+
+```bash
+# Start the cluster with compaction support
+cd docker/examples/docker-compose-files/cluster/ursa
+docker compose -f docker-compose-localstack-compaction.yml up -d
+
+# Run the demo (creates topic, produces Avro records, waits for Parquet compaction)
+docker compose -f docker-compose-localstack-compaction.yml \
+  -f docker-compose-localstack-compaction.demo.yml \
+  run --rm avro-consumer
+
+# Cleanup
+docker compose -f docker-compose-localstack-compaction.yml down -v --remove-orphans
+```
+
+Or use the helper script:
+```bash
+bash ./run-localstack-compaction-demo.sh
+```
+
+**Requirements**:
+- Ursa compactor image (built from `ursa-storage` repository)
+- Schema Registry (for Avro serialization in demo)
+- LocalStack or real S3 for storage backend
