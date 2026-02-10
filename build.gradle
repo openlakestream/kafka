@@ -357,6 +357,8 @@ if (repo != null) {
         '**/build/**',
         '.github/pull_request_template.md',
         'CONTRIBUTING.md',
+        'AGENTS.md',
+        'CLAUDE.md',
         'gradlew',
         'gradlew.bat',
         'gradle/wrapper/gradle-wrapper.properties',
