@@ -184,6 +184,12 @@ public class ServerLogConfigs {
     public static final String URSA_STORAGE_ENABLE_DOC = "Enable Ursa storage mode instead of object storage. " +
             "When enabled, diskless storage will use Ursa StorageApi for stream-based storage.";
 
+    public static final String URSA_STORAGE_TOPIC_DEFAULT_ENABLE_CONFIG = "ursa.storage.topic.default.enable";
+    public static final boolean URSA_STORAGE_TOPIC_DEFAULT_ENABLE_DEFAULT = false;
+    public static final String URSA_STORAGE_TOPIC_DEFAULT_ENABLE_DOC =
+            "Enable diskless storage for topics by default when no topic-level override is provided. " +
+                    "Internal topics remain on classic storage.";
+
     public static final String URSA_STORAGE_OXIA_SERVICE_URL_CONFIG = "ursa.storage.oxia.service.url";
     public static final String URSA_STORAGE_OXIA_SERVICE_URL_DEFAULT = "localhost:6648";
     public static final String URSA_STORAGE_OXIA_SERVICE_URL_DOC = "The Oxia service URL for Ursa storage metadata.";

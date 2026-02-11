@@ -45,6 +45,7 @@ public class UrsaStorageConfig {
     private final String s3Bucket;
     private final String compactionBucket;
     private final String s3Region;
+    private final boolean topicDefaultEnabled;
 
     @SuppressWarnings("checkstyle:ParameterNumber")
     public UrsaStorageConfig(boolean enabled,
@@ -65,7 +66,8 @@ public class UrsaStorageConfig {
                              String compactionBucket,
                              String s3Region,
                              int nonIdempotentMaxInFlightAppendsPerPartition,
-                             long nonIdempotentMaxInFlightBytesPerPartition) {
+                             long nonIdempotentMaxInFlightBytesPerPartition,
+                             boolean topicDefaultEnabled) {
         this.enabled = enabled;
         this.oxiaServiceUrl = oxiaServiceUrl;
         this.walDirectory = walDirectory;
@@ -85,6 +87,7 @@ public class UrsaStorageConfig {
         this.s3Bucket = s3Bucket;
         this.compactionBucket = compactionBucket;
         this.s3Region = s3Region;
+        this.topicDefaultEnabled = topicDefaultEnabled;
     }
 
     /**
@@ -153,12 +156,20 @@ public class UrsaStorageConfig {
         String s3Region = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_S3_REGION_DEFAULT);
 
+        boolean topicDefaultEnabled = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_TOPIC_DEFAULT_ENABLE_CONFIG,
+                String.valueOf(ServerLogConfigs.URSA_STORAGE_TOPIC_DEFAULT_ENABLE_DEFAULT)).equals("true");
+
         return new UrsaStorageConfig(enabled, oxiaServiceUrl, walDirectory, namespace,
                 backendType, storagePath, compactionPrefix,
                 writeBufferFlushIntervalMs, writeBufferSize, writeBufferFlushSize,
                 BOUNDARY_CACHE_REFRESH_INTERVAL_MS_DEFAULT,
                 s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket, compactionBucket, s3Region,
-                nonIdempotentMaxInFlightAppendsPerPartition, nonIdempotentMaxInFlightBytesPerPartition);
+                nonIdempotentMaxInFlightAppendsPerPartition, nonIdempotentMaxInFlightBytesPerPartition,
+                topicDefaultEnabled);
+    }
+
+    public boolean isTopicDefaultEnabled() {
+        return topicDefaultEnabled;
     }
 
     private static String getStringConfig(Map<String, ?> configs, String key, String defaultValue) {
@@ -278,6 +289,7 @@ public class UrsaStorageConfig {
         private String s3Bucket = ServerLogConfigs.URSA_STORAGE_S3_BUCKET_DEFAULT;
         private String compactionBucket = ServerLogConfigs.URSA_STORAGE_COMPACTION_BUCKET_DEFAULT;
         private String s3Region = ServerLogConfigs.URSA_STORAGE_S3_REGION_DEFAULT;
+        private boolean topicDefaultEnabled = ServerLogConfigs.URSA_STORAGE_TOPIC_DEFAULT_ENABLE_DEFAULT;
 
         public Builder enabled(boolean enabled) {
             this.enabled = enabled;
@@ -374,6 +386,11 @@ public class UrsaStorageConfig {
             return this;
         }
 
+        public Builder topicDefaultEnabled(boolean topicDefaultEnabled) {
+            this.topicDefaultEnabled = topicDefaultEnabled;
+            return this;
+        }
+
         public UrsaStorageConfig build() {
             return new UrsaStorageConfig(enabled, oxiaServiceUrl, walDirectory, namespace,
                     backendType, storagePath, compactionPrefix,
@@ -381,7 +398,8 @@ public class UrsaStorageConfig {
                     boundaryCacheRefreshIntervalMs,
                     s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket, compactionBucket, s3Region,
                     nonIdempotentMaxInFlightAppendsPerPartition,
-                    nonIdempotentMaxInFlightBytesPerPartition);
+                    nonIdempotentMaxInFlightBytesPerPartition,
+                    topicDefaultEnabled);
         }
     }
 }

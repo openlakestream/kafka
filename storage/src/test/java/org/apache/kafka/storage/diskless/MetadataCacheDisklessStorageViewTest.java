@@ -34,7 +34,7 @@ class MetadataCacheDisklessStorageViewTest {
                 TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true"
         );
 
-        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, false);
+        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, false, false);
 
         assertFalse(view.isDisklessStorageTopic("test-topic"));
     }
@@ -45,7 +45,7 @@ class MetadataCacheDisklessStorageViewTest {
                 TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true"
         );
 
-        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, true);
+        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, true, false);
 
         assertTrue(view.isDisklessStorageTopic("test-topic"));
     }
@@ -56,7 +56,7 @@ class MetadataCacheDisklessStorageViewTest {
                 TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "false"
         );
 
-        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, true);
+        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, true, false);
 
         assertFalse(view.isDisklessStorageTopic("test-topic"));
     }
@@ -65,16 +65,36 @@ class MetadataCacheDisklessStorageViewTest {
     void testEnabledSystemWithMissingConfig() {
         Function<String, Map<String, String>> supplier = topic -> Map.of();
 
-        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, true);
+        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, true, false);
 
         assertFalse(view.isDisklessStorageTopic("test-topic"));
+    }
+
+    @Test
+    void testEnabledSystemWithMissingConfigUsesDefault() {
+        Function<String, Map<String, String>> supplier = topic -> Map.of();
+
+        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, true, true);
+
+        assertTrue(view.isDisklessStorageTopic("test-topic"));
+    }
+
+    @Test
+    void testInternalTopicNeverDiskless() {
+        Function<String, Map<String, String>> supplier = topic -> Map.of(
+                TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true"
+        );
+
+        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, true, true);
+
+        assertFalse(view.isDisklessStorageTopic("__consumer_offsets"));
     }
 
     @Test
     void testNullConfigReturnsEmpty() {
         Function<String, Map<String, String>> supplier = topic -> null;
 
-        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, true);
+        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, true, false);
 
         assertFalse(view.isDisklessStorageTopic("test-topic"));
         assertTrue(view.getTopicConfig("test-topic").isEmpty());
@@ -88,7 +108,7 @@ class MetadataCacheDisklessStorageViewTest {
         );
         Function<String, Map<String, String>> supplier = topic -> expectedConfig;
 
-        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, true);
+        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(supplier, true, false);
 
         Map<String, String> config = view.getTopicConfig("test-topic");
         assertTrue(config.containsKey(TopicConfig.URSA_STORAGE_ENABLE_CONFIG));
