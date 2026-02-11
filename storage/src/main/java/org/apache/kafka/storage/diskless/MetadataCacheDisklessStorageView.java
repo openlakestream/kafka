@@ -19,6 +19,7 @@ package org.apache.kafka.storage.diskless;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.network.ListenerName;
 
 import java.util.Collections;
@@ -31,22 +32,27 @@ public class MetadataCacheDisklessStorageView implements DisklessStorageMetadata
     private final Function<ListenerName, Iterable<Node>> aliveBrokerNodesSupplier;
     private final Function<String, Uuid> topicIdSupplier;
     private final boolean disklessStorageSystemEnabled;
+    private final boolean disklessStorageTopicDefaultEnabled;
 
     public MetadataCacheDisklessStorageView(
             Function<String, Map<String, String>> topicConfigSupplier,
-            boolean disklessStorageSystemEnabled) {
-        this(topicConfigSupplier, ln -> Collections.emptyList(), t -> Uuid.ZERO_UUID, disklessStorageSystemEnabled);
+            boolean disklessStorageSystemEnabled,
+            boolean disklessStorageTopicDefaultEnabled) {
+        this(topicConfigSupplier, ln -> Collections.emptyList(), t -> Uuid.ZERO_UUID, disklessStorageSystemEnabled,
+                disklessStorageTopicDefaultEnabled);
     }
 
     public MetadataCacheDisklessStorageView(
             Function<String, Map<String, String>> topicConfigSupplier,
             Function<ListenerName, Iterable<Node>> aliveBrokerNodesSupplier,
             Function<String, Uuid> topicIdSupplier,
-            boolean disklessStorageSystemEnabled) {
+            boolean disklessStorageSystemEnabled,
+            boolean disklessStorageTopicDefaultEnabled) {
         this.topicConfigSupplier = topicConfigSupplier;
         this.aliveBrokerNodesSupplier = aliveBrokerNodesSupplier;
         this.topicIdSupplier = topicIdSupplier;
         this.disklessStorageSystemEnabled = disklessStorageSystemEnabled;
+        this.disklessStorageTopicDefaultEnabled = disklessStorageTopicDefaultEnabled;
     }
 
     @Override
@@ -55,8 +61,15 @@ public class MetadataCacheDisklessStorageView implements DisklessStorageMetadata
             return false;
         }
 
+        if (Topic.isInternal(topic)) {
+            return false;
+        }
+
         Map<String, String> config = getTopicConfig(topic);
         String disklessStorageEnabled = config.get(TopicConfig.URSA_STORAGE_ENABLE_CONFIG);
+        if (disklessStorageEnabled == null) {
+            return disklessStorageTopicDefaultEnabled;
+        }
         return Boolean.parseBoolean(disklessStorageEnabled);
     }
 

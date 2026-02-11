@@ -890,15 +890,14 @@ public class ReplicationControlManager {
     }
 
     private DisklessCreateTopicResult prepareDisklessCreateTopic(CreatableTopic topic, Map<String, String> creationConfigs) {
+        if (Topic.isInternal(topic.name())) {
+            return DisklessCreateTopicResult.success(false);
+        }
         String disklessEnableConfigValue = creationConfigs.get(URSA_STORAGE_ENABLE_CONFIG);
         boolean disklessConfigEnabled = disklessEnableConfigValue != null && Boolean.parseBoolean(disklessEnableConfigValue);
+        boolean disklessDefaultEnabled = disklessStorageTopicDefaultEnabled(creationConfigs);
 
-        if (Topic.isInternal(topic.name()) && disklessConfigEnabled) {
-            return DisklessCreateTopicResult.error(new ApiError(INVALID_REQUEST,
-                "Internal topics cannot be diskless topics."));
-        }
-
-        boolean disklessEnabled = disklessConfigEnabled && !Topic.isInternal(topic.name());
+        boolean disklessEnabled = (disklessConfigEnabled || disklessDefaultEnabled) && !Topic.isInternal(topic.name());
         if (disklessEnabled) {
             if (!disklessStorageSystemEnabled) {
                 return DisklessCreateTopicResult.error(new ApiError(INVALID_REQUEST,
@@ -932,6 +931,14 @@ public class ReplicationControlManager {
         static DisklessCreateTopicResult error(ApiError error) {
             return new DisklessCreateTopicResult(false, error);
         }
+    }
+
+    private boolean disklessStorageTopicDefaultEnabled(Map<String, String> creationConfigs) {
+        if (creationConfigs.containsKey(URSA_STORAGE_ENABLE_CONFIG)) {
+            return false;
+        }
+        return Boolean.parseBoolean(configurationControl.getTopicConfig("", URSA_STORAGE_ENABLE_CONFIG)
+            .value());
     }
 
     private static PartitionRegistration buildPartitionRegistration(

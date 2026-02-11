@@ -188,6 +188,9 @@ public class LogConfig extends AbstractConfig {
             .defineInternal(ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_CONFIG, LONG, ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_DEFAULT, atLeast(0), LOW, ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_DOC)
             // Ursa Storage configurations
             .define(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG, BOOLEAN, ServerLogConfigs.URSA_STORAGE_ENABLE_DEFAULT, HIGH, ServerLogConfigs.URSA_STORAGE_ENABLE_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_TOPIC_DEFAULT_ENABLE_CONFIG, BOOLEAN,
+                    ServerLogConfigs.URSA_STORAGE_TOPIC_DEFAULT_ENABLE_DEFAULT, HIGH,
+                    ServerLogConfigs.URSA_STORAGE_TOPIC_DEFAULT_ENABLE_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_DEFAULT,
                     new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_DEFAULT,

@@ -431,6 +431,7 @@ No protocol changes required.
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
 | `ursa.storage.enable` | boolean | `false` | Master toggle for Ursa storage mode |
+| `ursa.storage.topic.default.enable` | boolean | `false` | Enable diskless storage for topics by default |
 | `ursa.storage.oxia.service.url` | string | `localhost:6648` | Oxia service URL for metadata |
 | `ursa.storage.backend.type` | string | `LOCAL` | Storage backend: `LOCAL`, `S3`, `AZURE_BLOB` |
 | `ursa.storage.path` | string | `/tmp/ursa-data` | Local storage path (for LOCAL backend) |

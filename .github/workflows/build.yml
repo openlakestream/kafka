@@ -434,7 +434,7 @@ jobs:
           SNBOT_GITHUB_TOKEN: ${{ secrets.SNBOT_GITHUB_TOKEN }}
         with:
           # Restrict to relevant modules to avoid compiling/running tests across the whole repo.
-          test-task: :server:test :storage:test
+          test-task: :server:test :storage:test :metadata:test
           timeout-minutes: 180  # 3 hours
           test-catalog-path: ""
           build-scan-artifact-name: build-scan-isolated-17

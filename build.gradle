@@ -611,7 +611,8 @@ subprojects {
   def isolatedCiTestsMode = project.findProperty('kafka.ci.isolated.tests')?.toString()
   def isolatedCiTestsPatterns = [
     'org/apache/kafka/server/ursa/integration/**',
-    'org/apache/kafka/storage/diskless/**'
+    'org/apache/kafka/storage/diskless/**',
+    'org/apache/kafka/controller/DisklessTopicDefaultsTest*'
   ]
   tasks.withType(Test).configureEach { t ->
     if (isolatedCiTestsMode == null) {

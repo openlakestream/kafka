@@ -94,7 +94,8 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
             return;
         }
 
-        this.metadataView = new MetadataCacheDisklessStorageView(topicConfigSupplier, true);
+        this.metadataView = new MetadataCacheDisklessStorageView(topicConfigSupplier, true,
+                ursaConfig.isTopicDefaultEnabled());
         this.enabled = true;
 
         this.ursaState = new UrsaStorageState(
