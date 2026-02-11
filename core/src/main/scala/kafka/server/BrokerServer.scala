@@ -352,6 +352,7 @@ class BrokerServer(
         config.brokerId,
         ursaStorageConfig,
         brokerTopicStats,
+        config.extractLogConfigMap,
         (topic: String) => {
           val props = metadataCache.topicConfig(topic)
           val result = new util.HashMap[String, String]()
