@@ -37,6 +37,10 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
             "io.streamnative.ursa.mledger.reader.NoopExternalReaderFactory";
     private static final String SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP = "ursa.externalReaderFactoryClass";
     private static final String SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP = "kopSchemaRegistryUrl";
+    private static final String SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP =
+            "kopSchemaRegistryHttpHeaderAuthorization";
+    private static final String SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP =
+            "kopSchemaRegistryHttpHeaderAuthorizationFile";
 
     private final ManagedLedgerFactory managedLedgerFactory;
     private final PersistentStorageWalManagedLedgerStorage managedLedgerStorage;
@@ -65,47 +69,7 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
         try {
             ServiceConfiguration serviceConfiguration = new ServiceConfiguration();
             String oxiaUrl = formatOxiaUrl(config);
-            Properties properties = new Properties();
-            properties.setProperty("backendStorageType", config.getBackendType());
-            properties.setProperty("storagePath", config.getStoragePath());
-            properties.setProperty("oxiaPulsarStorageUrl", oxiaUrl);
-            properties.setProperty("metadataStoreUrl", oxiaUrl);
-            properties.setProperty("writeBufferFlushIntervalMs", String.valueOf(config.getWriteBufferFlushIntervalMs()));
-            properties.setProperty("writeBufferSize", String.valueOf(config.getWriteBufferSize()));
-            properties.setProperty("writeBufferFlushSize", String.valueOf(config.getWriteBufferFlushSize()));
-
-            if ("S3".equalsIgnoreCase(config.getBackendType())) {
-                setIfNotEmpty(config.getS3Endpoint(), v -> properties.setProperty("cloudStorageEndpoint", v));
-                setIfNotEmpty(config.getS3AccessKey(), v -> properties.setProperty("s3AccessKeyId", v));
-                setIfNotEmpty(config.getS3SecretKey(), v -> properties.setProperty("s3SecretAccessKey", v));
-                setIfNotEmpty(config.getS3Bucket(), v -> properties.setProperty("bucket", v));
-                setIfNotEmpty(config.getStoragePath(), v -> properties.setProperty("prefix", v));
-                setIfNotEmpty(config.getS3Region(), v -> properties.setProperty("region", v));
-                // Deprecated fields, keep for compatibility with older configs.
-                setIfNotEmpty(config.getS3Bucket(), v -> properties.setProperty("s3Bucket", v));
-                setIfNotEmpty(config.getStoragePath(), v -> properties.setProperty("s3Prefix", v));
-                setIfNotEmpty(config.getS3Region(), v -> properties.setProperty("s3Region", v));
-            }
-
-            String externalReaderFactoryClass =
-                    System.getProperty(SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP, NOOP_EXTERNAL_READER_FACTORY_CLASS);
-            properties.setProperty(EXTERNAL_READER_FACTORY_CLASS_PROP, externalReaderFactoryClass);
-            if (!NOOP_EXTERNAL_READER_FACTORY_CLASS.equals(externalReaderFactoryClass)) {
-                // Required by LakehouseReaderFactory / KSNSchemaRegistry.
-                String kopSchemaRegistryUrl = System.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP);
-                if (kopSchemaRegistryUrl != null && !kopSchemaRegistryUrl.isBlank()) {
-                    properties.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP, kopSchemaRegistryUrl);
-                }
-
-                // Required by LakehouseConfiguration for s3a:// path resolution (compaction output).
-                if ("S3".equalsIgnoreCase(config.getBackendType())) {
-                    properties.setProperty("compactionBackendStorageType", "S3");
-                    properties.setProperty("compactionBucket", config.getS3Bucket());
-                    properties.setProperty("compactionPrefix", config.getStoragePath());
-                    properties.setProperty("compactionBucketRegion", config.getS3Region());
-                    properties.setProperty("cloudStorageEndpoint", config.getS3Endpoint());
-                }
-            }
+            Properties properties = buildManagedLedgerProperties(config, oxiaUrl);
             serviceConfiguration.setProperties(properties);
             serviceConfiguration.setMetadataStoreUrl(oxiaUrl);
             serviceConfiguration.setConfigurationMetadataStoreUrl(oxiaUrl);
@@ -140,6 +104,69 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
      */
     static String formatOxiaUrl(UrsaStorageConfig config) {
         return "oxia://" + config.getOxiaServiceUrl() + "/" + config.getNamespace();
+    }
+
+    static Properties buildManagedLedgerProperties(UrsaStorageConfig config, String oxiaUrl) {
+        Properties properties = new Properties();
+        properties.setProperty("backendStorageType", config.getBackendType());
+        properties.setProperty("storagePath", config.getStoragePath());
+        properties.setProperty("oxiaPulsarStorageUrl", oxiaUrl);
+        properties.setProperty("metadataStoreUrl", oxiaUrl);
+        properties.setProperty("writeBufferFlushIntervalMs", String.valueOf(config.getWriteBufferFlushIntervalMs()));
+        properties.setProperty("writeBufferSize", String.valueOf(config.getWriteBufferSize()));
+        properties.setProperty("writeBufferFlushSize", String.valueOf(config.getWriteBufferFlushSize()));
+
+        if ("S3".equalsIgnoreCase(config.getBackendType())) {
+            setIfNotEmpty(config.getS3Endpoint(), v -> properties.setProperty("cloudStorageEndpoint", v));
+            setIfNotEmpty(config.getS3AccessKey(), v -> properties.setProperty("s3AccessKeyId", v));
+            setIfNotEmpty(config.getS3SecretKey(), v -> properties.setProperty("s3SecretAccessKey", v));
+            setIfNotEmpty(config.getS3Bucket(), v -> properties.setProperty("bucket", v));
+            setIfNotEmpty(config.getStoragePath(), v -> properties.setProperty("prefix", v));
+            setIfNotEmpty(config.getS3Region(), v -> properties.setProperty("region", v));
+            // Deprecated fields, keep for compatibility with older configs.
+            setIfNotEmpty(config.getS3Bucket(), v -> properties.setProperty("s3Bucket", v));
+            setIfNotEmpty(config.getStoragePath(), v -> properties.setProperty("s3Prefix", v));
+            setIfNotEmpty(config.getS3Region(), v -> properties.setProperty("s3Region", v));
+        }
+
+        String externalReaderFactoryClass =
+                System.getProperty(SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP, NOOP_EXTERNAL_READER_FACTORY_CLASS);
+        properties.setProperty(EXTERNAL_READER_FACTORY_CLASS_PROP, externalReaderFactoryClass);
+        if (!NOOP_EXTERNAL_READER_FACTORY_CLASS.equals(externalReaderFactoryClass)) {
+            // Required by LakehouseReaderFactory / KSNSchemaRegistry.
+            String kopSchemaRegistryUrl = System.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP);
+            if (kopSchemaRegistryUrl != null && !kopSchemaRegistryUrl.isBlank()) {
+                properties.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP, kopSchemaRegistryUrl);
+            }
+
+            String kopSchemaRegistryHttpHeaderAuthorizationFile =
+                    System.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP);
+            if (kopSchemaRegistryHttpHeaderAuthorizationFile != null
+                    && !kopSchemaRegistryHttpHeaderAuthorizationFile.isBlank()) {
+                properties.setProperty(
+                        SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP,
+                        kopSchemaRegistryHttpHeaderAuthorizationFile);
+            } else {
+                String kopSchemaRegistryHttpHeaderAuthorization =
+                        System.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP);
+                if (kopSchemaRegistryHttpHeaderAuthorization != null
+                        && !kopSchemaRegistryHttpHeaderAuthorization.isBlank()) {
+                    properties.setProperty(
+                            SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP,
+                            kopSchemaRegistryHttpHeaderAuthorization);
+                }
+            }
+
+            // Required by LakehouseConfiguration for s3a:// path resolution (compaction output).
+            if ("S3".equalsIgnoreCase(config.getBackendType())) {
+                properties.setProperty("compactionBackendStorageType", "S3");
+                properties.setProperty("compactionBucket", config.getS3Bucket());
+                properties.setProperty("compactionPrefix", config.getStoragePath());
+                properties.setProperty("compactionBucketRegion", config.getS3Region());
+                properties.setProperty("cloudStorageEndpoint", config.getS3Endpoint());
+            }
+        }
+        return properties;
     }
 
     private static void setIfNotEmpty(String value, java.util.function.Consumer<String> setter) {
