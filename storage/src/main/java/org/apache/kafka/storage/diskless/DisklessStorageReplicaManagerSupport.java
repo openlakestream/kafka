@@ -73,6 +73,7 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
      * @param brokerId           the broker ID
      * @param ursaConfig         the Ursa storage configuration
      * @param brokerTopicStats   the broker topic stats
+     * @param logConfigDefaults  default log configuration values
      * @param topicConfigSupplier function to get topic configuration
      */
     public DisklessStorageReplicaManagerSupport(
@@ -80,6 +81,7 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
             int brokerId,
             UrsaStorageConfig ursaConfig,
             BrokerTopicStats brokerTopicStats,
+            Map<String, Object> logConfigDefaults,
             Function<String, Map<String, String>> topicConfigSupplier) {
 
         if (ursaConfig == null || !ursaConfig.isEnabled()) {
@@ -99,7 +101,9 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
                 time,
                 brokerId,
                 ursaConfig,
-                brokerTopicStats
+                brokerTopicStats,
+                logConfigDefaults,
+                topicConfigSupplier
         );
 
         this.writer = new UrsaManagedLedgerWriter(ursaState);
