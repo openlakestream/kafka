@@ -31,6 +31,7 @@ public class UrsaStorageConfig {
     private final String namespace;
     private final String backendType;
     private final String storagePath;
+    private final String compactionPrefix;
     private final long writeBufferFlushIntervalMs;
     private final int writeBufferSize;
     private final long writeBufferFlushSize;
@@ -42,6 +43,7 @@ public class UrsaStorageConfig {
     private final String s3AccessKey;
     private final String s3SecretKey;
     private final String s3Bucket;
+    private final String compactionBucket;
     private final String s3Region;
 
     @SuppressWarnings("checkstyle:ParameterNumber")
@@ -51,6 +53,7 @@ public class UrsaStorageConfig {
                              String namespace,
                              String backendType,
                              String storagePath,
+                             String compactionPrefix,
                              long writeBufferFlushIntervalMs,
                              int writeBufferSize,
                              long writeBufferFlushSize,
@@ -59,6 +62,7 @@ public class UrsaStorageConfig {
                              String s3AccessKey,
                              String s3SecretKey,
                              String s3Bucket,
+                             String compactionBucket,
                              String s3Region,
                              int nonIdempotentMaxInFlightAppendsPerPartition,
                              long nonIdempotentMaxInFlightBytesPerPartition) {
@@ -68,6 +72,7 @@ public class UrsaStorageConfig {
         this.namespace = namespace;
         this.backendType = backendType;
         this.storagePath = storagePath;
+        this.compactionPrefix = compactionPrefix;
         this.writeBufferFlushIntervalMs = writeBufferFlushIntervalMs;
         this.writeBufferSize = writeBufferSize;
         this.writeBufferFlushSize = writeBufferFlushSize;
@@ -78,6 +83,7 @@ public class UrsaStorageConfig {
         this.s3AccessKey = s3AccessKey;
         this.s3SecretKey = s3SecretKey;
         this.s3Bucket = s3Bucket;
+        this.compactionBucket = compactionBucket;
         this.s3Region = s3Region;
     }
 
@@ -105,6 +111,9 @@ public class UrsaStorageConfig {
 
         String storagePath = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_PATH_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_PATH_DEFAULT);
+
+        String compactionPrefix = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_COMPACTION_PREFIX_CONFIG,
+                ServerLogConfigs.URSA_STORAGE_COMPACTION_PREFIX_DEFAULT);
 
         long writeBufferFlushIntervalMs = getLongConfig(configs,
                 ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_CONFIG,
@@ -138,13 +147,17 @@ public class UrsaStorageConfig {
         String s3Bucket = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_S3_BUCKET_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_S3_BUCKET_DEFAULT);
 
+        String compactionBucket = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_COMPACTION_BUCKET_CONFIG,
+                s3Bucket);
+
         String s3Region = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_S3_REGION_DEFAULT);
 
         return new UrsaStorageConfig(enabled, oxiaServiceUrl, walDirectory, namespace,
-                backendType, storagePath, writeBufferFlushIntervalMs, writeBufferSize, writeBufferFlushSize,
+                backendType, storagePath, compactionPrefix,
+                writeBufferFlushIntervalMs, writeBufferSize, writeBufferFlushSize,
                 BOUNDARY_CACHE_REFRESH_INTERVAL_MS_DEFAULT,
-                s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket, s3Region,
+                s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket, compactionBucket, s3Region,
                 nonIdempotentMaxInFlightAppendsPerPartition, nonIdempotentMaxInFlightBytesPerPartition);
     }
 
@@ -187,6 +200,10 @@ public class UrsaStorageConfig {
         return storagePath;
     }
 
+    public String getCompactionPrefix() {
+        return compactionPrefix;
+    }
+
     public long getWriteBufferFlushIntervalMs() {
         return writeBufferFlushIntervalMs;
     }
@@ -227,6 +244,10 @@ public class UrsaStorageConfig {
         return s3Bucket;
     }
 
+    public String getCompactionBucket() {
+        return compactionBucket;
+    }
+
     public String getS3Region() {
         return s3Region;
     }
@@ -242,6 +263,7 @@ public class UrsaStorageConfig {
         private String namespace = "default";
         private String backendType = ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_DEFAULT;
         private String storagePath = ServerLogConfigs.URSA_STORAGE_PATH_DEFAULT;
+        private String compactionPrefix = ServerLogConfigs.URSA_STORAGE_COMPACTION_PREFIX_DEFAULT;
         private long writeBufferFlushIntervalMs = ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DEFAULT;
         private int writeBufferSize = ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_SIZE_DEFAULT;
         private long writeBufferFlushSize = ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DEFAULT;
@@ -254,6 +276,7 @@ public class UrsaStorageConfig {
         private String s3AccessKey = ServerLogConfigs.URSA_STORAGE_S3_ACCESS_KEY_DEFAULT;
         private String s3SecretKey = ServerLogConfigs.URSA_STORAGE_S3_SECRET_KEY_DEFAULT;
         private String s3Bucket = ServerLogConfigs.URSA_STORAGE_S3_BUCKET_DEFAULT;
+        private String compactionBucket = ServerLogConfigs.URSA_STORAGE_COMPACTION_BUCKET_DEFAULT;
         private String s3Region = ServerLogConfigs.URSA_STORAGE_S3_REGION_DEFAULT;
 
         public Builder enabled(boolean enabled) {
@@ -283,6 +306,16 @@ public class UrsaStorageConfig {
 
         public Builder storagePath(String storagePath) {
             this.storagePath = storagePath;
+            return this;
+        }
+
+        public Builder compactionPrefix(String compactionPrefix) {
+            this.compactionPrefix = compactionPrefix;
+            return this;
+        }
+
+        public Builder compactionBucket(String compactionBucket) {
+            this.compactionBucket = compactionBucket;
             return this;
         }
 
@@ -343,10 +376,10 @@ public class UrsaStorageConfig {
 
         public UrsaStorageConfig build() {
             return new UrsaStorageConfig(enabled, oxiaServiceUrl, walDirectory, namespace,
-                    backendType, storagePath,
+                    backendType, storagePath, compactionPrefix,
                     writeBufferFlushIntervalMs, writeBufferSize, writeBufferFlushSize,
                     boundaryCacheRefreshIntervalMs,
-                    s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket, s3Region,
+                    s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket, compactionBucket, s3Region,
                     nonIdempotentMaxInFlightAppendsPerPartition,
                     nonIdempotentMaxInFlightBytesPerPartition);
         }

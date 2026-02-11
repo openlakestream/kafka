@@ -199,6 +199,12 @@ public class LogConfig extends AbstractConfig {
                     LOW, ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_PATH_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_PATH_DEFAULT,
                     new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_PATH_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_COMPACTION_PREFIX_CONFIG, STRING,
+                    ServerLogConfigs.URSA_STORAGE_COMPACTION_PREFIX_DEFAULT,
+                    new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_COMPACTION_PREFIX_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_COMPACTION_BUCKET_CONFIG, STRING,
+                    ServerLogConfigs.URSA_STORAGE_COMPACTION_BUCKET_DEFAULT,
+                    new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_COMPACTION_BUCKET_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_CONFIG, LONG, ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DEFAULT, atLeast(0), LOW, ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_CONFIG, LONG, ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DEFAULT, atLeast(0), LOW, ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_DEFAULT, LOW, ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_DOC)
