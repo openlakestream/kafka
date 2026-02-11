@@ -205,6 +205,14 @@ public class ServerLogConfigs {
     public static final String URSA_STORAGE_PATH_DEFAULT = "/tmp/ursa-data";
     public static final String URSA_STORAGE_PATH_DOC = "The path for Ursa storage data files.";
 
+    public static final String URSA_STORAGE_COMPACTION_PREFIX_CONFIG = "ursa.storage.compaction.prefix";
+    public static final String URSA_STORAGE_COMPACTION_PREFIX_DEFAULT = "/tmp/compaction-data";
+    public static final String URSA_STORAGE_COMPACTION_PREFIX_DOC = "The prefix for Ursa storage compaction output.";
+
+    public static final String URSA_STORAGE_COMPACTION_BUCKET_CONFIG = "ursa.storage.compaction.bucket";
+    public static final String URSA_STORAGE_COMPACTION_BUCKET_DEFAULT = "kafka-ursa-storage";
+    public static final String URSA_STORAGE_COMPACTION_BUCKET_DOC = "The S3 bucket name for Ursa compaction output.";
+
     public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_CONFIG = "ursa.storage.write.buffer.flush.interval.ms";
     public static final long URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DEFAULT = 250L;
     public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DOC = "The interval in milliseconds for flushing the write buffer.";

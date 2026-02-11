@@ -434,6 +434,7 @@ No protocol changes required.
 | `ursa.storage.oxia.service.url` | string | `localhost:6648` | Oxia service URL for metadata |
 | `ursa.storage.backend.type` | string | `LOCAL` | Storage backend: `LOCAL`, `S3`, `AZURE_BLOB` |
 | `ursa.storage.path` | string | `/tmp/ursa-data` | Local storage path (for LOCAL backend) |
+| `ursa.storage.compaction.prefix` | string | `/tmp/compaction-data` | Compaction output prefix (for S3 backend) |
 | `ursa.storage.namespace` | string | `default` | Namespace for Ursa streams |
 | `ursa.storage.wal.directory` | string | `/tmp/ursa-wal` | Write-ahead log directory |
 | `ursa.storage.write.buffer.flush.interval.ms` | long | `250` | Write buffer flush interval |
@@ -443,6 +444,7 @@ No protocol changes required.
 | `ursa.storage.non.idempotent.max.in.flight.bytes.per.partition` | long | `-1` | Maximum bytes of in-flight non-idempotent appends per partition (-1 disables) |
 | `ursa.storage.s3.endpoint` | string | `""` | S3 endpoint URL |
 | `ursa.storage.s3.bucket` | string | `kafka-ursa-storage` | S3 bucket name |
+| `ursa.storage.compaction.bucket` | string | `kafka-ursa-storage` | S3 bucket name for compaction output |
 | `ursa.storage.s3.region` | string | `us-east-1` | S3 region |
 | `ursa.storage.s3.access.key` | string | `""` | S3 access key |
 | `ursa.storage.s3.secret.key` | string | `""` | S3 secret key |

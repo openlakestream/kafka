@@ -160,8 +160,8 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
             // Required by LakehouseConfiguration for s3a:// path resolution (compaction output).
             if ("S3".equalsIgnoreCase(config.getBackendType())) {
                 properties.setProperty("compactionBackendStorageType", "S3");
-                properties.setProperty("compactionBucket", config.getS3Bucket());
-                properties.setProperty("compactionPrefix", config.getStoragePath());
+                properties.setProperty("compactionBucket", config.getCompactionBucket());
+                properties.setProperty("compactionPrefix", config.getCompactionPrefix());
                 properties.setProperty("compactionBucketRegion", config.getS3Region());
                 properties.setProperty("cloudStorageEndpoint", config.getS3Endpoint());
             }
