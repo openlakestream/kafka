@@ -6311,6 +6311,57 @@ class ReplicaManagerTest {
   }
 
   @Test
+  def testDisklessAppendUpdatesBytesAndMessagesInRate(): Unit = {
+    val localId = 0
+    val disklessTopic = "diskless-topic"
+    val tp = new TopicPartition(disklessTopic, 0)
+    val topicIdPartition = new TopicIdPartition(topicId, tp)
+
+    val mockDisklessStorageSupport = mock(classOf[DisklessStorageReplicaManagerSupport])
+    when(mockDisklessStorageSupport.partitionAppendEntries(any())).thenAnswer(invocation => {
+      val entries = invocation.getArgument[util.Map[TopicIdPartition, MemoryRecords]](0)
+      val disklessEntries = new util.LinkedHashMap[TopicIdPartition, MemoryRecords](entries)
+      val classicEntries = new util.LinkedHashMap[TopicIdPartition, MemoryRecords]()
+      new DisklessStorageReplicaManagerSupport.PartitionedEntries[TopicIdPartition, MemoryRecords](
+        disklessEntries,
+        classicEntries
+      )
+    })
+    when(mockDisklessStorageSupport.handleAppend(any())).thenReturn(
+      CompletableFuture.completedFuture(Map(topicIdPartition -> new PartitionResponse(Errors.NONE)).asJava)
+    )
+
+    val replicaManager = setupReplicaManagerWithMockedPurgatories(
+      timer = new MockTimer(time),
+      brokerId = localId,
+      mockDisklessStorageSupport = Some(mockDisklessStorageSupport)
+    )
+
+    try {
+      val records = TestUtils.records(Seq(
+        new SimpleRecord("a".getBytes),
+        new SimpleRecord("b".getBytes)
+      ))
+      val expectedBytes = records.sizeInBytes()
+      val expectedMessages = 2L
+
+      appendRecords(replicaManager, tp, records).onFire { response =>
+        assertEquals(Errors.NONE, response.error)
+      }
+
+      TestUtils.waitUntilTrue(() =>
+        brokerTopicStats.topicStats(disklessTopic).bytesInRate.count == expectedBytes &&
+          brokerTopicStats.allTopicsStats.bytesInRate.count == expectedBytes &&
+          brokerTopicStats.topicStats(disklessTopic).messagesInRate.count == expectedMessages &&
+          brokerTopicStats.allTopicsStats.messagesInRate.count == expectedMessages,
+        "Diskless append metrics did not update as expected"
+      )
+    } finally {
+      replicaManager.shutdown(checkpointHW = false)
+    }
+  }
+
+  @Test
   def testDisklessStorageTopicDoesNotStartFetcher(): Unit = {
     val localId = 0
     val disklessTopic = "diskless-topic"

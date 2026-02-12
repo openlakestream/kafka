@@ -686,6 +686,8 @@ class ReplicaManager(val config: KafkaConfig,
           disklessEntries.map { case (tp, _) => tp -> new PartitionResponse(Errors.UNKNOWN_SERVER_ERROR) }
         }
 
+        updateDisklessProduceStats(disklessEntries, disklessResult)
+
         // Preserve the original request order (as much as the input Map provides).
         val combinedSeq = requestOrder.map { tp =>
           tp -> disklessResult.getOrElse(tp, classicResult.getOrElse(tp, new PartitionResponse(Errors.UNKNOWN_SERVER_ERROR)))
@@ -725,6 +727,44 @@ class ReplicaManager(val config: KafkaConfig,
       produceStatus,
       classicResponseCallback
     )
+  }
+
+  private def updateDisklessProduceStats(
+    disklessEntries: Map[TopicIdPartition, MemoryRecords],
+    disklessResult: Map[TopicIdPartition, PartitionResponse]
+  ): Unit = {
+    if (disklessEntries.isEmpty || disklessResult.isEmpty) {
+      return
+    }
+
+    disklessEntries.foreach { case (topicIdPartition, records) =>
+      disklessResult.get(topicIdPartition).foreach { response =>
+        if (response.error == Errors.NONE) {
+          val bytesAppended = records.sizeInBytes
+          if (bytesAppended > 0) {
+            brokerTopicStats.topicStats(topicIdPartition.topic).bytesInRate.mark(bytesAppended)
+            brokerTopicStats.allTopicsStats.bytesInRate.mark(bytesAppended)
+          }
+
+          val messagesAppended = countRecords(records)
+          if (messagesAppended > 0) {
+            brokerTopicStats.topicStats(topicIdPartition.topic).messagesInRate.mark(messagesAppended)
+            brokerTopicStats.allTopicsStats.messagesInRate.mark(messagesAppended)
+          }
+        }
+      }
+    }
+  }
+
+  private def countRecords(records: MemoryRecords): Long = {
+    var total = 0L
+    records.batches.asScala.foreach { batch =>
+      val batchCount = batch.countOrNull()
+      if (batchCount != null) {
+        total += batchCount.toLong
+      }
+    }
+    total
   }
 
   /**
