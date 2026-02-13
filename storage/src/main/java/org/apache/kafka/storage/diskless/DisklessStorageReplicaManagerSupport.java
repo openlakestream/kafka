@@ -207,6 +207,42 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         return reader.listOffsets(requests);
     }
 
+    /**
+     * Best-effort cleanup for a topic-partition which is being deleted or removed from this broker.
+     *
+     * <p>This is used to prevent unbounded growth of in-memory caches such as managed ledger handles,
+     * cursor pools, and producer state.
+     */
+    public void cleanupPartition(TopicIdPartition tp) {
+        cleanupPartition(tp, false);
+    }
+
+    /**
+     * Best-effort cleanup for a topic-partition which is being deleted or removed from this broker.
+     *
+     * @param deletePartition whether the partition is permanently deleted (for example, topic deletion). When true,
+     *                        this will also attempt to delete any persisted producer-state snapshot.
+     */
+    public void cleanupPartition(TopicIdPartition tp, boolean deletePartition) {
+        if (!enabled || tp == null) {
+            return;
+        }
+
+        try {
+            if (writer != null) {
+                writer.cleanupPartition(tp);
+            }
+            if (reader != null) {
+                reader.cleanupPartition(tp);
+            }
+            if (ursaState != null) {
+                ursaState.cleanupPartition(tp, deletePartition);
+            }
+        } catch (Throwable t) {
+            log.warn("Failed to cleanup diskless storage state for partition {}", tp, t);
+        }
+    }
+
     @Override
     public void close() throws IOException {
         if (reader != null) {

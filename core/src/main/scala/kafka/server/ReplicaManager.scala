@@ -398,17 +398,23 @@ class ReplicaManager(val config: KafkaConfig,
       if (stopPartition.deleteLocalLog) {
         getPartition(topicPartition) match {
           case hostedPartition: HostedPartition.Online[Partition] =>
+            topicId = hostedPartition.partition.topicId
             if (allPartitions.remove(topicPartition, hostedPartition)) {
               maybeRemoveTopicMetrics(topicPartition.topic)
               // Logs are not deleted here. They are deleted in a single batch later on.
               // This is done to avoid having to checkpoint for every deletions.
               hostedPartition.partition.delete()
-              topicId = hostedPartition.partition.topicId
             }
 
           case _ =>
         }
         partitionsToDelete += topicPartition
+        topicId.foreach { id =>
+          disklessStorageSupport.cleanupPartition(
+            new TopicIdPartition(id, topicPartition),
+            stopPartition.deleteRemoteLog
+          )
+        }
       }
       // If we were the leader, we may have some operations still waiting for completion.
       // We force completion to prevent them from timing out.

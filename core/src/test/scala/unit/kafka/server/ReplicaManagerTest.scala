@@ -4854,6 +4854,67 @@ class ReplicaManagerTest {
     }
   }
 
+  @Test
+  def testDeltaRemovedTopicCleansDisklessStorageSupport(): Unit = {
+    val localId = 1
+    val topicPartition = new TopicPartition("foo", 0)
+    val mockDisklessStorageSupport = mock(classOf[DisklessStorageReplicaManagerSupport])
+    val replicaManager = setupReplicaManagerWithMockedPurgatories(
+      timer = new MockTimer(time),
+      brokerId = localId,
+      mockDisklessStorageSupport = Some(mockDisklessStorageSupport)
+    )
+
+    try {
+      val leaderTopicsDelta = topicsCreateDelta(localId, true)
+      val leaderMetadataImage = imageFromTopics(leaderTopicsDelta.apply())
+      replicaManager.applyDelta(leaderTopicsDelta, leaderMetadataImage)
+
+      val removeTopicsDelta = topicsDeleteDelta(leaderMetadataImage.topics())
+      val removeMetadataImage = imageFromTopics(removeTopicsDelta.apply())
+      replicaManager.applyDelta(removeTopicsDelta, removeMetadataImage)
+
+      verify(mockDisklessStorageSupport, times(1))
+        .cleanupPartition(new TopicIdPartition(FOO_UUID, topicPartition), true)
+    } finally {
+      replicaManager.shutdown(checkpointHW = false)
+    }
+  }
+
+  @Test
+  def testDeltaRemovedReplicaCleansDisklessStorageSupportWithoutDeletingPartitionState(): Unit = {
+    val localId = 1
+    val topicPartition = new TopicPartition("foo", 0)
+    val mockDisklessStorageSupport = mock(classOf[DisklessStorageReplicaManagerSupport])
+    val replicaManager = setupReplicaManagerWithMockedPurgatories(
+      timer = new MockTimer(time),
+      brokerId = localId,
+      mockDisklessStorageSupport = Some(mockDisklessStorageSupport)
+    )
+
+    try {
+      val leaderTopicsDelta = topicsCreateDelta(localId, true)
+      val leaderMetadataImage = imageFromTopics(leaderTopicsDelta.apply())
+      replicaManager.applyDelta(leaderTopicsDelta, leaderMetadataImage)
+
+      val reassignmentDelta = new TopicsDelta(leaderMetadataImage.topics())
+      reassignmentDelta.replay(new PartitionChangeRecord()
+        .setPartitionId(0)
+        .setTopicId(FOO_UUID)
+        .setReplicas(util.Arrays.asList(localId + 1, localId + 2))
+        .setIsr(util.Arrays.asList(localId + 1, localId + 2))
+        .setLeader(localId + 1)
+      )
+      val reassignmentImage = imageFromTopics(reassignmentDelta.apply())
+      replicaManager.applyDelta(reassignmentDelta, reassignmentImage)
+
+      verify(mockDisklessStorageSupport, times(1))
+        .cleanupPartition(new TopicIdPartition(FOO_UUID, topicPartition), false)
+    } finally {
+      replicaManager.shutdown(checkpointHW = false)
+    }
+  }
+
   @ParameterizedTest
   @ValueSource(booleans = Array(true, false))
   def testDeltaToFollowerCompletesProduce(enableRemoteStorage: Boolean): Unit = {

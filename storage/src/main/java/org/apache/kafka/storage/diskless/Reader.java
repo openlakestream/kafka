@@ -48,4 +48,11 @@ public interface Reader extends Closeable {
             Map<TopicIdPartition, ListOffsetsPartitionRequest> requests) {
         return CompletableFuture.completedFuture(Map.of());
     }
+
+    /**
+     * Cleans up resources associated with the given partition.
+     *
+     * @param tp the topic partition to clean up
+     */
+    void cleanupPartition(TopicIdPartition tp);
 }

@@ -338,6 +338,24 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
         nonIdempotentPipelines.clear();
     }
 
+    @Override
+    public void cleanupPartition(TopicIdPartition tp) {
+        if (tp == null) {
+            return;
+        }
+
+        partitionWriteTails.remove(tp);
+
+        NonIdempotentPartitionAppendPipeline pipeline = nonIdempotentPipelines.remove(tp);
+        if (pipeline != null) {
+            try {
+                pipeline.close();
+            } catch (Exception e) {
+                log.warn("Failed to close non-idempotent pipeline for partition {}", tp, e);
+            }
+        }
+    }
+
     private void completeTailAndMaybeCleanup(TopicIdPartition tp, CompletableFuture<Void> newTail) {
         newTail.complete(null);
         partitionWriteTails.remove(tp, newTail);
