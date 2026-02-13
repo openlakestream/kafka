@@ -70,7 +70,6 @@ import org.apache.kafka.server.share.{ErroneousAndValidPartitionData, ShareParti
 import org.apache.kafka.server.share.acknowledge.ShareAcknowledgementBatch
 import org.apache.kafka.server.storage.log.{FetchIsolation, FetchParams, FetchPartitionData}
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
-import org.apache.kafka.server.config.ServerLogConfigs
 import org.apache.kafka.storage.internals.log.{AppendOrigin, RecordValidationStats}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 import org.apache.kafka.storage.diskless.{DisklessTopicMetadataTransformer, MetadataCacheDisklessStorageView}
@@ -134,8 +133,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         },
         (listenerName: ListenerName) => metadataCache.getAliveBrokerNodes(listenerName),
         (topic: String) => metadataCache.getTopicId(topic),
-        true,
-        config.getBoolean(ServerLogConfigs.URSA_STORAGE_TOPIC_DEFAULT_ENABLE_CONFIG)
+        true
       )
       Some(new DisklessTopicMetadataTransformer(metadataView))
     } else {

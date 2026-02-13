@@ -748,7 +748,8 @@ public class ReplicationControlManager {
                                  List<ApiMessageAndVersion> configRecords,
                                  boolean authorizedToReturnConfigs,
                                  boolean validateOnly) {
-        Map<String, String> creationConfigs = translateCreationConfigs(topic.configs());
+        Map<String, String> creationConfigs = new HashMap<>(translateCreationConfigs(topic.configs()));
+        List<ApiMessageAndVersion> topicConfigRecords = new ArrayList<>(configRecords);
         Map<Integer, PartitionRegistration> newParts = new HashMap<>();
 
         DisklessCreateTopicResult disklessCreateTopicResult = prepareDisklessCreateTopic(topic, creationConfigs);
@@ -756,6 +757,16 @@ public class ReplicationControlManager {
             return disklessCreateTopicResult.error;
         }
         final boolean disklessEnabled = disklessCreateTopicResult.disklessEnabled;
+        if (disklessCreateTopicResult.backfillDisklessTopicConfig) {
+            ControllerResult<ApiError> configResult = configurationControl.incrementalAlterConfig(
+                new ConfigResource(TOPIC, topic.name()),
+                Map.of(URSA_STORAGE_ENABLE_CONFIG, new SimpleImmutableEntry<>(SET, Boolean.TRUE.toString())),
+                true);
+            if (configResult.response().isFailure()) {
+                return configResult.response();
+            }
+            topicConfigRecords.addAll(configResult.records());
+        }
 
         if (!topic.assignments().isEmpty()) {
             if (topic.replicationFactor() != -1) {
@@ -879,31 +890,47 @@ public class ReplicationControlManager {
             setErrorCode(NONE.code()).
             setErrorMessage(null);
         if (authorizedToReturnConfigs) {
-            Map<String, ConfigEntry> effectiveConfig = configurationControl.
-                computeEffectiveTopicConfigs(creationConfigs);
-            List<String> configNames = new ArrayList<>(effectiveConfig.keySet());
-            configNames.sort(String::compareTo);
-            for (String configName : configNames) {
-                ConfigEntry entry = effectiveConfig.get(configName);
-                result.configs().add(new CreateTopicsResponseData.CreatableTopicConfigs().
-                    setName(entry.name()).
-                    setValue(entry.isSensitive() ? null : entry.value()).
-                    setReadOnly(entry.isReadOnly()).
-                    setConfigSource(KafkaConfigSchema.translateConfigSource(entry.source()).id()).
-                    setIsSensitive(entry.isSensitive()));
-            }
-            result.setNumPartitions(numPartitions);
-            result.setReplicationFactor((short) newParts.values().iterator().next().replicas.length);
-            result.setTopicConfigErrorCode(NONE.code());
+            populateCreateTopicConfigs(result, creationConfigs, numPartitions, newParts);
         } else {
             result.setTopicConfigErrorCode(TOPIC_AUTHORIZATION_FAILED.code());
         }
         successes.put(topic.name(), result);
+        appendCreateTopicRecords(records, topic.name(), topicId, topicConfigRecords, newParts);
+        return ApiError.NONE;
+    }
+
+    private void populateCreateTopicConfigs(CreatableTopicResult result,
+                                            Map<String, String> creationConfigs,
+                                            int numPartitions,
+                                            Map<Integer, PartitionRegistration> newParts) {
+        Map<String, ConfigEntry> effectiveConfig = configurationControl.
+            computeEffectiveTopicConfigs(creationConfigs);
+        List<String> configNames = new ArrayList<>(effectiveConfig.keySet());
+        configNames.sort(String::compareTo);
+        for (String configName : configNames) {
+            ConfigEntry entry = effectiveConfig.get(configName);
+            result.configs().add(new CreateTopicsResponseData.CreatableTopicConfigs().
+                setName(entry.name()).
+                setValue(entry.isSensitive() ? null : entry.value()).
+                setReadOnly(entry.isReadOnly()).
+                setConfigSource(KafkaConfigSchema.translateConfigSource(entry.source()).id()).
+                setIsSensitive(entry.isSensitive()));
+        }
+        result.setNumPartitions(numPartitions);
+        result.setReplicationFactor((short) newParts.values().iterator().next().replicas.length);
+        result.setTopicConfigErrorCode(NONE.code());
+    }
+
+    private void appendCreateTopicRecords(List<ApiMessageAndVersion> records,
+                                          String topicName,
+                                          Uuid topicId,
+                                          List<ApiMessageAndVersion> topicConfigRecords,
+                                          Map<Integer, PartitionRegistration> newParts) {
         records.add(new ApiMessageAndVersion(new TopicRecord().
-            setName(topic.name()).
+            setName(topicName).
             setTopicId(topicId), (short) 0));
         // ConfigRecords go after TopicRecord but before PartitionRecord(s).
-        records.addAll(configRecords);
+        records.addAll(topicConfigRecords);
         for (Entry<Integer, PartitionRegistration> partEntry : newParts.entrySet()) {
             int partitionIndex = partEntry.getKey();
             PartitionRegistration info = partEntry.getValue();
@@ -911,16 +938,22 @@ public class ReplicationControlManager {
                 setEligibleLeaderReplicasEnabled(featureControl.isElrFeatureEnabled()).
                 build()));
         }
-        return ApiError.NONE;
     }
 
     private DisklessCreateTopicResult prepareDisklessCreateTopic(CreatableTopic topic, Map<String, String> creationConfigs) {
         if (Topic.isInternal(topic.name())) {
-            return DisklessCreateTopicResult.success(false);
+            return DisklessCreateTopicResult.success(false, false);
         }
         String disklessEnableConfigValue = creationConfigs.get(URSA_STORAGE_ENABLE_CONFIG);
         boolean disklessConfigEnabled = disklessEnableConfigValue != null && Boolean.parseBoolean(disklessEnableConfigValue);
         boolean disklessDefaultEnabled = disklessStorageTopicDefaultEnabled(creationConfigs);
+        boolean backfillDisklessTopicConfig = disklessDefaultEnabled && !disklessConfigEnabled;
+        if (backfillDisklessTopicConfig) {
+            creationConfigs.put(URSA_STORAGE_ENABLE_CONFIG, Boolean.TRUE.toString());
+            if (topic.replicationFactor() > 1) {
+                topic.setReplicationFactor((short) -1);
+            }
+        }
 
         boolean disklessEnabled = (disklessConfigEnabled || disklessDefaultEnabled) && !Topic.isInternal(topic.name());
         if (disklessEnabled) {
@@ -937,24 +970,26 @@ public class ReplicationControlManager {
             topic.assignments().clear();
         }
 
-        return DisklessCreateTopicResult.success(disklessEnabled);
+        return DisklessCreateTopicResult.success(disklessEnabled, backfillDisklessTopicConfig);
     }
 
     private static final class DisklessCreateTopicResult {
         final boolean disklessEnabled;
+        final boolean backfillDisklessTopicConfig;
         final ApiError error;
 
-        private DisklessCreateTopicResult(boolean disklessEnabled, ApiError error) {
+        private DisklessCreateTopicResult(boolean disklessEnabled, boolean backfillDisklessTopicConfig, ApiError error) {
             this.disklessEnabled = disklessEnabled;
+            this.backfillDisklessTopicConfig = backfillDisklessTopicConfig;
             this.error = error;
         }
 
-        static DisklessCreateTopicResult success(boolean disklessEnabled) {
-            return new DisklessCreateTopicResult(disklessEnabled, null);
+        static DisklessCreateTopicResult success(boolean disklessEnabled, boolean backfillDisklessTopicConfig) {
+            return new DisklessCreateTopicResult(disklessEnabled, backfillDisklessTopicConfig, null);
         }
 
         static DisklessCreateTopicResult error(ApiError error) {
-            return new DisklessCreateTopicResult(false, error);
+            return new DisklessCreateTopicResult(false, false, error);
         }
     }
 
