@@ -32,27 +32,22 @@ public class MetadataCacheDisklessStorageView implements DisklessStorageMetadata
     private final Function<ListenerName, Iterable<Node>> aliveBrokerNodesSupplier;
     private final Function<String, Uuid> topicIdSupplier;
     private final boolean disklessStorageSystemEnabled;
-    private final boolean disklessStorageTopicDefaultEnabled;
 
     public MetadataCacheDisklessStorageView(
             Function<String, Map<String, String>> topicConfigSupplier,
-            boolean disklessStorageSystemEnabled,
-            boolean disklessStorageTopicDefaultEnabled) {
-        this(topicConfigSupplier, ln -> Collections.emptyList(), t -> Uuid.ZERO_UUID, disklessStorageSystemEnabled,
-                disklessStorageTopicDefaultEnabled);
+            boolean disklessStorageSystemEnabled) {
+        this(topicConfigSupplier, ln -> Collections.emptyList(), t -> Uuid.ZERO_UUID, disklessStorageSystemEnabled);
     }
 
     public MetadataCacheDisklessStorageView(
             Function<String, Map<String, String>> topicConfigSupplier,
             Function<ListenerName, Iterable<Node>> aliveBrokerNodesSupplier,
             Function<String, Uuid> topicIdSupplier,
-            boolean disklessStorageSystemEnabled,
-            boolean disklessStorageTopicDefaultEnabled) {
+            boolean disklessStorageSystemEnabled) {
         this.topicConfigSupplier = topicConfigSupplier;
         this.aliveBrokerNodesSupplier = aliveBrokerNodesSupplier;
         this.topicIdSupplier = topicIdSupplier;
         this.disklessStorageSystemEnabled = disklessStorageSystemEnabled;
-        this.disklessStorageTopicDefaultEnabled = disklessStorageTopicDefaultEnabled;
     }
 
     @Override
@@ -67,9 +62,6 @@ public class MetadataCacheDisklessStorageView implements DisklessStorageMetadata
 
         Map<String, String> config = getTopicConfig(topic);
         String disklessStorageEnabled = config.get(TopicConfig.URSA_STORAGE_ENABLE_CONFIG);
-        if (disklessStorageEnabled == null) {
-            return disklessStorageTopicDefaultEnabled;
-        }
         return Boolean.parseBoolean(disklessStorageEnabled);
     }
 

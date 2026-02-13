@@ -17,9 +17,12 @@
 package org.apache.kafka.controller;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.config.ConfigResource;
+import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.message.BrokerHeartbeatRequestData;
 import org.apache.kafka.common.message.CreateTopicsRequestData;
 import org.apache.kafka.common.message.CreateTopicsRequestData.CreatableTopic;
+import org.apache.kafka.common.message.CreateTopicsResponseData;
 import org.apache.kafka.common.message.CreateTopicsResponseData.CreatableTopicResult;
 import org.apache.kafka.common.metadata.FeatureLevelRecord;
 import org.apache.kafka.common.metadata.RegisterBrokerRecord;
@@ -75,6 +78,35 @@ public class DisklessTopicDefaultsTest {
         assertNotNull(topicResult);
         assertEquals(NONE.code(), topicResult.errorCode());
         assertEquals(1, topicResult.replicationFactor());
+    }
+
+    @Test
+    public void testCreateDisklessTopicDefaultEnabledWithExplicitReplicationFactorBackfillsConfig() {
+        ReplicationControlTestContext ctx = new ReplicationControlTestContext.Builder().
+            setDisklessStorageSystemEnabled(true).
+            setStaticConfig("ursa.storage.topic.default.enable", "true").
+            build();
+        ctx.registerBrokers(0, 1, 2);
+        ctx.unfenceBrokers(0, 1, 2);
+
+        // Simulate auto-topic-creation requests where broker fills in default.replication.factor.
+        CreateTopicsRequestData request = new CreateTopicsRequestData();
+        CreatableTopic topic = new CreatableTopic().setName("diskless-topic-default-rf-3").
+            setNumPartitions(2).setReplicationFactor((short) 3);
+        request.topics().add(topic);
+
+        ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
+        ControllerResult<CreateTopicsResponseData> result = ctx.replicationControl.createTopics(requestContext, request,
+            Set.of("diskless-topic-default-rf-3"));
+        CreatableTopicResult topicResult = result.response().topics().find("diskless-topic-default-rf-3");
+        assertNotNull(topicResult);
+        assertEquals(NONE.code(), topicResult.errorCode());
+        assertEquals(1, topicResult.replicationFactor());
+
+        ctx.replay(result.records());
+        assertEquals("true", ctx.configurationControl.getConfigs(
+            new ConfigResource(ConfigResource.Type.TOPIC, "diskless-topic-default-rf-3"))
+            .get(TopicConfig.URSA_STORAGE_ENABLE_CONFIG));
     }
 
     // The following code is copied from `ReplicationControlManagerTest`. Don't reuse that class to avoid conflicts
