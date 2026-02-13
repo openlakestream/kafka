@@ -166,6 +166,42 @@ class SocketServerTest {
     channel.sendResponse(new RequestChannel.SendResponse(request, send, Some(headerLog), None))
   }
 
+  private def createForwardedRequest(
+    outerRequest: RequestChannel.Request,
+    innerRequestBytes: Array[Byte],
+    channel: RequestChannel
+  ): RequestChannel.Request = {
+    val innerRequestBuffer = ByteBuffer.wrap(innerRequestBytes)
+    val innerHeader = RequestHeader.parse(innerRequestBuffer)
+    val requestPayloadBuffer = innerRequestBuffer.slice()
+    val forwardedContext = new RequestContext(
+      innerHeader,
+      outerRequest.context.connectionId,
+      outerRequest.context.clientAddress,
+      outerRequest.context.clientPort,
+      outerRequest.context.principal,
+      outerRequest.context.listenerName,
+      outerRequest.context.securityProtocol,
+      outerRequest.context.clientInformation,
+      outerRequest.context.fromPrivilegedListener,
+      outerRequest.context.principalSerde
+    )
+    new RequestChannel.Request(
+      processor = outerRequest.processor,
+      context = forwardedContext,
+      startTimeNanos = outerRequest.startTimeNanos,
+      memoryPool = outerRequest.memoryPool,
+      buffer = requestPayloadBuffer,
+      metrics = channel.metrics,
+      envelope = Some(outerRequest)
+    )
+  }
+
+  private def processForwardedRequest(channel: RequestChannel, request: RequestChannel.Request): Unit = {
+    val response = request.body[AbstractRequest].getErrorResponse(0, new RuntimeException("test"))
+    channel.sendResponse(request, response, None)
+  }
+
   def processRequestNoOpResponse(channel: RequestChannel, request: RequestChannel.Request): Unit = {
     channel.sendNoOpResponse(request)
   }
@@ -296,6 +332,37 @@ class SocketServerTest {
 
       val selector = testableServer.testableSelector
       assertEquals(0, selector.operationCounts.getOrElse(SelectorOperation.Mute, 0))
+      socket.close()
+    })
+  }
+
+  @Test
+  def testRequestPipeliningUsesEnvelopeCorrelationForForwardedResponses(): Unit = {
+    val testProps = new Properties()
+    testProps.putAll(props)
+    testProps.put(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, "true")
+    val pipeliningConfig = KafkaConfig.fromProps(testProps)
+
+    withTestableServer(config = pipeliningConfig, testWithServer = { testableServer =>
+      val socket = connect(testableServer)
+      socket.setSoTimeout(5000)
+
+      sendRequest(socket, producerRequestBytes(ack = 1, correlationId = 1))
+      val outerRequest = receiveRequest(testableServer.dataPlaneRequestChannel)
+      assertEquals(1, outerRequest.header.correlationId)
+
+      val forwardedRequest = createForwardedRequest(
+        outerRequest,
+        producerRequestBytes(ack = 1, correlationId = 99),
+        testableServer.dataPlaneRequestChannel
+      )
+      processForwardedRequest(testableServer.dataPlaneRequestChannel, forwardedRequest)
+
+      val responseBytes = receiveResponse(socket)
+      val responseHeaderVersion = outerRequest.header.apiKey.responseHeaderVersion(outerRequest.header.apiVersion)
+      val responseHeader = ResponseHeader.parse(ByteBuffer.wrap(responseBytes), responseHeaderVersion)
+      assertEquals(1, responseHeader.correlationId)
+
       socket.close()
     })
   }

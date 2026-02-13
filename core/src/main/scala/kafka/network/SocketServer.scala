@@ -1189,7 +1189,7 @@ private[kafka] class Processor(
       updateRequestMetrics(response)
       return
     }
-    val correlationId = Integer.valueOf(response.request.header.correlationId)
+    val correlationId = Integer.valueOf(response.request.headerForLoggingOrThrottling().correlationId)
     val map = pendingResponses.getOrElseUpdate(connectionId, new mutable.HashMap[Integer, RequestChannel.Response]())
     map.put(correlationId, response)
   }

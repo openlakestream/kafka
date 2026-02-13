@@ -77,7 +77,6 @@ services:
           if /opt/kafka/bin/kafka-topics.sh \
             --bootstrap-server "$$bootstrap" \
             --create \
-            --if-not-exists \
             --config ursa.storage.enable=true \
             --topic "$$topic" \
             --partitions 1 \

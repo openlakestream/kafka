@@ -45,7 +45,6 @@ services:
     command: ["/opt/kafka/bin/kafka-topics.sh",
               "--bootstrap-server", "kafka-1:19092",
               "--create",
-              "--if-not-exists",
               "--config", "ursa.storage.enable=true",
               "--topic", "test-diskless",
               "--partitions", "64"]
