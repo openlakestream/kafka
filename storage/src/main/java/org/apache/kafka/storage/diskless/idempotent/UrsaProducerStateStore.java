@@ -329,18 +329,24 @@ public class UrsaProducerStateStore extends InMemoryProducerStateStore {
         recordsSinceSnapshot.remove(tp);
         lastSnapshotOffset.remove(tp);
 
-        // Delete snapshot from Oxia
-        AsyncOxiaClient client = oxiaClientSupplier.get();
-        if (client != null) {
-            String key = generateSnapshotKey(tp);
-            client.delete(key)
-                .exceptionally(e -> {
-                    log.warn("Failed to delete snapshot for partition {}: {}", tp, e.getMessage());
-                    return false;
-                });
-        }
-
         return super.clearPartition(tp);
+    }
+
+    @Override
+    public CompletableFuture<Void> deletePartition(TopicIdPartition tp) {
+        return clearPartition(tp).whenComplete((ignored, error) -> {
+            // Best-effort delete snapshot from Oxia. The snapshot is shared across brokers, so this should only
+            // be called when the partition is permanently deleted (for example, topic deletion).
+            AsyncOxiaClient client = oxiaClientSupplier.get();
+            if (client != null) {
+                String key = generateSnapshotKey(tp);
+                client.delete(key)
+                    .exceptionally(e -> {
+                        log.warn("Failed to delete snapshot for partition {}: {}", tp, e.getMessage());
+                        return false;
+                    });
+            }
+        });
     }
 
     /**

@@ -33,4 +33,11 @@ public interface Writer extends Closeable {
      */
     CompletableFuture<Map<TopicIdPartition, ProduceResponse.PartitionResponse>> write(
             Map<TopicIdPartition, MemoryRecords> entriesPerPartition);
+
+    /**
+     * Cleans up resources associated with the given partition.
+     *
+     * @param tp the topic partition to clean up
+     */
+    void cleanupPartition(TopicIdPartition tp);
 }

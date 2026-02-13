@@ -702,6 +702,21 @@ public class UrsaManagedLedgerReader implements Reader {
         fetchCursorPools.clear();
     }
 
+    @Override
+    public void cleanupPartition(TopicIdPartition tp) {
+        if (tp == null) {
+            return;
+        }
+        NonDurableCursorPool pool = fetchCursorPools.remove(tp);
+        if (pool != null) {
+            try {
+                pool.close();
+            } catch (Exception e) {
+                log.warn("Failed to close fetch cursor pool for partition {}", tp, e);
+            }
+        }
+    }
+
     private static String fetchCursorNamePrefix(TopicIdPartition tp) {
         return "kafka-fetch-" + tp.topic() + "-partition-" + tp.partition() + "-cursor";
     }

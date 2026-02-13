@@ -123,6 +123,19 @@ public interface ProducerStateStore extends Closeable {
     CompletableFuture<Void> clearPartition(TopicIdPartition tp);
 
     /**
+     * Deletes any persistent producer state for a partition.
+     * Called when a partition is permanently deleted (for example, during topic deletion).
+     *
+     * <p>The default implementation delegates to {@link #clearPartition(TopicIdPartition)}.
+     *
+     * @param tp the topic-partition to delete
+     * @return a future that completes when the persistent state is deleted
+     */
+    default CompletableFuture<Void> deletePartition(TopicIdPartition tp) {
+        return clearPartition(tp);
+    }
+
+    /**
      * Takes a snapshot of the current state for persistence.
      * Used for recovery after broker restart.
      * 

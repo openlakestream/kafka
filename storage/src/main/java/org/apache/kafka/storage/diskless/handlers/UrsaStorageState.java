@@ -37,6 +37,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -133,6 +134,24 @@ public class UrsaStorageState implements Closeable {
                 : new UrsaProducerStateStore(holder::oxiaClient, time);
     }
 
+    UrsaStorageState(
+            Time time,
+            int brokerId,
+            UrsaStorageConfig config,
+            BrokerTopicStats brokerTopicStats,
+            ProducerStateStore producerStateStore,
+            ManagedLedgerFactory managedLedgerFactory) {
+        this.time = Objects.requireNonNull(time, "time must not be null");
+        this.brokerId = brokerId;
+        this.config = Objects.requireNonNull(config, "config must not be null");
+        this.brokerTopicStats = Objects.requireNonNull(brokerTopicStats, "brokerTopicStats must not be null");
+        this.producerStateStore = Objects.requireNonNull(producerStateStore, "producerStateStore must not be null");
+        this.managedLedgerFactoryHolder = null;
+        this.managedLedgerFactory = Objects.requireNonNull(managedLedgerFactory, "managedLedgerFactory must not be null");
+        this.logConfigDefaults = Collections.emptyMap();
+        this.topicConfigSupplier = null;
+    }
+
     public Time time() {
         return time;
     }
@@ -190,6 +209,62 @@ public class UrsaStorageState implements Closeable {
         return raced != null ? raced.thenApply(managedLedger -> applyRetentionConfig(tp, managedLedger)) : configuredFuture;
     }
 
+    /**
+     * Best-effort cleanup for a topic-partition that is no longer hosted by this broker.
+     * <p>
+     * Removes in-memory state and closes any cached {@link ManagedLedger} instance.
+     *
+     * @return true if any state was cleaned up; false if there was nothing to do.
+     */
+    public boolean cleanupPartition(TopicIdPartition tp) {
+        return cleanupPartition(tp, false);
+    }
+
+    /**
+     * Best-effort cleanup for a topic-partition that is no longer hosted by this broker.
+     * <p>
+     * Removes in-memory state and closes any cached {@link ManagedLedger} instance. Optionally deletes any
+     * persisted producer-state snapshot when the partition is permanently deleted (for example, topic deletion).
+     *
+     * @param deletePartition whether to delete persisted producer-state data for this partition
+     * @return true if any in-memory state was cleaned up; false if there was nothing to do.
+     */
+    public boolean cleanupPartition(TopicIdPartition tp, boolean deletePartition) {
+        if (tp == null) {
+            return false;
+        }
+
+        boolean cleaned = partitionStates.remove(tp) != null;
+
+        CompletableFuture<ManagedLedger> ledgerFuture = managedLedgerCache.remove(tp);
+        if (ledgerFuture != null) {
+            cleaned = true;
+            ledgerFuture.whenComplete((ledger, error) -> {
+                if (ledger == null) {
+                    return;
+                }
+                try {
+                    ledger.close();
+                } catch (Exception e) {
+                    log.warn("Failed to close ManagedLedger for partition {}", tp, e);
+                }
+            });
+        }
+
+        try {
+            CompletableFuture<Void> producerStateFuture = deletePartition
+                    ? producerStateStore.deletePartition(tp)
+                    : producerStateStore.clearPartition(tp);
+            producerStateFuture.exceptionally(e -> {
+                log.warn("Failed to clear producer state for partition {}", tp, e);
+                return null;
+            });
+        } catch (Throwable t) {
+            log.warn("Failed to clear producer state for partition {}", tp, t);
+        }
+
+        return cleaned;
+    }
 
     /**
      * Gets the partition state, creating one if necessary.
