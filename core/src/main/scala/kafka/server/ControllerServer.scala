@@ -44,15 +44,15 @@ import org.apache.kafka.security.{CredentialProvider, DelegationTokenManager}
 import org.apache.kafka.server.{ProcessRole, SimpleApiVersionManager}
 import org.apache.kafka.server.authorizer.Authorizer
 import org.apache.kafka.server.config.ServerLogConfigs.{ALTER_CONFIG_POLICY_CLASS_NAME_CONFIG, CREATE_TOPIC_POLICY_CLASS_NAME_CONFIG}
-import org.apache.kafka.server.common.{ApiMessageAndVersion, KRaftVersion, NodeToControllerChannelManager}
-import org.apache.kafka.server.config.ConfigType
-import org.apache.kafka.server.config.DelegationTokenManagerConfigs
+import org.apache.kafka.server.common.{ApiMessageAndVersion, DisklessTopicPreCommitHandler, KRaftVersion, NodeToControllerChannelManager}
+import org.apache.kafka.server.config.{ConfigType, DelegationTokenManagerConfigs, ServerLogConfigs}
 import org.apache.kafka.server.metrics.{KafkaMetricsGroup, KafkaYammerMetrics, LinuxIoMetricsCollector}
 import org.apache.kafka.server.network.{EndpointReadyFutures, KafkaAuthorizerServerInfo}
 import org.apache.kafka.server.policy.{AlterConfigPolicy, CreateTopicPolicy}
 import org.apache.kafka.server.util.{Deadline, FutureUtils}
 import org.apache.kafka.server.NodeToControllerChannelManagerImpl
 import org.apache.kafka.server.RaftControllerNodeProvider
+import org.apache.kafka.storage.diskless.UrsaPartitionedTopicsMetadataSync
 
 import java.util
 import java.util.{Optional, OptionalLong}
@@ -102,6 +102,7 @@ class ControllerServer(
   var clientQuotaMetadataManager: ClientQuotaMetadataManager = _
   var controllerApis: ControllerApis = _
   var controllerApisHandlerPool: KafkaRequestHandlerPool = _
+  var ursaOxiaSync: UrsaPartitionedTopicsMetadataSync = _
   def kafkaYammerMetrics: KafkaYammerMetrics = KafkaYammerMetrics.INSTANCE
   val metadataPublishers: util.List[MetadataPublisher] = new util.ArrayList[MetadataPublisher]()
   @volatile var metadataCache : KRaftMetadataCache = _
@@ -261,7 +262,21 @@ class ControllerServer(
           setUncleanLeaderElectionCheckIntervalMs(config.uncleanLeaderElectionCheckIntervalMs).
           setControllerPerformanceSamplePeriodMs(config.controllerPerformanceSamplePeriodMs).
           setControllerPerformanceAlwaysLogThresholdMs(config.controllerPerformanceAlwaysLogThresholdMs).
-          setDisklessStorageSystemEnabled(config.ursaStorageEnable)
+          setDisklessStorageSystemEnabled(config.ursaStorageEnable).
+          setDisklessTopicPreCommitHandler({
+            if (config.ursaStorageEnable) {
+              val oxiaUrl = config.getString(ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG)
+              val namespace = config.getString(ServerLogConfigs.URSA_STORAGE_NAMESPACE_CONFIG)
+              ursaOxiaSync = new UrsaPartitionedTopicsMetadataSync(oxiaUrl, namespace,
+                (msg: String, cause: Throwable) => sharedServer.metadataPublishingFaultHandler.handleFault(msg, cause))
+              Optional.of[DisklessTopicPreCommitHandler](
+                (topicName: String, partitions: Int, configs: util.Map[String, String]) => {
+                ursaOxiaSync.upsertPartitionedTopicMetadataSync(topicName, partitions, configs, 3000)
+              })
+            } else {
+              Optional.empty[DisklessTopicPreCommitHandler]()
+            }
+          })
       }
       controller = controllerBuilder.build()
 
@@ -336,9 +351,7 @@ class ControllerServer(
       if (config.ursaStorageEnable) {
         metadataPublishers.add(new UrsaPartitionedTopicsPublisher(
           config.nodeId,
-          config.getString(org.apache.kafka.server.config.ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG),
-          config.getString(org.apache.kafka.server.config.ServerLogConfigs.URSA_STORAGE_NAMESPACE_CONFIG),
-          sharedServer.metadataPublishingFaultHandler,
+          ursaOxiaSync,
         ))
       }
 
@@ -489,6 +502,8 @@ class ControllerServer(
         Utils.swallow(this.logger.underlying, () => quotaManagers.shutdown())
       Utils.closeQuietly(controller, "controller")
       Utils.closeQuietly(quorumControllerMetrics, "quorum controller metrics")
+      Utils.closeQuietly(ursaOxiaSync, "ursa oxia sync")
+      ursaOxiaSync = null
       authorizerPlugin.foreach(Utils.closeQuietly(_, "authorizer plugin"))
       createTopicPolicy.foreach(policy => Utils.closeQuietly(policy, "create topic policy"))
       alterConfigPolicy.foreach(policy => Utils.closeQuietly(policy, "alter config policy"))

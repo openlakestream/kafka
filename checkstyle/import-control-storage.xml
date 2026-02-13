@@ -125,6 +125,7 @@
 	        <allow pkg="org.apache.kafka.server.config" />
 	        <allow pkg="org.apache.kafka.server.storage.log" />
 	        <allow pkg="org.apache.kafka.server.util" />
+	        <allow pkg="org.apache.kafka.test" />
 	        <allow pkg="org.apache.kafka.storage.diskless" />
 	        <allow pkg="org.apache.kafka.storage.log.metrics" />
 	        <allow pkg="com.fasterxml.jackson" />

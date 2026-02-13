@@ -25,6 +25,7 @@ import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
 import org.apache.kafka.metadata.BrokerState;
@@ -59,7 +60,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * End-to-end integration tests for Ursa Storage using real Kafka producer and consumer.
@@ -81,7 +81,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
 
     @BeforeAll
     static void startCluster() throws Exception {
-        oxiaContainer = new OxiaContainer(DockerImageName.parse("streamnative/oxia:main"));
+        oxiaContainer = new OxiaContainer(DockerImageName.parse("oxia/oxia:main"));
         oxiaContainer.start();
         log.info("Oxia container started at: {}", oxiaContainer.getServiceAddress());
 
@@ -544,7 +544,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
         }
 
         @Test
-        @DisplayName("Partitioned topics metadata created and deleted correctly")
+        @DisplayName("Partitioned topics metadata and related keys created and deleted correctly")
         void testPartitionedTopicsMetadataCreatedAndDeleted() throws Exception {
             String topicName = uniqueTopicName("partitioned-topics-metadata-topic");
             int numPartitions = 3;
@@ -552,29 +552,40 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
             createDisklessTopic(cluster, topicName, numPartitions);
             assertPartitionedTopicMetadataExistsInOxia(topicName, numPartitions);
 
+            for (int partition = 0; partition < numPartitions; partition++) {
+                produceRecords(cluster.bootstrapServers(), topicName, partition, 1);
+                assertManagedLedgerMetadataExistsInOxia(topicName, partition);
+            }
+
+            Uuid topicId;
             try (Admin admin = Admin.create(cluster.clientProperties())) {
+                waitForTopicReady(admin, topicName, numPartitions);
+                topicId = admin.describeTopics(Collections.singleton(topicName))
+                        .allTopicNames()
+                        .get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                        .get(topicName)
+                        .topicId();
+
+                putProducerStateSnapshotsInOxia(topicId, numPartitions);
+                assertProducerStateSnapshotsExistInOxia(topicId, numPartitions);
+
                 admin.deleteTopics(Collections.singletonList(topicName))
                         .all().get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             }
 
             assertPartitionedTopicMetadataDeletedFromOxia(topicName);
+            assertManagedLedgerMetadataDeletedFromOxia(topicName, numPartitions);
+            assertProducerStateSnapshotsDeletedFromOxia(topicId, numPartitions);
             log.info("Partitioned topics metadata test passed for topic {}", topicName);
         }
 
         private void assertManagedLedgerMetadataExistsInOxia(String topicName) throws Exception {
-            String oxiaServiceAddress = oxiaContainer.getServiceAddress();
-            String namespace = ServerLogConfigs.URSA_STORAGE_NAMESPACE_DEFAULT;
-            String managedLedgerPath = "/managed-ledgers/public/default/persistent/" + topicName + "-partition-0";
+            assertManagedLedgerMetadataExistsInOxia(topicName, 0);
+        }
 
-            try (AsyncOxiaClient client = OxiaClientBuilder.create(oxiaServiceAddress)
-                    .namespace(namespace)
-                    .asyncClient()
-                    .get()) {
-                GetResult result = client.get(managedLedgerPath).get(10, TimeUnit.SECONDS);
-                assertNotNull(result, "ManagedLedgerMetadata should exist in Oxia");
-                assertNotNull(result.value(), "ManagedLedgerMetadata value should not be null");
-                assertTrue(result.value().length > 0, "ManagedLedgerMetadata value should not be empty");
-            }
+        private void assertManagedLedgerMetadataExistsInOxia(String topicName, int partition) throws Exception {
+            String managedLedgerPath = "/managed-ledgers/public/default/persistent/" + topicName + "-partition-" + partition;
+            assertOxiaKeyExists(managedLedgerPath, "ManagedLedgerMetadata");
         }
 
         private void assertPartitionedTopicMetadataExistsInOxia(String topicName, int expectedPartitions)
@@ -588,45 +599,92 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
                     .namespace(namespace)
                     .asyncClient()
                     .get()) {
-                long deadlineMs = System.currentTimeMillis() + 30_000;
-                while (System.currentTimeMillis() < deadlineMs) {
+                TestUtils.waitForCondition(() -> {
                     GetResult result = client.get(key).get(10, TimeUnit.SECONDS);
                     if (result == null) {
-                        Thread.sleep(100);
-                        continue;
+                        return false;
                     }
                     byte[] value = result.value();
                     if (value != null && value.length > 0) {
                         String body = new String(value, StandardCharsets.UTF_8);
                         if (!partitionsPattern.matcher(body).find()) {
-                            fail("Partitioned topic metadata does not contain expected partitions. key=" + key);
+                            throw new AssertionError("Partitioned topic metadata does not contain expected partitions. key=" + key);
                         }
-                        return;
+                        return true;
                     }
-                    Thread.sleep(100);
-                }
-                fail("Timed out waiting for partitioned topic metadata in Oxia: " + key);
+                    return false;
+                }, 30_000, 100, () -> "Timed out waiting for partitioned topic metadata in Oxia: " + key);
             }
         }
 
         private void assertPartitionedTopicMetadataDeletedFromOxia(String topicName) throws Exception {
+            String key = "/admin/partitioned-topics/public/default/persistent/" + topicName;
+            assertOxiaKeyDeleted(key, "PartitionedTopicMetadata");
+        }
+
+        private void assertManagedLedgerMetadataDeletedFromOxia(String topicName, int partitions) throws Exception {
+            for (int partition = 0; partition < partitions; partition++) {
+                String key = "/managed-ledgers/public/default/persistent/" + topicName + "-partition-" + partition;
+                assertOxiaKeyDeleted(key, "ManagedLedgerMetadata");
+            }
+        }
+
+        private void putProducerStateSnapshotsInOxia(Uuid topicId, int partitions) throws Exception {
             String oxiaServiceAddress = oxiaContainer.getServiceAddress();
             String namespace = ServerLogConfigs.URSA_STORAGE_NAMESPACE_DEFAULT;
-            String key = "/admin/partitioned-topics/public/default/persistent/" + topicName;
 
             try (AsyncOxiaClient client = OxiaClientBuilder.create(oxiaServiceAddress)
                     .namespace(namespace)
                     .asyncClient()
                     .get()) {
-                long deadlineMs = System.currentTimeMillis() + 30_000;
-                while (System.currentTimeMillis() < deadlineMs) {
-                    GetResult result = client.get(key).get(10, TimeUnit.SECONDS);
-                    if (result == null || result.value() == null) {
-                        return;
-                    }
-                    Thread.sleep(100);
+                for (int partition = 0; partition < partitions; partition++) {
+                    String key = "producer-state-snapshot/" + topicId + "-" + partition;
+                    client.put(key, ("dummy-" + partition).getBytes(StandardCharsets.UTF_8)).get(10, TimeUnit.SECONDS);
                 }
-                fail("Timed out waiting for partitioned topic metadata to be deleted from Oxia: " + key);
+            }
+        }
+
+        private void assertProducerStateSnapshotsExistInOxia(Uuid topicId, int partitions) throws Exception {
+            for (int partition = 0; partition < partitions; partition++) {
+                String key = "producer-state-snapshot/" + topicId + "-" + partition;
+                assertOxiaKeyExists(key, "ProducerStateSnapshot");
+            }
+        }
+
+        private void assertProducerStateSnapshotsDeletedFromOxia(Uuid topicId, int partitions) throws Exception {
+            for (int partition = 0; partition < partitions; partition++) {
+                String key = "producer-state-snapshot/" + topicId + "-" + partition;
+                assertOxiaKeyDeleted(key, "ProducerStateSnapshot");
+            }
+        }
+
+        private void assertOxiaKeyExists(String key, String description) throws Exception {
+            String oxiaServiceAddress = oxiaContainer.getServiceAddress();
+            String namespace = ServerLogConfigs.URSA_STORAGE_NAMESPACE_DEFAULT;
+
+            try (AsyncOxiaClient client = OxiaClientBuilder.create(oxiaServiceAddress)
+                    .namespace(namespace)
+                    .asyncClient()
+                    .get()) {
+                TestUtils.waitForCondition(() -> {
+                    GetResult result = client.get(key).get(10, TimeUnit.SECONDS);
+                    return result != null && result.value() != null && result.value().length > 0;
+                }, 30_000, 100, () -> "Timed out waiting for " + description + " to exist in Oxia: " + key);
+            }
+        }
+
+        private void assertOxiaKeyDeleted(String key, String description) throws Exception {
+            String oxiaServiceAddress = oxiaContainer.getServiceAddress();
+            String namespace = ServerLogConfigs.URSA_STORAGE_NAMESPACE_DEFAULT;
+
+            try (AsyncOxiaClient client = OxiaClientBuilder.create(oxiaServiceAddress)
+                    .namespace(namespace)
+                    .asyncClient()
+                    .get()) {
+                TestUtils.waitForCondition(() -> {
+                    GetResult result = client.get(key).get(10, TimeUnit.SECONDS);
+                    return result == null || result.value() == null;
+                }, 30_000, 100, () -> "Timed out waiting for " + description + " to be deleted from Oxia: " + key);
             }
         }
     }

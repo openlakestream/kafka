@@ -118,7 +118,7 @@ public class KafkaCompactionE2ETest extends UrsaStorageE2ETestBase {
 
         network = Network.newNetwork();
 
-        oxiaContainer = new OxiaContainer(DockerImageName.parse("streamnative/oxia:main"))
+        oxiaContainer = new OxiaContainer(DockerImageName.parse("oxia/oxia:main"))
                 .withNetwork(network)
                 .withNetworkAliases("oxia");
         oxiaContainer.start();

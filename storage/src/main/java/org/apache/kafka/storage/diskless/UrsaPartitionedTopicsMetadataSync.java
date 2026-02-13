@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.diskless;
 
 import org.apache.kafka.storage.diskless.handlers.KafkaManagedLedgerNaming;
+import org.apache.kafka.storage.diskless.idempotent.ProducerStateSnapshot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -24,6 +25,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 
@@ -42,88 +44,75 @@ public final class UrsaPartitionedTopicsMetadataSync implements AutoCloseable {
     private final BiConsumer<String, Throwable> faultHandler;
     private final ObjectMapper objectMapper;
     private final OxiaStore store;
-
-    private final Object lock = new Object();
     private CompletableFuture<Void> lastOp = CompletableFuture.completedFuture(null);
 
     public UrsaPartitionedTopicsMetadataSync(
             String oxiaServiceUrl,
             String namespace,
             BiConsumer<String, Throwable> faultHandler) {
-        this(
-                faultHandler,
-                new ObjectMapper(),
-                () -> new DefaultOxiaStore(oxiaServiceUrl, namespace)
-        );
+        this(faultHandler, new ObjectMapper(), new DefaultOxiaStore(oxiaServiceUrl, namespace));
     }
 
-    UrsaPartitionedTopicsMetadataSync(
+    public UrsaPartitionedTopicsMetadataSync(
+            BiConsumer<String, Throwable> faultHandler,
+            OxiaStore store) {
+        this(faultHandler, new ObjectMapper(), store);
+    }
+
+    public UrsaPartitionedTopicsMetadataSync(
             BiConsumer<String, Throwable> faultHandler,
             ObjectMapper objectMapper,
-            Supplier<OxiaStore> storeSupplier) {
+            OxiaStore store) {
         this.faultHandler = Objects.requireNonNull(faultHandler, "faultHandler must not be null");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper must not be null");
-        Objects.requireNonNull(storeSupplier, "storeSupplier must not be null");
-
-        OxiaStore createdStore;
-        try {
-            createdStore = storeSupplier.get();
-        } catch (Throwable t) {
-            createdStore = null;
-            faultHandler.accept("Error initializing Oxia client for UrsaPartitionedTopicsMetadataSync", t);
-        }
-        this.store = createdStore;
-    }
-
-    public void upsertPartitionedTopicMetadata(String topicName, int partitions, Map<String, String> properties, String context) {
-        if (store == null) {
-            return;
-        }
-        byte[] payload;
-        try {
-            payload = serializePartitionedTopicMetadata(partitions, properties);
-        } catch (Exception e) {
-            faultHandler.accept("Error serializing partitioned topic metadata for " + topicName + " in " + context, e);
-            return;
-        }
-        String key = partitionedTopicMetadataPath(topicName);
-        enqueue("put " + key, context, () -> store.put(key, payload));
+        this.store = Objects.requireNonNull(store, "store must not be null");
     }
 
     /**
-     * Delete /admin/partitioned-topics entry, and optionally /managed-ledgers entries if partitions >= 0.
+     * Delete /admin/partitioned-topics entry, and optionally /managed-ledgers and producer-state snapshot entries
+     * if partitions >= 0.
+     *
+     * <p>Producer-state snapshot keys are only deleted when topicId is present.
      */
-    public void deleteTopicMetadata(String topicName, int partitions, String context) {
-        if (store == null) {
-            return;
-        }
-
+    public void deleteTopicMetadata(String topicName, String topicId, int partitions, String context) {
         String partitionedKey = partitionedTopicMetadataPath(topicName);
         enqueue("delete " + partitionedKey, context, () -> store.delete(partitionedKey));
-
         if (partitions >= 0) {
             for (int partition = 0; partition < partitions; partition++) {
                 String mlKey = managedLedgerMetadataPath(topicName, partition);
                 enqueue("delete " + mlKey, context, () -> store.delete(mlKey));
+                if (topicId != null && !topicId.isBlank()) {
+                    String producerStateKey = ProducerStateSnapshot.generateSnapshotKey(topicId, partition);
+                    enqueue("delete " + producerStateKey, context, () -> store.delete(producerStateKey));
+                }
             }
         }
     }
 
+    /**
+     * Synchronously upsert partitioned topic metadata to Oxia.
+     * Used by the pre-commit handler to ensure Oxia write succeeds before KRaft commit.
+     */
+    public void upsertPartitionedTopicMetadataSync(String topicName, int partitions,
+            Map<String, String> properties, long timeoutMs) throws Exception {
+        byte[] payload = serializePartitionedTopicMetadata(partitions, properties);
+        String key = partitionedTopicMetadataPath(topicName);
+        store.put(key, payload).get(timeoutMs, TimeUnit.MILLISECONDS);
+    }
+
     @Override
     public void close() throws Exception {
-        if (store != null) {
-            store.close();
-        }
+        store.close();
     }
 
     private void enqueue(String opName, String context, Supplier<CompletableFuture<Void>> op) {
-        synchronized (lock) {
+        synchronized (this) {
             lastOp = lastOp.handle((ignored, ignoredErr) -> null)
-                    .thenCompose(ignored -> op.get())
-                    .exceptionally(t -> {
-                        faultHandler.accept("Error executing " + opName + " in " + context, t);
-                        return null;
-                    });
+                    .thenCompose(ignored -> op.get()
+                            .exceptionally(t -> {
+                                faultHandler.accept("Failed: " + opName + " in " + context, t);
+                                return null;
+                            }));
         }
     }
 
@@ -150,7 +139,7 @@ public final class UrsaPartitionedTopicsMetadataSync implements AutoCloseable {
                 + topicName + "-partition-" + partition;
     }
 
-    interface OxiaStore extends AutoCloseable {
+    public interface OxiaStore extends AutoCloseable {
         CompletableFuture<Void> put(String key, byte[] value);
 
         CompletableFuture<Void> delete(String key);
@@ -160,13 +149,18 @@ public final class UrsaPartitionedTopicsMetadataSync implements AutoCloseable {
     }
 
     static final class DefaultOxiaStore implements OxiaStore {
+        private static final long CONNECT_TIMEOUT_SECONDS = 10;
         private final AsyncOxiaClient client;
 
         DefaultOxiaStore(String oxiaServiceUrl, String namespace) {
-            this.client = OxiaClientBuilder.create(oxiaServiceUrl)
-                    .namespace(namespace)
-                    .asyncClient()
-                    .join();
+            try {
+                this.client = OxiaClientBuilder.create(oxiaServiceUrl)
+                        .namespace(namespace)
+                        .asyncClient()
+                        .get(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to connect to Oxia at " + oxiaServiceUrl, e);
+            }
         }
 
         @Override

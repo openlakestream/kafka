@@ -94,6 +94,7 @@ import org.apache.kafka.metadata.placement.PlacementSpec;
 import org.apache.kafka.metadata.placement.TopicAssignment;
 import org.apache.kafka.metadata.placement.UsableBroker;
 import org.apache.kafka.server.common.ApiMessageAndVersion;
+import org.apache.kafka.server.common.DisklessTopicPreCommitHandler;
 import org.apache.kafka.server.common.TopicIdPartition;
 import org.apache.kafka.server.mutable.BoundedList;
 import org.apache.kafka.server.policy.CreateTopicPolicy;
@@ -159,6 +160,7 @@ public class ReplicationControlManager {
         private short defaultReplicationFactor = (short) 3;
         private int defaultNumPartitions = 1;
         private boolean disklessStorageSystemEnabled = false;
+        private Optional<DisklessTopicPreCommitHandler> disklessTopicPreCommitHandler = Optional.empty();
 
         private int maxElectionsPerImbalance = MAX_ELECTIONS_PER_IMBALANCE;
         private ConfigurationControlManager configurationControl = null;
@@ -216,6 +218,11 @@ public class ReplicationControlManager {
             return this;
         }
 
+        Builder setDisklessTopicPreCommitHandler(Optional<DisklessTopicPreCommitHandler> handler) {
+            this.disklessTopicPreCommitHandler = handler;
+            return this;
+        }
+
         ReplicationControlManager build() {
             if (configurationControl == null) {
                 throw new IllegalStateException("Configuration control must be set before building");
@@ -236,7 +243,8 @@ public class ReplicationControlManager {
                 clusterControl,
                 createTopicPolicy,
                 featureControl,
-                disklessStorageSystemEnabled);
+                disklessStorageSystemEnabled,
+                disklessTopicPreCommitHandler);
         }
     }
 
@@ -335,6 +343,11 @@ public class ReplicationControlManager {
     private final boolean disklessStorageSystemEnabled;
 
     /**
+     * Optional handler for pre-commit Oxia writes during diskless topic lifecycle.
+     */
+    private final Optional<DisklessTopicPreCommitHandler> disklessTopicPreCommitHandler;
+
+    /**
      * Maps topic names to topic UUIDs.
      */
     private final TimelineHashMap<String, Uuid> topicsByName;
@@ -402,7 +415,8 @@ public class ReplicationControlManager {
         ClusterControlManager clusterControl,
         Optional<CreateTopicPolicy> createTopicPolicy,
         FeatureControlManager featureControl,
-        boolean disklessStorageSystemEnabled
+        boolean disklessStorageSystemEnabled,
+        Optional<DisklessTopicPreCommitHandler> disklessTopicPreCommitHandler
     ) {
         this.snapshotRegistry = snapshotRegistry;
         this.log = logContext.logger(ReplicationControlManager.class);
@@ -414,6 +428,7 @@ public class ReplicationControlManager {
         this.featureControl = featureControl;
         this.clusterControl = clusterControl;
         this.disklessStorageSystemEnabled = disklessStorageSystemEnabled;
+        this.disklessTopicPreCommitHandler = disklessTopicPreCommitHandler;
         this.topicsByName = new TimelineHashMap<>(snapshotRegistry, 0);
         this.topicsWithCollisionChars = new TimelineHashMap<>(snapshotRegistry, 0);
         this.topics = new TimelineHashMap<>(snapshotRegistry, 0);
@@ -686,7 +701,7 @@ public class ReplicationControlManager {
             }
             ApiError error;
             try {
-                error = createTopic(context, topic, records, successes, configRecords, describable.contains(topic.name()));
+                error = createTopic(context, topic, records, successes, configRecords, describable.contains(topic.name()), request.validateOnly());
             } catch (ApiException e) {
                 error = ApiError.fromThrowable(e);
             }
@@ -731,7 +746,8 @@ public class ReplicationControlManager {
                                  List<ApiMessageAndVersion> records,
                                  Map<String, CreatableTopicResult> successes,
                                  List<ApiMessageAndVersion> configRecords,
-                                 boolean authorizedToReturnConfigs) {
+                                 boolean authorizedToReturnConfigs,
+                                 boolean validateOnly) {
         Map<String, String> creationConfigs = translateCreationConfigs(topic.configs());
         Map<Integer, PartitionRegistration> newParts = new HashMap<>();
 
@@ -846,6 +862,15 @@ public class ReplicationControlManager {
             log.debug("Topic creation of {} partitions not allowed because quota is violated. Delay time: {}",
                 numPartitions, e.throttleTimeMs());
             return ApiError.fromThrowable(e);
+        }
+        if (disklessEnabled && !validateOnly && disklessTopicPreCommitHandler.isPresent()) {
+            try {
+                disklessTopicPreCommitHandler.get().preCommitCreateTopic(
+                    topic.name(), numPartitions, creationConfigs);
+            } catch (Exception e) {
+                return new ApiError(Errors.UNKNOWN_SERVER_ERROR,
+                    "Failed to write diskless topic metadata to Oxia: " + e.getMessage());
+            }
         }
         Uuid topicId = Uuid.randomUuid();
         CreatableTopicResult result = new CreatableTopicResult().
