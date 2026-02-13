@@ -89,7 +89,7 @@ public class UrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETestBase {
     static void startContainers() throws Exception {
         assumeTrue(Boolean.parseBoolean(System.getProperty("runUrsaS3MultiBrokerE2E", "false")),
                 "Skipping multi-broker S3 Ursa E2E by default on 4.2 compatibility branch");
-        oxiaContainer = new OxiaContainer(DockerImageName.parse("streamnative/oxia:main"));
+        oxiaContainer = new OxiaContainer(DockerImageName.parse("oxia/oxia:main"));
         oxiaContainer.start();
         log.info("Oxia container started at: {}", oxiaContainer.getServiceAddress());
 

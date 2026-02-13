@@ -19,7 +19,6 @@ package kafka.server.metadata;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
-import org.apache.kafka.image.ConfigurationsDelta;
 import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.image.TopicImage;
@@ -27,34 +26,31 @@ import org.apache.kafka.image.TopicsDelta;
 import org.apache.kafka.image.loader.LoaderManifest;
 import org.apache.kafka.image.publisher.MetadataPublisher;
 import org.apache.kafka.raft.LeaderAndEpoch;
-import org.apache.kafka.server.fault.FaultHandler;
 import org.apache.kafka.storage.diskless.UrsaPartitionedTopicsMetadataSync;
 
-import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Controller-side metadata publisher which mirrors diskless topic lifecycle into Oxia keys used by ursa-storage.
+ * Controller-side metadata publisher which mirrors diskless topic lifecycle
+ * into Oxia keys used by ursa-storage.
+ *
+ * <p>Topic creation metadata is written pre-commit by
+ * {@code DisklessTopicPreCommitHandler}. This publisher handles post-commit
+ * topic deletion cleanup.
  */
 public final class UrsaPartitionedTopicsPublisher implements MetadataPublisher {
 
     private final int nodeId;
-    private final FaultHandler faultHandler;
     private final AtomicBoolean isActiveController = new AtomicBoolean(false);
     private final UrsaPartitionedTopicsMetadataSync sync;
 
     public UrsaPartitionedTopicsPublisher(
             int nodeId,
-            String oxiaServiceUrl,
-            String namespace,
-            FaultHandler faultHandler) {
+            UrsaPartitionedTopicsMetadataSync sync) {
         this.nodeId = nodeId;
-        this.faultHandler = Objects.requireNonNull(faultHandler, "faultHandler must not be null");
-        this.sync = new UrsaPartitionedTopicsMetadataSync(oxiaServiceUrl, namespace,
-                (message, cause) -> faultHandler.handleFault(message, cause));
+        this.sync = Objects.requireNonNull(sync, "sync must not be null");
     }
 
     @Override
@@ -73,80 +69,30 @@ public final class UrsaPartitionedTopicsPublisher implements MetadataPublisher {
             return;
         }
 
-        MetadataImage oldImage = delta.image();
-        Set<String> candidateTopicNames = topicNamesToConsider(delta, oldImage, newImage);
-        if (candidateTopicNames.isEmpty()) {
+        TopicsDelta topicsDelta = delta.topicsDelta();
+        if (topicsDelta == null || topicsDelta.deletedTopicIds().isEmpty()) {
             return;
         }
 
+        MetadataImage oldImage = delta.image();
         String context = "MetadataDelta up to " + newImage.highestOffsetAndEpoch().offset();
 
-        for (String topicName : candidateTopicNames) {
-            TopicImage oldTopicImage = oldImage.topics().getTopic(topicName);
-            TopicImage newTopicImage = newImage.topics().getTopic(topicName);
-
-            boolean oldEnabled = isDisklessTopic(oldImage, topicName);
-            boolean newEnabled = isDisklessTopic(newImage, topicName);
-
-            if (oldEnabled && !newEnabled) {
-                int partitions = oldTopicImage != null ? oldTopicImage.partitions().size() : -1;
-                sync.deleteTopicMetadata(topicName, partitions, context);
-            } else if (newEnabled) {
-                if (newTopicImage == null) {
-                    continue;
-                }
-                int partitions = newTopicImage.partitions().size();
-                ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, topicName);
-                Map<String, String> properties = newImage.configs().configMapForResource(resource);
-                sync.upsertPartitionedTopicMetadata(topicName, partitions, properties, context);
+        for (Uuid topicId : topicsDelta.deletedTopicIds()) {
+            TopicImage oldTopicImage = oldImage.topics().getTopic(topicId);
+            if (oldTopicImage == null) {
+                continue;
             }
+            String topicName = oldTopicImage.name();
+            if (!isDisklessTopic(oldImage, topicName)) {
+                continue;
+            }
+            int partitions = oldTopicImage.partitions().size();
+            sync.deleteTopicMetadata(topicName, topicId.toString(), partitions, context);
         }
     }
 
     @Override
-    public void close() throws Exception {
-        try {
-            sync.close();
-        } catch (Exception e) {
-            faultHandler.handleFault("Error closing " + name(), e);
-        }
-    }
-
-    private Set<String> topicNamesToConsider(MetadataDelta delta, MetadataImage oldImage, MetadataImage newImage) {
-        Set<String> names = new HashSet<>();
-
-        TopicsDelta topicsDelta = delta.topicsDelta();
-        if (topicsDelta != null) {
-            for (Uuid topicId : topicsDelta.createdTopicIds()) {
-                TopicImage topic = newImage.topics().getTopic(topicId);
-                if (topic != null) {
-                    names.add(topic.name());
-                }
-            }
-            for (Uuid topicId : topicsDelta.deletedTopicIds()) {
-                TopicImage topic = oldImage.topics().getTopic(topicId);
-                if (topic != null) {
-                    names.add(topic.name());
-                }
-            }
-            for (Uuid topicId : topicsDelta.changedTopics().keySet()) {
-                TopicImage topic = newImage.topics().getTopic(topicId);
-                if (topic != null) {
-                    names.add(topic.name());
-                }
-            }
-        }
-
-        ConfigurationsDelta configsDelta = delta.configsDelta();
-        if (configsDelta != null) {
-            for (ConfigResource resource : configsDelta.changes().keySet()) {
-                if (resource.type() == ConfigResource.Type.TOPIC) {
-                    names.add(resource.name());
-                }
-            }
-        }
-
-        return names;
+    public void close() {
     }
 
     private boolean isDisklessTopic(MetadataImage image, String topicName) {

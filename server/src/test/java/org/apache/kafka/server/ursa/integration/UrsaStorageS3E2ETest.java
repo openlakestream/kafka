@@ -84,7 +84,7 @@ public class UrsaStorageS3E2ETest extends UrsaStorageE2ETestBase {
 
     @BeforeAll
     static void startContainers() throws Exception {
-        oxiaContainer = new OxiaContainer(DockerImageName.parse("streamnative/oxia:main"));
+        oxiaContainer = new OxiaContainer(DockerImageName.parse("oxia/oxia:main"));
         oxiaContainer.start();
         log.info("Oxia container started at: {}", oxiaContainer.getServiceAddress());
 

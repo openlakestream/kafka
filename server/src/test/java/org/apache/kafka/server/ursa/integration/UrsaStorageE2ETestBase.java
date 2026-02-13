@@ -312,18 +312,20 @@ public abstract class UrsaStorageE2ETestBase {
      * Creates an S3 bucket with retry logic.
      */
     protected static void createS3BucketWithRetry(URI s3Endpoint, String bucketName) throws Exception {
-        long deadlineMs = System.currentTimeMillis() + 60_000;
-        Exception last = null;
-        while (System.currentTimeMillis() < deadlineMs) {
-            try {
-                createS3Bucket(s3Endpoint, bucketName);
-                return;
-            } catch (Exception e) {
-                last = e;
-                Thread.sleep(1_000);
-            }
+        final Exception[] lastError = new Exception[1];
+        try {
+            TestUtils.waitForCondition(() -> {
+                try {
+                    createS3Bucket(s3Endpoint, bucketName);
+                    return true;
+                } catch (Exception e) {
+                    lastError[0] = e;
+                    return false;
+                }
+            }, 60_000, 1_000, () -> "Failed to create S3 bucket: " + bucketName);
+        } catch (AssertionError e) {
+            throw new RuntimeException("Failed to create S3 bucket: " + bucketName, lastError[0]);
         }
-        throw new RuntimeException("Failed to create S3 bucket: " + bucketName, last);
     }
 
     /**
