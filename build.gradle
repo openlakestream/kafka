@@ -1107,9 +1107,9 @@ project(':server') {
     testImplementation project(':server-common').sourceSets.test.output
     testImplementation 'io.streamnative.oxia:oxia-testcontainers:0.5.1'
     testImplementation 'io.github.oxia-db:oxia-client-api:0.7.0'
-    testImplementation 'org.testcontainers:testcontainers:1.19.3'
-    testImplementation 'org.testcontainers:junit-jupiter:1.19.3'
-    testImplementation 'org.testcontainers:localstack:1.19.3'
+    testImplementation 'org.testcontainers:testcontainers:1.21.4'
+    testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
+    testImplementation 'org.testcontainers:localstack:1.21.4'
     testImplementation 'org.awaitility:awaitility:4.2.0'
     // Needed by `PulsarStorageConfig` (depends on `PulsarConfiguration` interface).
     testImplementation 'io.streamnative:pulsar-broker-common:4.2.0-SNAPSHOT'
