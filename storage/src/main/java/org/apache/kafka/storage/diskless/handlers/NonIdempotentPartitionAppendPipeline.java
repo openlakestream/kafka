@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 import io.netty.buffer.ByteBuf;
 
@@ -63,7 +64,7 @@ final class NonIdempotentPartitionAppendPipeline {
     private final UrsaStorageState state;
     private final int maxInflightAppends;
     private final long maxInflightBytes;
-    private final Runnable onClose;
+    private final Consumer<NonIdempotentPartitionAppendPipeline> onClose;
 
     private final CompletableFuture<ManagedLedger> managedLedgerFuture;
     private final ArrayDeque<Request> pending = new ArrayDeque<>();
@@ -81,7 +82,7 @@ final class NonIdempotentPartitionAppendPipeline {
      * @param state shared storage state
      * @param maxInflightAppends maximum number of concurrent append operations
      * @param maxInflightBytes maximum bytes in concurrent append operations
-     * @param onClose callback invoked when the pipeline becomes idle and closes itself;
+     * @param onClose callback invoked with this pipeline instance when it becomes idle and closes itself;
      *                used to remove the pipeline from the cache
      */
     NonIdempotentPartitionAppendPipeline(
@@ -89,7 +90,7 @@ final class NonIdempotentPartitionAppendPipeline {
             UrsaStorageState state,
             int maxInflightAppends,
             long maxInflightBytes,
-            Runnable onClose) {
+            Consumer<NonIdempotentPartitionAppendPipeline> onClose) {
         this.tp = tp;
         this.state = state;
         this.maxInflightAppends = Math.max(1, maxInflightAppends);
@@ -283,7 +284,7 @@ final class NonIdempotentPartitionAppendPipeline {
         // - The callback just removes this pipeline from the cache
         // - New requests will create a new pipeline via computeIfAbsent
         if (shouldInvokeOnClose) {
-            onClose.run();
+            onClose.accept(this);
         }
     }
 

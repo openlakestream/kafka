@@ -236,17 +236,13 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
     }
 
     private NonIdempotentPartitionAppendPipeline getOrCreateNonIdempotentPipeline(TopicIdPartition tp) {
-        return nonIdempotentPipelines.computeIfAbsent(tp, key -> {
-            NonIdempotentPartitionAppendPipeline[] holder = new NonIdempotentPartitionAppendPipeline[1];
-            holder[0] = new NonIdempotentPartitionAppendPipeline(
-                    key,
-                    state,
-                    state.config().getNonIdempotentMaxInFlightAppendsPerPartition(),
-                    state.config().getNonIdempotentMaxInFlightBytesPerPartition(),
-                    () -> nonIdempotentPipelines.remove(key, holder[0])
-            );
-            return holder[0];
-        });
+        return nonIdempotentPipelines.computeIfAbsent(tp, key -> new NonIdempotentPartitionAppendPipeline(
+                key,
+                state,
+                state.config().getNonIdempotentMaxInFlightAppendsPerPartition(),
+                state.config().getNonIdempotentMaxInFlightBytesPerPartition(),
+                pipeline -> nonIdempotentPipelines.remove(key, pipeline)
+        ));
     }
 
     protected CompletableFuture<PartitionResponse> validateBeforeWrite(
