@@ -25,7 +25,7 @@ on:
     - cron: '0 0 * * 6,0'    # Run on Saturday and Sunday at midnight UTC
 
   pull_request:
-    types: [ opened, synchronize, ready_for_review, reopened ]
+    types: [ opened, synchronize, ready_for_review, reopened, labeled ]
     branches:
       - 'trunk'
       - '4.3'
@@ -41,9 +41,16 @@ permissions:
 
 jobs:
   build:
+    # Skip workflow if triggered by labeling but not with run-junit-tests label
+    if: |
+      github.event_name != 'pull_request' ||
+      github.event.action != 'labeled' ||
+      github.event.label.name == 'run-junit-tests'
     uses: ./.github/workflows/build.yml
     with:
       is-trunk: ${{ github.ref == 'refs/heads/trunk' }}
       is-public-fork: ${{ github.event.pull_request.head.repo.fork || false }}
+      # Run JUnit tests for push events, scheduled runs, or PRs with 'run-junit-tests' label
+      run-junit-tests: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-junit-tests') }}
     secrets:
       inherit
