@@ -263,7 +263,7 @@ bundled under ./libs.
 
 - HdrHistogram-2.2.2
 - JavaFastPFOR-0.2.1
-- RoaringBitmap-1.3.0
+- RoaringBitmap-1.6.9
 - accessors-smart-2.5.1
 - activation-1.1.1
 - aircompressor-2.0.2
