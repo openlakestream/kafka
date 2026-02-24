@@ -64,6 +64,21 @@ but we do write to it. Also, the test catalog is only updated from trunk builds.
 Similar to trunk, this workflow starts in [ci.yml](ci.yml) and calls into [build.yml](build.yml).
 Unlike trunk, the PR builds _will_ utilize the Gradle cache.
 
+**JUnit Tests in PRs**: By default, upstream Kafka JUnit tests are **skipped** in pull request builds 
+to reduce CI time from ~4 hours to ~1 hour. This is because the correctness of core Kafka functionality
+is already validated in the upstream Apache Kafka repository, and this fork has minimal changes
+to the core code.
+
+**Ursa Storage Tests**: The isolated JUnit tests for Ursa storage integration **always run** on every PR, 
+as this is the core functionality of this fork and must be validated.
+
+To run the full upstream Kafka JUnit test suite on a specific PR (e.g., when making changes to core 
+Kafka functionality), add the `run-junit-tests` label to the PR. **This will automatically trigger a new 
+CI run with the full test suite enabled.** The full test suite will also automatically run for all 
+non-PR events, including:
+- Push events to any branch (including trunk, ursa, and 4.0)
+- Scheduled (cron) runs
+
 ### PR Triage
 
 In order to get the attention of committers, we have a triage workflow for Pull Requests

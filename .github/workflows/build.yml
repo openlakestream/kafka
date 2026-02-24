@@ -29,6 +29,10 @@ on:
         description: "Is this CI run from a public fork?"
         default: true
         type: boolean
+      run-junit-tests:
+        description: "Should JUnit tests be run?"
+        default: true
+        type: boolean
 
 jobs:
   configure:
@@ -225,7 +229,7 @@ jobs:
 
   test:
     needs: [configure, validate, load-catalog]
-    if: ${{ ! needs.configure.outputs.is-draft }}
+    if: ${{ ! needs.configure.outputs.is-draft && inputs.run-junit-tests }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -593,10 +597,48 @@ jobs:
           exit 1
       - name: Check Dependency Outcomes
         run: |
-          if [[ "${{ needs.validate.result }}" == "success" && "${{ needs.test.result }}" == "success" && "${{ needs.isolated_tests.result }}" == "success" ]]; then
-            echo "Required jobs completed successfully!"
-            exit 0
-          else
-            echo "Required jobs did not complete successfully"
+          # Validate job must always succeed
+          if [[ "${{ needs.validate.result }}" != "success" ]]; then
+            echo "Validate job did not succeed"
             exit 1
           fi
+          
+          DRAFT="${{ needs.configure.outputs.is-draft }}"
+          RUN_TESTS="${{ inputs.run-junit-tests }}"
+          
+          # Check isolated_tests (Ursa storage tests) - always runs unless draft
+          if [[ "$DRAFT" == "true" ]]; then
+            if [[ "${{ needs.isolated_tests.result }}" != "skipped" ]]; then
+              echo "Draft PR should have skipped isolated_tests but had unexpected status"
+              exit 1
+            fi
+          else
+            if [[ "${{ needs.isolated_tests.result }}" != "success" ]]; then
+              echo "Isolated tests (Ursa storage) did not complete successfully"
+              exit 1
+            fi
+          fi
+          
+          # Check test job (upstream Kafka tests) - depends on run-junit-tests setting
+          if [[ "$DRAFT" == "true" ]]; then
+            # Draft PRs skip tests
+            if [[ "${{ needs.test.result }}" != "skipped" ]]; then
+              echo "Draft PR should have skipped test job but had unexpected status"
+              exit 1
+            fi
+          elif [[ "$RUN_TESTS" == "true" ]]; then
+            # When run-junit-tests is true, test job must succeed
+            if [[ "${{ needs.test.result }}" != "success" ]]; then
+              echo "JUnit tests were expected to run but did not complete successfully"
+              exit 1
+            fi
+          else
+            # When run-junit-tests is false, test job will be skipped
+            if [[ "${{ needs.test.result }}" != "skipped" ]]; then
+              echo "JUnit tests were expected to be skipped but had unexpected status"
+              exit 1
+            fi
+          fi
+          
+          echo "Required jobs completed successfully!"
+          exit 0
