@@ -922,12 +922,12 @@ private[kafka] class Processor(
     while ({currentResponse = dequeueResponse(); currentResponse != null}) {
       val channelId = currentResponse.request.context.connectionId
       try {
-        currentResponse match {
-          case response: NoOpResponse =>
-            if (requestPipeliningEnabled) {
-              enqueueOrderedResponse(response)
-              trySendOrderedResponses(channelId)
-            } else {
+        if (requestPipeliningEnabled) {
+          processPipelinedResponse(channelId, currentResponse)
+        } else {
+          // === ORIGINAL KAFKA CODE UNCHANGED ===
+          currentResponse match {
+            case response: NoOpResponse =>
               // There is no response to send to the client, we need to read more pipelined requests
               // that are sitting in the server's socket buffer
               updateRequestMetrics(response)
@@ -937,34 +937,41 @@ private[kafka] class Processor(
               // throttling delay has already passed by now.
               handleChannelMuteEvent(channelId, ChannelMuteEvent.RESPONSE_SENT)
               tryUnmuteChannel(channelId)
-            }
-          case response: SendResponse =>
-            if (requestPipeliningEnabled) {
-              enqueueOrderedResponse(response)
-              trySendOrderedResponses(channelId)
-            } else {
+
+            case response: SendResponse =>
               sendResponse(response, response.responseSend)
-            }
-          case response: CloseConnectionResponse =>
-            if (requestPipeliningEnabled) {
-              enqueueOrderedResponse(response)
-              trySendOrderedResponses(channelId)
-            } else {
+            case response: CloseConnectionResponse =>
               updateRequestMetrics(response)
               trace("Closing socket connection actively according to the response code.")
               close(channelId)
-            }
-          case _: StartThrottlingResponse =>
-            handleChannelMuteEvent(channelId, ChannelMuteEvent.THROTTLE_STARTED)
-            if (requestPipeliningEnabled) selector.mute(channelId)
-          case _: EndThrottlingResponse =>
-            handleChannelMuteEvent(channelId, ChannelMuteEvent.THROTTLE_ENDED)
-            tryUnmuteChannel(channelId)
+            case _: StartThrottlingResponse =>
+              handleChannelMuteEvent(channelId, ChannelMuteEvent.THROTTLE_STARTED)
+            case _: EndThrottlingResponse =>
+              // Try unmuting the channel. The channel will be unmuted only if the response has already been sent out to
+              // the client.
+              handleChannelMuteEvent(channelId, ChannelMuteEvent.THROTTLE_ENDED)
+              tryUnmuteChannel(channelId)
+          }
         }
       } catch {
         case e: Throwable =>
           processChannelException(channelId, s"Exception while processing response for $channelId", e)
       }
+    }
+  }
+
+  private def processPipelinedResponse(channelId: String, response: Response): Unit = {
+    response match {
+      case _: StartThrottlingResponse =>
+        handleChannelMuteEvent(channelId, ChannelMuteEvent.THROTTLE_STARTED)
+        selector.mute(channelId)
+      case _: EndThrottlingResponse =>
+        handleChannelMuteEvent(channelId, ChannelMuteEvent.THROTTLE_ENDED)
+        tryUnmuteChannel(channelId)
+      case _ =>
+        // NoOp, Send, Close all go through ordered response queue
+        enqueueOrderedResponse(response)
+        trySendOrderedResponses(channelId)
     }
   }
 
@@ -984,6 +991,18 @@ private[kafka] class Processor(
       selector.send(new NetworkSend(connectionId, responseSend))
       inflightResponses += (connectionId -> response)
     }
+  }
+
+  private def shouldPipelineRequest(header: RequestHeader): Boolean = {
+    requestPipeliningEnabled && header.apiKey == ApiKeys.PRODUCE
+  }
+
+  private def shouldPipelineRequest(request: Request): Boolean = {
+    shouldPipelineRequest(request.headerForLoggingOrThrottling())
+  }
+
+  private def shouldPipelineResponse(response: Response): Boolean = {
+    shouldPipelineRequest(response.request)
   }
 
   private def poll(): Unit = {
@@ -1022,7 +1041,16 @@ private[kafka] class Processor(
                   channel.principal, listenerName, securityProtocol, channel.channelMetadataRegistry.clientInformation,
                   isPrivilegedListener, channel.principalSerde)
 
-                req = new Request(id, context, nowNanos, memoryPool, receive.payload, requestChannel.metrics)
+                val shouldPipelineProduceRequest = shouldPipelineRequest(header)
+
+                val produceRequestSequencing =
+                  if (shouldPipelineProduceRequest)
+                    Optional.of(requestChannel.registerProduceRequestSequencing(connectionId))
+                  else
+                    Optional.empty[Request.ProduceRequestSequencing]()
+
+                req = new Request(id, context, nowNanos, memoryPool, receive.payload, requestChannel.metrics,
+                  Optional.empty[Request](), produceRequestSequencing)
                 if (requestPipeliningEnabled) {
                   recordRequestOrder(connectionId, header.correlationId)
                 }
@@ -1038,7 +1066,7 @@ private[kafka] class Processor(
                   }
                 }
                 requestChannel.sendRequest(req)
-                if (!requestPipeliningEnabled) {
+                if (!shouldPipelineProduceRequest) {
                   selector.mute(connectionId)
                   handleChannelMuteEvent(connectionId, ChannelMuteEvent.REQUEST_RECEIVED)
                 }
@@ -1069,12 +1097,14 @@ private[kafka] class Processor(
         }
         updateRequestMetrics(response)
 
-        if (requestPipeliningEnabled) {
-          trySendOrderedResponses(send.destinationId)
-        } else {
-          // Try unmuting the channel. If there was no quota violation and the channel has not been throttled,
-          // it will be unmuted immediately. If the channel has been throttled, it will unmuted only if the throttling
-          // delay has already passed by now.
+        // Drain next ordered response for pipelining
+        if (requestPipeliningEnabled) trySendOrderedResponses(send.destinationId)
+
+        // Try unmuting the channel. If there was no quota violation and the channel has not been throttled,
+        // it will be unmuted immediately. If the channel has been throttled, it will unmuted only if the throttling
+        // delay has already passed by now.
+        // When pipelining is enabled, produce requests skip mute-on-receive so only unmute for non-produce requests.
+        if (!requestPipeliningEnabled || !shouldPipelineResponse(response)) {
           handleChannelMuteEvent(send.destinationId, ChannelMuteEvent.RESPONSE_SENT)
           tryUnmuteChannel(send.destinationId)
         }
@@ -1099,12 +1129,7 @@ private[kafka] class Processor(
           throw new IllegalStateException(s"connectionId has unexpected format: $connectionId")
         }.remoteHost
         inflightResponses.remove(connectionId).foreach(updateRequestMetrics)
-        if (requestPipeliningEnabled) {
-          pendingResponseOrder.remove(connectionId)
-          pendingResponses.remove(connectionId).foreach { pending =>
-            pending.values.foreach(updateRequestMetrics)
-          }
-        }
+        cleanupPipelinedState(connectionId)
         // the channel has been closed by the selector but the quotas still need to be updated
         connectionQuotas.dec(listenerName, InetAddress.getByName(remoteHost))
         // Call listeners to notify for closed connection.
@@ -1143,11 +1168,15 @@ private[kafka] class Processor(
         () -> listener.onDisconnect(connectionId)}))
 
       inflightResponses.remove(connectionId).foreach(response => updateRequestMetrics(response))
-      if (requestPipeliningEnabled) {
-        pendingResponseOrder.remove(connectionId)
-        pendingResponses.remove(connectionId).foreach { pending =>
-          pending.values.foreach(updateRequestMetrics)
-        }
+      cleanupPipelinedState(connectionId)
+    }
+  }
+
+  private def cleanupPipelinedState(connectionId: String): Unit = {
+    if (requestPipeliningEnabled) {
+      pendingResponseOrder.remove(connectionId)
+      pendingResponses.remove(connectionId).foreach { pending =>
+        pending.values.foreach(updateRequestMetrics)
       }
     }
   }
@@ -1157,7 +1186,7 @@ private[kafka] class Processor(
     queue.append(Integer.valueOf(correlationId))
   }
 
-  private def enqueueOrderedResponse(response: RequestChannel.Response): Unit = {
+  private def enqueueOrderedResponse(response: Response): Unit = {
     val connectionId = response.request.context.connectionId
     if (!pendingResponseOrder.contains(connectionId)) {
       // Connection has already been disconnected/closed. Drop the response and update metrics to avoid leaks.
@@ -1165,7 +1194,7 @@ private[kafka] class Processor(
       return
     }
     val correlationId = Integer.valueOf(response.request.headerForLoggingOrThrottling().correlationId)
-    val map = pendingResponses.getOrElseUpdate(connectionId, new mutable.HashMap[Integer, RequestChannel.Response]())
+    val map = pendingResponses.getOrElseUpdate(connectionId, new mutable.HashMap[Integer, Response]())
     map.put(correlationId, response)
   }
 
@@ -1196,6 +1225,11 @@ private[kafka] class Processor(
               nextResponse match {
                 case response: NoOpResponse =>
                   updateRequestMetrics(response)
+                  if (!shouldPipelineResponse(response)) {
+                    // Non-produce requests are muted when received, so no-op completion should still trigger unmute.
+                    handleChannelMuteEvent(connectionId, ChannelMuteEvent.RESPONSE_SENT)
+                    tryUnmuteChannel(connectionId)
+                  }
                 case response: CloseConnectionResponse =>
                   updateRequestMetrics(response)
                   trace("Closing socket connection actively according to the response code.")

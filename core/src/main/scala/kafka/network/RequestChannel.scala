@@ -51,6 +51,9 @@ class RequestChannel(val queueSize: Int,
   private val processors = new ConcurrentHashMap[Int, Processor]()
   private val callbackQueue = new ArrayBlockingQueue[BaseRequest](queueSize)
 
+  private val completedProduceRequestTail = CompletableFuture.completedFuture[Void](null)
+  private val produceRequestTails = new ConcurrentHashMap[String, CompletableFuture[Void]]()
+
   metricsGroup.newGauge(RequestQueueSizeMetric, () => requestQueue.size)
 
   metricsGroup.newGauge(ResponseQueueSizeMetric, () => {
@@ -196,6 +199,16 @@ class RequestChannel(val queueSize: Int,
     callbackQueue.put(request)
     if (!requestQueue.offer(WakeupRequest.INSTANCE))
       trace("Wakeup request could not be added to queue. This means queue is full, so we will still process callback.")
+  }
+
+  private[kafka] def registerProduceRequestSequencing(connectionId: String): Request.ProduceRequestSequencing = {
+    val currentTail = new CompletableFuture[Void]()
+    val previousTail = Option(produceRequestTails.put(connectionId, currentTail)).getOrElse(completedProduceRequestTail)
+    new Request.ProduceRequestSequencing(previousTail, currentTail, () => cleanupProduceRequestSequencing(connectionId, currentTail))
+  }
+
+  private def cleanupProduceRequestSequencing(connectionId: String, currentTail: CompletableFuture[Void]): Unit = {
+    produceRequestTails.remove(connectionId, currentTail)
   }
 
 }

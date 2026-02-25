@@ -48,10 +48,19 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongConsumer;
 
 public final class Request implements BaseRequest {
+
+    /**
+     * Orders produce submissions on a pipelined connection: a request waits for {@code previous} before it
+     * submits, and completes {@code current} once it has submitted, so the next request can go.
+     */
+    public record ProduceRequestSequencing(CompletableFuture<Void> previous,
+                                           CompletableFuture<Void> current,
+                                           Runnable cleanup) { }
     private static final Logger LOG = LoggerFactory.getLogger(Request.class);
     private static final Logger REQUEST_LOGGER = LoggerFactory.getLogger("kafka.request.logger");
 
@@ -64,6 +73,7 @@ public final class Request implements BaseRequest {
     private volatile ByteBuffer buffer;
     private final RequestChannelMetrics metrics;
     private final Optional<Request> envelope;
+    private final Optional<ProduceRequestSequencing> produceRequestSequencing;
     private final RequestAndSize bodyAndSize;
     private final JsonNode requestLog;
 
@@ -89,6 +99,13 @@ public final class Request implements BaseRequest {
     public Request(int processor, RequestContext context, long startTimeNanos,
                    MemoryPool memoryPool, ByteBuffer buffer,
                    RequestChannelMetrics metrics, Optional<Request> envelope) {
+        this(processor, context, startTimeNanos, memoryPool, buffer, metrics, envelope, Optional.empty());
+    }
+
+    public Request(int processor, RequestContext context, long startTimeNanos,
+                   MemoryPool memoryPool, ByteBuffer buffer,
+                   RequestChannelMetrics metrics, Optional<Request> envelope,
+                   Optional<ProduceRequestSequencing> produceRequestSequencing) {
         this.processor = processor;
         this.context = context;
         this.startTimeNanos = startTimeNanos;
@@ -96,6 +113,7 @@ public final class Request implements BaseRequest {
         this.buffer = buffer;
         this.metrics = metrics;
         this.envelope = envelope;
+        this.produceRequestSequencing = produceRequestSequencing;
 
         this.session = new Session(context.principal, context.clientAddress);
         this.bodyAndSize = context.parseRequest(buffer);
@@ -223,6 +241,26 @@ public final class Request implements BaseRequest {
 
     public Optional<Request> envelope() {
         return envelope;
+    }
+
+    public void awaitProduceSubmissionTurn() {
+        produceRequestSequencing.ifPresent(sequencing -> {
+            try {
+                sequencing.previous().join();
+            } catch (RuntimeException e) {
+                // ignore to avoid blocking on exceptional completion
+            }
+        });
+    }
+
+    public void completeProduceSubmissionTurn() {
+        produceRequestSequencing.ifPresent(sequencing -> {
+            // KafkaApis may return early before the explicit await (for example on auth/validation failures).
+            // Re-wait here so we never complete this turn ahead of its predecessor and break FIFO submission order.
+            awaitProduceSubmissionTurn();
+            sequencing.current().complete(null);
+            sequencing.cleanup().run();
+        });
     }
 
     public Optional<JsonNode> requestLog() {
