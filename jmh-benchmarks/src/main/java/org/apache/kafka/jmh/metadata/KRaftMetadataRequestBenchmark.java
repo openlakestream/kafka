@@ -229,7 +229,8 @@ public class KRaftMetadataRequestBenchmark {
         RequestContext context = new RequestContext(header, "1", null, principal,
                 ListenerName.forSecurityProtocol(SecurityProtocol.PLAINTEXT),
                 SecurityProtocol.PLAINTEXT, ClientInformation.EMPTY, false);
-        return new RequestChannel.Request(1, context, 0, MemoryPool.NONE, bodyBuffer, requestChannelMetrics, Option.empty());
+        return new RequestChannel.Request(1, context, 0, MemoryPool.NONE, bodyBuffer, requestChannelMetrics,
+                Option.empty(), Option.empty());
     }
 
     @Benchmark

@@ -283,9 +283,11 @@ class SocketServerTest {
     Utils.toArray(emptyRequest.serializeWithHeader(emptyHeader))
   }
 
-  private def apiVersionRequestBytes(clientId: String, version: Short): Array[Byte] = {
+  private def apiVersionRequestBytes(clientId: String,
+                                     version: Short,
+                                     correlationId: Int = -1): Array[Byte] = {
     val request = new ApiVersionsRequest.Builder().build(version)
-    val header = new RequestHeader(ApiKeys.API_VERSIONS, request.version(), clientId, -1)
+    val header = new RequestHeader(ApiKeys.API_VERSIONS, request.version(), clientId, correlationId)
     Utils.toArray(request.serializeWithHeader(header))
   }
 
@@ -363,6 +365,74 @@ class SocketServerTest {
       val responseHeader = ResponseHeader.parse(ByteBuffer.wrap(responseBytes), responseHeaderVersion)
       assertEquals(1, responseHeader.correlationId)
 
+      socket.close()
+    })
+  }
+
+  @Test
+  def testRequestPipeliningPreservesOrderForMixedRequestTypes(): Unit = {
+    val testProps = new Properties()
+    testProps.putAll(props)
+    testProps.put(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, "true")
+    val pipeliningConfig = KafkaConfig.fromProps(testProps)
+
+    withTestableServer(config = pipeliningConfig, testWithServer = { testableServer =>
+      val socket = connect(testableServer)
+      socket.setSoTimeout(10000)
+
+      val produceRequest = producerRequestBytes(correlationId = 1)
+      val apiVersionsRequest = apiVersionRequestBytes("client", ApiKeys.API_VERSIONS.latestVersion, correlationId = 2)
+
+      sendRequest(socket, produceRequest)
+      sendRequest(socket, apiVersionsRequest)
+
+      val received1 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      val received2 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      assertEquals(1, received1.header.correlationId)
+      assertEquals(2, received2.header.correlationId)
+
+      processRequest(testableServer.dataPlaneRequestChannel, received2)
+      processRequest(testableServer.dataPlaneRequestChannel, received1)
+
+      assertArrayEquals(produceRequest, receiveResponse(socket))
+      assertArrayEquals(apiVersionsRequest, receiveResponse(socket))
+      socket.close()
+    })
+  }
+
+  @Test
+  def testRequestPipeliningOnlyAppliesToProduceRequests(): Unit = {
+    val testProps = new Properties()
+    testProps.putAll(props)
+    testProps.put(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, "true")
+    val pipeliningConfig = KafkaConfig.fromProps(testProps)
+
+    withTestableServer(config = pipeliningConfig, testWithServer = { testableServer =>
+      val socket = connect(testableServer)
+      socket.setSoTimeout(10000)
+
+      val request1 = apiVersionRequestBytes("client", ApiKeys.API_VERSIONS.latestVersion, correlationId = 1)
+      val request2 = apiVersionRequestBytes("client", ApiKeys.API_VERSIONS.latestVersion, correlationId = 2)
+
+      sendRequest(socket, request1)
+      sendRequest(socket, request2)
+
+      val received1 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      assertEquals(1, received1.header.correlationId)
+      assertNull(
+        testableServer.dataPlaneRequestChannel.receiveRequest(200),
+        "Second non-produce request should wait until the first response is sent")
+
+      processRequest(testableServer.dataPlaneRequestChannel, received1)
+      val received2 = receiveRequest(testableServer.dataPlaneRequestChannel, timeout = 5000)
+      assertEquals(2, received2.header.correlationId)
+      processRequest(testableServer.dataPlaneRequestChannel, received2)
+
+      assertArrayEquals(request1, receiveResponse(socket))
+      assertArrayEquals(request2, receiveResponse(socket))
+
+      val selector = testableServer.testableSelector
+      assertTrue(selector.operationCounts.getOrElse(SelectorOperation.Mute, 0) >= 2)
       socket.close()
     })
   }

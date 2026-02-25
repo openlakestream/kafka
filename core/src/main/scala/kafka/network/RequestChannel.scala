@@ -47,6 +47,12 @@ object RequestChannel extends Logging {
   private val ResponseQueueSizeMetric = "ResponseQueueSize"
   val ProcessorMetricTag = "processor"
 
+  final case class ProduceRequestSequencing(
+    previous: CompletableFuture[Unit],
+    current: CompletableFuture[Unit],
+    cleanup: () => Unit
+  )
+
   /**
     * Deprecated protocol apis are logged at info level while the rest are logged at debug level.
     * That makes it possible to enable the former without enabling latter.
@@ -67,7 +73,8 @@ object RequestChannel extends Logging {
                 val memoryPool: MemoryPool,
                 @volatile var buffer: ByteBuffer,
                 metrics: RequestChannelMetrics,
-                val envelope: Option[RequestChannel.Request] = None) extends BaseRequest {
+                val envelope: Option[RequestChannel.Request] = None,
+                val produceRequestSequencing: Option[ProduceRequestSequencing] = None) extends BaseRequest {
     // These need to be volatile because the readers are in the network thread and the writers are in the request
     // handler threads or the purgatory threads
     @volatile var requestDequeueTimeNanos: Long = -1L
@@ -187,6 +194,26 @@ object RequestChannel extends Logging {
 
         case _ =>
           bodyAndSize.request
+      }
+    }
+
+    private[kafka] def awaitProduceSubmissionTurn(): Unit = {
+      produceRequestSequencing.foreach { sequencing =>
+        try {
+          sequencing.previous.join()
+        } catch {
+          case _: RuntimeException => // ignore to avoid blocking on exceptional completion
+        }
+      }
+    }
+
+    private[kafka] def completeProduceSubmissionTurn(): Unit = {
+      produceRequestSequencing.foreach { sequencing =>
+        // KafkaApis may return early before the explicit await (for example on auth/validation failures).
+        // Re-wait here so we never complete this turn ahead of its predecessor and break FIFO submission order.
+        awaitProduceSubmissionTurn()
+        sequencing.current.complete(())
+        sequencing.cleanup()
       }
     }
 
@@ -354,6 +381,9 @@ class RequestChannel(val queueSize: Int,
   private val processors = new ConcurrentHashMap[Int, Processor]()
   private val callbackQueue = new ArrayBlockingQueue[BaseRequest](queueSize)
 
+  private val completedProduceRequestTail = CompletableFuture.completedFuture[Unit](())
+  private val produceRequestTails = new ConcurrentHashMap[String, CompletableFuture[Unit]]()
+
   metricsGroup.newGauge(RequestQueueSizeMetric, () => requestQueue.size)
 
   metricsGroup.newGauge(ResponseQueueSizeMetric, () => {
@@ -500,6 +530,16 @@ class RequestChannel(val queueSize: Int,
     callbackQueue.put(request)
     if (!requestQueue.offer(RequestChannel.WakeupRequest))
       trace("Wakeup request could not be added to queue. This means queue is full, so we will still process callback.")
+  }
+
+  private[kafka] def registerProduceRequestSequencing(connectionId: String): ProduceRequestSequencing = {
+    val currentTail = new CompletableFuture[Unit]()
+    val previousTail = Option(produceRequestTails.put(connectionId, currentTail)).getOrElse(completedProduceRequestTail)
+    ProduceRequestSequencing(previousTail, currentTail, () => cleanupProduceRequestSequencing(connectionId, currentTail))
+  }
+
+  private def cleanupProduceRequestSequencing(connectionId: String, currentTail: CompletableFuture[Unit]): Unit = {
+    produceRequestTails.remove(connectionId, currentTail)
   }
 
 }

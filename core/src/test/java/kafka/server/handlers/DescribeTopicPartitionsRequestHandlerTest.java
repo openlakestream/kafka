@@ -513,7 +513,7 @@ class DescribeTopicPartitionsRequestHandlerTest {
                 listenerName, SecurityProtocol.SSL, ClientInformation.EMPTY, false,
                 Optional.of(kafkaPrincipalSerde));
         return new RequestChannel.Request(1, context, 0, MemoryPool.NONE, buffer,
-                requestChannelMetrics, scala.Option.apply(null));
+                requestChannelMetrics, scala.Option.apply(null), scala.Option.apply(null));
     }
 
     KafkaConfig createKafkaDefaultConfig() {

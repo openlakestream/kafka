@@ -85,6 +85,7 @@ import org.apache.kafka.coordinator.transaction.TransactionLogConfig
 import org.apache.kafka.image.{MetadataDelta, MetadataImage, MetadataProvenance}
 import org.apache.kafka.metadata.{ConfigRepository, KRaftMetadataCache, MetadataCache, MockConfigRepository}
 import org.apache.kafka.network.Session
+import org.apache.kafka.network.SocketServerConfigs
 import org.apache.kafka.network.metrics.{RequestChannelMetrics, RequestMetrics}
 import org.apache.kafka.raft.{KRaftConfigs, QuorumConfig}
 import org.apache.kafka.security.authorizer.AclEntry
@@ -117,7 +118,8 @@ import java.net.InetAddress
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.util
-import java.util.concurrent.{CompletableFuture, TimeUnit}
+import java.util.concurrent.{Callable, CompletableFuture, CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.function.Consumer
 import java.util.{Comparator, Optional, OptionalInt, OptionalLong, Properties}
 import scala.collection.{Map, Seq, mutable}
@@ -2592,7 +2594,11 @@ class KafkaApisTest extends Logging {
     // Create request with custom principal and client address to test quota tags
     val requestHeader = new RequestHeader(shareFetchRequest.apiKey, shareFetchRequest.version, testClientId, 0)
     val request = buildRequest(shareFetchRequest, testPrincipal, testClientAddress, 
-      ListenerName.forSecurityProtocol(SecurityProtocol.SSL), fromPrivilegedListener = false, Some(requestHeader), requestChannelMetrics)
+      ListenerName.forSecurityProtocol(SecurityProtocol.SSL),
+      fromPrivilegedListener = false,
+      requestHeader = Some(requestHeader),
+      requestMetrics = requestChannelMetrics,
+      produceRequestSequencing = None)
     
     // Test that the request itself contains the proper tags and information
     assertEquals(testClientId, request.header.clientId)
@@ -2693,7 +2699,11 @@ class KafkaApisTest extends Logging {
     // Create request with custom principal and client address to test quota tags
     val requestHeader = new RequestHeader(shareAcknowledgeRequest.apiKey, shareAcknowledgeRequest.version, testClientId, 0)
     val request = buildRequest(shareAcknowledgeRequest, testPrincipal, testClientAddress,
-      ListenerName.forSecurityProtocol(SecurityProtocol.SSL), fromPrivilegedListener = false, Some(requestHeader), requestChannelMetrics)
+      ListenerName.forSecurityProtocol(SecurityProtocol.SSL),
+      fromPrivilegedListener = false,
+      requestHeader = Some(requestHeader),
+      requestMetrics = requestChannelMetrics,
+      produceRequestSequencing = None)
     
     // Test that the request itself contains the proper tags and information
     assertEquals(testClientId, request.header.clientId)
@@ -2808,7 +2818,11 @@ class KafkaApisTest extends Logging {
     // Create request with custom principal and client address to test quota tags
     val requestHeader = new RequestHeader(shareFetchRequest.apiKey, shareFetchRequest.version, testClientId, 0)
     val request = buildRequest(shareFetchRequest, testPrincipal, testClientAddress,
-      ListenerName.forSecurityProtocol(SecurityProtocol.SSL), fromPrivilegedListener = false, Some(requestHeader), requestChannelMetrics)
+      ListenerName.forSecurityProtocol(SecurityProtocol.SSL),
+      fromPrivilegedListener = false,
+      requestHeader = Some(requestHeader),
+      requestMetrics = requestChannelMetrics,
+      produceRequestSequencing = None)
     
     // Test that the request itself contains the proper tags and information
     assertEquals(testClientId, request.header.clientId)
@@ -3123,6 +3137,178 @@ class KafkaApisTest extends Logging {
       } finally {
         kafkaApis.close()
       }
+    }
+  }
+
+  @Test
+  def testIdempotentProduceRequestsPreserveOrderUnderConcurrentHandling(): Unit = {
+    val topic = "topic"
+    val topicId = Uuid.randomUuid()
+    val tp = new TopicIdPartition(topicId, 0, topic)
+    addTopicToMetadataCache(topic, numPartitions = 1, topicId = topicId)
+
+    reset(replicaManager, clientQuotaManager, clientRequestQuotaManager, requestChannel, txnCoordinator)
+
+    val producerId = 1000L
+    val producerEpoch: Short = 0
+    val recordsPerBatch = 10
+
+    def buildIdempotentRecords(baseSequence: Int): MemoryRecords = {
+      val timestamp = time.milliseconds()
+      val buffer = ByteBuffer.allocate(4096)
+      val builder = MemoryRecords.builder(
+        buffer,
+        RecordBatch.MAGIC_VALUE_V2,
+        Compression.NONE,
+        TimestampType.CREATE_TIME,
+        0L,
+        timestamp,
+        producerId,
+        producerEpoch,
+        baseSequence
+      )
+      (0 until recordsPerBatch).foreach { _ =>
+        builder.append(new SimpleRecord(timestamp, "k".getBytes, "v".getBytes))
+      }
+      builder.build()
+    }
+
+    val produceRequestVersion = ApiKeys.PRODUCE.latestVersion
+
+    def buildProduceRequest(records: MemoryRecords): ProduceRequest = {
+      val topicProduceData = new ProduceRequestData.TopicProduceData()
+        .setPartitionData(util.List.of(
+          new ProduceRequestData.PartitionProduceData()
+            .setIndex(tp.partition)
+            .setRecords(records)
+        ))
+
+      if (produceRequestVersion >= 13) {
+        topicProduceData.setTopicId(topicId)
+      } else {
+        topicProduceData.setName(tp.topic)
+      }
+
+      ProduceRequest.builder(new ProduceRequestData()
+        .setTopicData(new ProduceRequestData.TopicProduceDataCollection(util.List.of(topicProduceData).iterator))
+        .setAcks(1.toShort)
+        .setTimeoutMs(5000))
+        .build(produceRequestVersion)
+    }
+
+    val sequencing1 = RequestChannel.ProduceRequestSequencing(
+      CompletableFuture.completedFuture[Unit](()),
+      new CompletableFuture[Unit](),
+      () => ()
+    )
+    val sequencing2 = RequestChannel.ProduceRequestSequencing(
+      sequencing1.current,
+      new CompletableFuture[Unit](),
+      () => ()
+    )
+
+    val request1 = buildRequest(
+      buildProduceRequest(buildIdempotentRecords(0)),
+      requestHeader = Some(new RequestHeader(ApiKeys.PRODUCE, produceRequestVersion, clientId, 1)),
+      produceRequestSequencing = Some(sequencing1)
+    )
+    val request2 = buildRequest(
+      buildProduceRequest(buildIdempotentRecords(recordsPerBatch)),
+      requestHeader = Some(new RequestHeader(ApiKeys.PRODUCE, produceRequestVersion, clientId, 2)),
+      produceRequestSequencing = Some(sequencing2)
+    )
+
+    val expectedBaseSequence = new AtomicInteger(0)
+    val firstAppendEntered = new CountDownLatch(1)
+    val allowFirstAppendToProceed = new CountDownLatch(1)
+    val secondAppendValidated = new CountDownLatch(1)
+
+    when(replicaManager.handleProduceAppend(
+      anyLong,
+      anyShort,
+      ArgumentMatchers.eq(false),
+      any(),
+      any(),
+      any(),
+      any(),
+      any(),
+      any()
+    )).thenAnswer(invocation => {
+      val entries = invocation.getArgument[Map[TopicIdPartition, MemoryRecords]](4)
+      val responseCallback = invocation.getArgument[Map[TopicIdPartition, PartitionResponse] => Unit](5)
+      val (partition, records) = entries.head
+
+      val batch = records.batches.iterator.next()
+      val baseSequence = batch.baseSequence()
+      val lastSequence = batch.lastSequence()
+
+      if (baseSequence == 0) {
+        firstAppendEntered.countDown()
+        assertTrue(allowFirstAppendToProceed.await(10, TimeUnit.SECONDS))
+      }
+
+      val expected = expectedBaseSequence.get()
+      val response =
+        if (baseSequence != expected) {
+          new PartitionResponse(
+            Errors.OUT_OF_ORDER_SEQUENCE_NUMBER,
+            s"Out of order sequence: expected $expected, got $baseSequence")
+        } else {
+          expectedBaseSequence.set(lastSequence + 1)
+          new PartitionResponse(Errors.NONE)
+        }
+
+      if (baseSequence != 0) {
+        secondAppendValidated.countDown()
+      }
+
+      responseCallback(Map(partition -> response))
+      null
+    })
+
+    when(clientRequestQuotaManager.maybeRecordAndGetThrottleTimeMs(any[RequestChannel.Request](), any[Long]))
+      .thenReturn(0)
+    when(clientQuotaManager.maybeRecordAndGetThrottleTimeMs(any[Session](), anyString, anyDouble, anyLong))
+      .thenReturn(0)
+
+    kafkaApis = createKafkaApis(overrideProperties =
+      Map(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG -> "true"))
+    val executor = Executors.newFixedThreadPool(2)
+    try {
+      val future1 = executor.submit(new Callable[Unit] {
+        override def call(): Unit = kafkaApis.handleProduceRequest(request1, RequestLocal.withThreadConfinedCaching)
+      })
+
+      assertTrue(firstAppendEntered.await(10, TimeUnit.SECONDS))
+
+      val future2 = executor.submit(new Callable[Unit] {
+        override def call(): Unit = kafkaApis.handleProduceRequest(request2, RequestLocal.withThreadConfinedCaching)
+      })
+
+      // Correct behavior: the second request must not be validated/accepted before the first request reserves the
+      // expected sequence range (otherwise an OUT_OF_ORDER response can be returned spuriously under pipelining).
+      assertFalse(secondAppendValidated.await(500, TimeUnit.MILLISECONDS))
+      allowFirstAppendToProceed.countDown()
+
+      future1.get(10, TimeUnit.SECONDS)
+      future2.get(10, TimeUnit.SECONDS)
+
+      val response1 = verifyNoThrottling[ProduceResponse](request1)
+      val response2 = verifyNoThrottling[ProduceResponse](request2)
+
+      def errorFor(response: ProduceResponse): Errors = {
+        val topicProduceResponse = response.data.responses.asScala.find { topicResponse =>
+          (topicResponse.name != null && topicResponse.name == tp.topic) || topicResponse.topicId == topicId
+        }.get
+        val partitionProduceResponse = topicProduceResponse.partitionResponses.asScala.find(_.index == tp.partition).get
+        Errors.forCode(partitionProduceResponse.errorCode)
+      }
+
+      assertEquals(Errors.NONE, errorFor(response1))
+      assertEquals(Errors.NONE, errorFor(response2))
+    } finally {
+      allowFirstAppendToProceed.countDown()
+      executor.shutdownNow()
     }
   }
 
@@ -10350,9 +10536,10 @@ class KafkaApisTest extends Logging {
                            listenerName: ListenerName = ListenerName.forSecurityProtocol(SecurityProtocol.PLAINTEXT),
                            fromPrivilegedListener: Boolean = false,
                            requestHeader: Option[RequestHeader] = None,
-                           requestMetrics: RequestChannelMetrics = requestChannelMetrics): RequestChannel.Request = {
+                           requestMetrics: RequestChannelMetrics = requestChannelMetrics,
+                           produceRequestSequencing: Option[RequestChannel.ProduceRequestSequencing] = None): RequestChannel.Request = {
     buildRequest(request, new KafkaPrincipal(KafkaPrincipal.USER_TYPE, "Alice"), InetAddress.getLocalHost, listenerName,
-      fromPrivilegedListener, requestHeader, requestMetrics)
+      fromPrivilegedListener, requestHeader, requestMetrics, produceRequestSequencing)
   }
 
     private def buildRequest(request: AbstractRequest,
@@ -10361,7 +10548,8 @@ class KafkaApisTest extends Logging {
                              listenerName: ListenerName,
                              fromPrivilegedListener: Boolean,
                              requestHeader: Option[RequestHeader],
-                             requestMetrics: RequestChannelMetrics): RequestChannel.Request = {
+                             requestMetrics: RequestChannelMetrics,
+                             produceRequestSequencing: Option[RequestChannel.ProduceRequestSequencing]): RequestChannel.Request = {
     val buffer = request.serializeWithHeader(
       requestHeader.getOrElse(new RequestHeader(request.apiKey, request.version, clientId, 0)))
 
@@ -10375,7 +10563,7 @@ class KafkaApisTest extends Logging {
       principal, listenerName, SecurityProtocol.SSL,
       ClientInformation.EMPTY, fromPrivilegedListener, Optional.of(kafkaPrincipalSerde))
     new RequestChannel.Request(processor = 1, context = context, startTimeNanos = 0, MemoryPool.NONE, buffer,
-      requestMetrics, envelope = None)
+      requestMetrics, envelope = None, produceRequestSequencing = produceRequestSequencing)
   }
 
   private def verifyNoThrottling[T <: AbstractResponse](
@@ -14393,7 +14581,11 @@ class KafkaApisTest extends Logging {
     // Create request with custom principal and client address to test quota tags
     val requestHeader = new RequestHeader(shareFetchRequest.apiKey, shareFetchRequest.version, testClientId, 0)
     val request = buildRequest(shareFetchRequest, testPrincipal, testClientAddress,
-      ListenerName.forSecurityProtocol(SecurityProtocol.SSL), fromPrivilegedListener = false, Some(requestHeader), requestChannelMetrics)
+      ListenerName.forSecurityProtocol(SecurityProtocol.SSL),
+      fromPrivilegedListener = false,
+      requestHeader = Some(requestHeader),
+      requestMetrics = requestChannelMetrics,
+      produceRequestSequencing = None)
 
     val kafkaApis = createKafkaApis()
     kafkaApis.handleShareFetchRequest(request)

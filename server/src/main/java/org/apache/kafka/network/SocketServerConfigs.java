@@ -155,8 +155,8 @@ public class SocketServerConfigs {
 
     public static final String SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG = "socket.server.enable.request.pipelining";
     public static final boolean SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_DEFAULT = false;
-    public static final String SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_DOC = "Enable request pipelining on a single TCP connection. When enabled, the broker can "
-            + "read and process multiple requests from the same connection concurrently while still sending responses in request order. "
+    public static final String SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_DOC = "Enable produce request pipelining on a single TCP connection. When enabled, the broker can "
+            + "read and process multiple produce requests from the same connection concurrently while still sending responses in request order. "
             + "This can reduce latency amplification for storage backends that have periodic commit/flush cycles.";
 
     public static final ConfigDef CONFIG_DEF = new ConfigDef()
