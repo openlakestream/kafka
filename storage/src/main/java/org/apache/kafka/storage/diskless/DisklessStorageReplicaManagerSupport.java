@@ -243,6 +243,11 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         }
     }
 
+    // Visible for testing.
+    public UrsaStorageState getUrsaState() {
+        return ursaState;
+    }
+
     @Override
     public void close() throws IOException {
         if (reader != null) {

@@ -24,8 +24,10 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
 import org.apache.kafka.metadata.BrokerState;
@@ -45,9 +47,11 @@ import org.testcontainers.utility.DockerImageName;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -57,6 +61,7 @@ import io.oxia.client.api.OxiaClientBuilder;
 import io.streamnative.oxia.testcontainers.OxiaContainer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -523,6 +528,68 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
     }
 
     /**
+     * Retention tests.
+     */
+    @Nested
+    @DisplayName("Retention Behavior Tests")
+    class RetentionBehaviorTests {
+
+        @Test
+        @DisplayName("Retention should advance earliest offset even after fetch cursor")
+        void testRetentionShouldAdvanceEarliestOffsetEvenAfterFetchCursor() throws Exception {
+            String topicName = uniqueTopicName("retention-fetch-cursor-topic");
+            TopicPartition topicPartition = new TopicPartition(topicName, 0);
+            int numRecords = 10;
+
+            createDisklessTopic(
+                    cluster,
+                    topicName,
+                    1,
+                    (short) 1,
+                    Map.of(TopicConfig.RETENTION_MS_CONFIG, "1"));
+            waitForTopicReady(cluster, topicName, 1);
+            produceRecords(cluster.bootstrapServers(), topicName, numRecords);
+
+            Uuid topicId;
+            try (Admin admin = Admin.create(cluster.clientProperties())) {
+                topicId = admin.describeTopics(Collections.singleton(topicName))
+                        .allTopicNames()
+                        .get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                        .get(topicName)
+                        .topicId();
+            }
+
+            try (Consumer<byte[], byte[]> consumer = createConsumer(cluster.bootstrapServers())) {
+                consumer.assign(Collections.singletonList(topicPartition));
+                consumer.seekToBeginning(Collections.singletonList(topicPartition));
+                List<ConsumerRecord<byte[], byte[]>> records =
+                        consumeRecords(consumer, 1, Duration.ofSeconds(5));
+                assertFalse(records.isEmpty(), "Expected fetch path to create non-durable cursor");
+            }
+
+            // Sleep 50 ms to ensure retention has time to be able to trim the topic.
+            TimeUnit.MILLISECONDS.sleep(50);
+
+            var broker = cluster.brokers().values().iterator().next();
+            forceTrimForTopicPartition(
+                    broker.replicaManager().disklessStorageSupport().getUrsaState(),
+                    new TopicIdPartition(topicId, topicPartition));
+
+            try (Admin admin = Admin.create(cluster.clientProperties())) {
+                long earliestOffset = admin.listOffsets(Map.of(topicPartition, OffsetSpec.earliest()))
+                        .all()
+                        .get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                        .get(topicPartition)
+                        .offset();
+
+                assertTrue(earliestOffset > 0,
+                        "Expected earliest offset to advance after retention trim, but got " + earliestOffset
+                                + ". This reproduces the non-durable cursor pinning issue.");
+            }
+        }
+    }
+
+    /**
      * Oxia metadata verification tests.
      * Tests that ManagedLedger and partitioned topic metadata are correctly stored in Oxia.
      */
@@ -687,5 +754,20 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
                 }, 30_000, 100, () -> "Timed out waiting for " + description + " to be deleted from Oxia: " + key);
             }
         }
+    }
+
+    private static void forceTrimForTopicPartition(Object ursaStorageState,
+                                                   TopicIdPartition topicIdPartition) throws Exception {
+        var getOrCreateManagedLedgerMethod = ursaStorageState.getClass()
+                .getMethod("getOrCreateManagedLedger", TopicIdPartition.class);
+        Object managedLedgerFuture = getOrCreateManagedLedgerMethod.invoke(ursaStorageState, topicIdPartition);
+        Object managedLedger = ((CompletableFuture<?>) managedLedgerFuture)
+                .get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        CompletableFuture<Void> trimFuture = new CompletableFuture<>();
+        var trimMethod = managedLedger.getClass()
+                .getMethod("trimConsumedLedgersInBackground", CompletableFuture.class);
+        trimMethod.invoke(managedLedger, trimFuture);
+        trimFuture.get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
 }
