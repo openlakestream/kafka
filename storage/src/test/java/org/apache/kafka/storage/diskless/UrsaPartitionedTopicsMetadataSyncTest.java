@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class UrsaPartitionedTopicsMetadataSyncTest {
 
-    private static final class RecordingStore implements UrsaPartitionedTopicsMetadataSync.OxiaStore {
+    private static final class RecordingStore implements OxiaStore {
         private final List<String> putKeys = new CopyOnWriteArrayList<>();
         private final List<byte[]> putValues = new CopyOnWriteArrayList<>();
         private final List<String> deleteKeys = new CopyOnWriteArrayList<>();

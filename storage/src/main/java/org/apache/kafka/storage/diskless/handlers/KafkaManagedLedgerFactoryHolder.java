@@ -63,19 +63,22 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
         return oxiaClient;
     }
 
+    static ServiceConfiguration createServiceConfiguration(UrsaStorageConfig config) {
+        final var serviceConfiguration = new ServiceConfiguration();
+        final var pulsarOxiaUrl = config.getPulsarOxiaServiceUrl();
+        Properties properties = buildManagedLedgerProperties(config);
+        serviceConfiguration.setProperties(properties);
+        serviceConfiguration.setMetadataStoreUrl(pulsarOxiaUrl.toString());
+        serviceConfiguration.setConfigurationMetadataStoreUrl(pulsarOxiaUrl.toString());
+        return serviceConfiguration;
+    }
+
     static KafkaManagedLedgerFactoryHolder create(UrsaStorageConfig config) throws Exception {
         PersistentStorageWalManagedLedgerStorage managedLedgerStorage = null;
 
         try {
-            ServiceConfiguration serviceConfiguration = new ServiceConfiguration();
-            String oxiaUrl = formatOxiaUrl(config);
-            Properties properties = buildManagedLedgerProperties(config, oxiaUrl);
-            serviceConfiguration.setProperties(properties);
-            serviceConfiguration.setMetadataStoreUrl(oxiaUrl);
-            serviceConfiguration.setConfigurationMetadataStoreUrl(oxiaUrl);
-
             managedLedgerStorage = new PersistentStorageWalManagedLedgerStorage();
-            managedLedgerStorage.initialize(serviceConfiguration, null, null, null, OpenTelemetry.noop());
+            managedLedgerStorage.initialize(createServiceConfiguration(config), null, null, null, OpenTelemetry.noop());
             ManagedLedgerFactory managedLedgerFactory =
                     managedLedgerStorage.getDefaultStorageClass().getManagedLedgerFactory();
 
@@ -98,20 +101,11 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
         }
     }
 
-    /**
-     * Formats the Oxia URL for UrsaStorage.
-     * The format is: oxia://host:port/namespace
-     */
-    static String formatOxiaUrl(UrsaStorageConfig config) {
-        return "oxia://" + config.getOxiaServiceUrl() + "/" + config.getNamespace();
-    }
-
-    static Properties buildManagedLedgerProperties(UrsaStorageConfig config, String oxiaUrl) {
+    static Properties buildManagedLedgerProperties(UrsaStorageConfig config) {
         Properties properties = new Properties();
         properties.setProperty("backendStorageType", config.getBackendType());
         properties.setProperty("storagePath", config.getStoragePath());
-        properties.setProperty("oxiaPulsarStorageUrl", oxiaUrl);
-        properties.setProperty("metadataStoreUrl", oxiaUrl);
+        properties.setProperty("oxiaPulsarStorageUrl", config.getUrsaOxiaServiceUrl().toString());
         properties.setProperty("writeBufferFlushIntervalMs", String.valueOf(config.getWriteBufferFlushIntervalMs()));
         properties.setProperty("writeBufferSize", String.valueOf(config.getWriteBufferSize()));
         properties.setProperty("writeBufferFlushSize", String.valueOf(config.getWriteBufferFlushSize()));

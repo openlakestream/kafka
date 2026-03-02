@@ -45,14 +45,15 @@ import org.apache.kafka.server.{ProcessRole, SimpleApiVersionManager}
 import org.apache.kafka.server.authorizer.Authorizer
 import org.apache.kafka.server.config.ServerLogConfigs.{ALTER_CONFIG_POLICY_CLASS_NAME_CONFIG, CREATE_TOPIC_POLICY_CLASS_NAME_CONFIG}
 import org.apache.kafka.server.common.{ApiMessageAndVersion, DisklessTopicPreCommitHandler, KRaftVersion, NodeToControllerChannelManager}
-import org.apache.kafka.server.config.{ConfigType, DelegationTokenManagerConfigs, ServerLogConfigs}
+import org.apache.kafka.server.config.{ConfigType, DelegationTokenManagerConfigs}
 import org.apache.kafka.server.metrics.{KafkaMetricsGroup, KafkaYammerMetrics, LinuxIoMetricsCollector}
 import org.apache.kafka.server.network.{EndpointReadyFutures, KafkaAuthorizerServerInfo}
 import org.apache.kafka.server.policy.{AlterConfigPolicy, CreateTopicPolicy}
 import org.apache.kafka.server.util.{Deadline, FutureUtils}
 import org.apache.kafka.server.NodeToControllerChannelManagerImpl
 import org.apache.kafka.server.RaftControllerNodeProvider
-import org.apache.kafka.storage.diskless.UrsaPartitionedTopicsMetadataSync
+import org.apache.kafka.storage.diskless.{DefaultOxiaStore, UrsaPartitionedTopicsMetadataSync}
+import org.apache.kafka.storage.diskless.handlers.UrsaStorageConfig
 
 import java.util
 import java.util.{Optional, OptionalLong}
@@ -265,10 +266,10 @@ class ControllerServer(
           setDisklessStorageSystemEnabled(config.ursaStorageEnable).
           setDisklessTopicPreCommitHandler({
             if (config.ursaStorageEnable) {
-              val oxiaUrl = config.getString(ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG)
-              val namespace = config.getString(ServerLogConfigs.URSA_STORAGE_NAMESPACE_CONFIG)
-              ursaOxiaSync = new UrsaPartitionedTopicsMetadataSync(oxiaUrl, namespace,
-                (msg: String, cause: Throwable) => sharedServer.metadataPublishingFaultHandler.handleFault(msg, cause))
+              val ursaConfig = UrsaStorageConfig.fromConfigs(config.props.asInstanceOf[util.Map[String, _]])
+              ursaOxiaSync = new UrsaPartitionedTopicsMetadataSync(
+                (msg: String, cause: Throwable) => sharedServer.metadataPublishingFaultHandler.handleFault(msg, cause),
+                new DefaultOxiaStore(ursaConfig.getPulsarOxiaServiceUrl))
               Optional.of[DisklessTopicPreCommitHandler](
                 (topicName: String, partitions: Int, configs: util.Map[String, String]) => {
                 ursaOxiaSync.upsertPartitionedTopicMetadataSync(topicName, partitions, configs, 3000)

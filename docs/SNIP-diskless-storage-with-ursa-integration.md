@@ -433,6 +433,8 @@ No protocol changes required.
 | `ursa.storage.enable` | boolean | `false` | Master toggle for Ursa storage mode |
 | `ursa.storage.topic.default.enable` | boolean | `false` | Enable diskless storage for topics by default |
 | `ursa.storage.oxia.service.url` | string | `localhost:6648` | Oxia service URL for metadata |
+| `pulsar.oxia.service.url` | string | `oxia://localhost:6648/default` | Oxia metadata store URL for Pulsar-managed ledger metadata (format: `oxia://host:port/[namespace]`) |
+| `ursa.oxia.service.url` | string | `oxia://localhost:6648/default` | Oxia metadata store URL for Ursa storage metadata (format: `oxia://host:port/[namespace]`) |
 | `ursa.storage.backend.type` | string | `LOCAL` | Storage backend: `LOCAL`, `S3`, `AZURE_BLOB` |
 | `ursa.storage.path` | string | `/tmp/ursa-data` | Local storage path (for LOCAL backend) |
 | `ursa.storage.compaction.prefix` | string | `/tmp/compaction-data` | Compaction output prefix (for S3 backend) |

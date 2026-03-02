@@ -129,6 +129,7 @@
 	        <allow pkg="org.apache.kafka.storage.diskless" />
 	        <allow pkg="org.apache.kafka.storage.log.metrics" />
 	        <allow pkg="com.fasterxml.jackson" />
+          <allow pkg="org.apache.commons.lang3.tuple" />
 	        <allow pkg="io.streamnative.ursa.storage" />
 	        <allow pkg="io.streamnative.ursa.metrics" />
 	        <allow pkg="io.streamnative.ursa.mledger" />

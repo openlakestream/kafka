@@ -43,6 +43,7 @@ import org.apache.kafka.image.loader.LoaderManifestType;
 import org.apache.kafka.metadata.LeaderRecoveryState;
 import org.apache.kafka.metadata.PartitionRegistration;
 import org.apache.kafka.raft.LeaderAndEpoch;
+import org.apache.kafka.storage.diskless.OxiaStore;
 import org.apache.kafka.storage.diskless.UrsaPartitionedTopicsMetadataSync;
 
 import org.junit.jupiter.api.Test;
@@ -58,7 +59,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class UrsaPartitionedTopicsPublisherTest {
 
-    private static final class RecordingStore implements UrsaPartitionedTopicsMetadataSync.OxiaStore {
+    private static final class RecordingStore implements OxiaStore {
         final List<String> putKeys = new CopyOnWriteArrayList<>();
         final List<String> deleteKeys = new CopyOnWriteArrayList<>();
 

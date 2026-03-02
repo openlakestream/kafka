@@ -108,7 +108,8 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
 
         this.writer = new UrsaManagedLedgerWriter(ursaState);
         this.reader = new UrsaManagedLedgerReader(ursaState);
-        log.info("Diskless support initialized with ManagedLedger, oxia URL: {}", ursaConfig.getOxiaServiceUrl());
+        log.info("Diskless support initialized with ManagedLedger, oxia URLs: {} {}",
+                ursaConfig.getPulsarOxiaServiceUrl(), ursaConfig.getUrsaOxiaServiceUrl());
     }
 
     /**
