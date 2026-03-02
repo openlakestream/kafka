@@ -29,9 +29,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 
-import io.oxia.client.api.AsyncOxiaClient;
-import io.oxia.client.api.OxiaClientBuilder;
-
 /**
  * Best-effort synchronizer that mirrors diskless topic lifecycle into Oxia keys used by ursa-storage.
  *
@@ -45,13 +42,6 @@ public final class UrsaPartitionedTopicsMetadataSync implements AutoCloseable {
     private final ObjectMapper objectMapper;
     private final OxiaStore store;
     private CompletableFuture<Void> lastOp = CompletableFuture.completedFuture(null);
-
-    public UrsaPartitionedTopicsMetadataSync(
-            String oxiaServiceUrl,
-            String namespace,
-            BiConsumer<String, Throwable> faultHandler) {
-        this(faultHandler, new ObjectMapper(), new DefaultOxiaStore(oxiaServiceUrl, namespace));
-    }
 
     public UrsaPartitionedTopicsMetadataSync(
             BiConsumer<String, Throwable> faultHandler,
@@ -137,45 +127,5 @@ public final class UrsaPartitionedTopicsMetadataSync implements AutoCloseable {
                 + KafkaManagedLedgerNaming.NAMESPACE + "/"
                 + KafkaManagedLedgerNaming.DOMAIN + "/"
                 + topicName + "-partition-" + partition;
-    }
-
-    public interface OxiaStore extends AutoCloseable {
-        CompletableFuture<Void> put(String key, byte[] value);
-
-        CompletableFuture<Void> delete(String key);
-
-        @Override
-        void close() throws Exception;
-    }
-
-    static final class DefaultOxiaStore implements OxiaStore {
-        private static final long CONNECT_TIMEOUT_SECONDS = 10;
-        private final AsyncOxiaClient client;
-
-        DefaultOxiaStore(String oxiaServiceUrl, String namespace) {
-            try {
-                this.client = OxiaClientBuilder.create(oxiaServiceUrl)
-                        .namespace(namespace)
-                        .asyncClient()
-                        .get(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to connect to Oxia at " + oxiaServiceUrl, e);
-            }
-        }
-
-        @Override
-        public CompletableFuture<Void> put(String key, byte[] value) {
-            return client.put(key, value).thenApply(ignored -> null);
-        }
-
-        @Override
-        public CompletableFuture<Void> delete(String key) {
-            return client.delete(key).thenApply(ignored -> null);
-        }
-
-        @Override
-        public void close() throws Exception {
-            client.close();
-        }
     }
 }

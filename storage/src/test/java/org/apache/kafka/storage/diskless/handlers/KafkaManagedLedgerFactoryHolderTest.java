@@ -16,10 +16,15 @@
  */
 package org.apache.kafka.storage.diskless.handlers;
 
+import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.test.TestUtils;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.util.Map;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -55,15 +60,14 @@ class KafkaManagedLedgerFactoryHolderTest {
     }
 
     @Test
-    void testDoesNotInjectSchemaRegistryConfigWhenExternalReaderFactoryIsNoop() {
-        UrsaStorageConfig config = UrsaStorageConfig.builder().build();
+    void testDoesNotInjectSchemaRegistryConfigWhenExternalReaderFactoryIsNoop() throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of());
 
         System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP, "http://example:8001");
         System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP, "Bearer token");
         System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP, "/mnt/secrets/token");
 
-        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(
-                config, KafkaManagedLedgerFactoryHolder.formatOxiaUrl(config));
+        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
 
         assertEquals(NOOP_EXTERNAL_READER_FACTORY_CLASS, properties.getProperty(EXTERNAL_READER_FACTORY_CLASS_PROP));
         assertFalse(properties.containsKey(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP));
@@ -72,16 +76,15 @@ class KafkaManagedLedgerFactoryHolderTest {
     }
 
     @Test
-    void testInjectsSchemaRegistryAuthorizationWhenExternalReaderEnabled() {
-        UrsaStorageConfig config = UrsaStorageConfig.builder().build();
+    void testInjectsSchemaRegistryAuthorizationWhenExternalReaderEnabled() throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of());
 
         System.setProperty(SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP,
                 "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory");
         System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP, "http://example:8001");
         System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP, "Bearer token");
 
-        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(
-                config, KafkaManagedLedgerFactoryHolder.formatOxiaUrl(config));
+        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
 
         assertEquals(
                 "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory",
@@ -92,8 +95,8 @@ class KafkaManagedLedgerFactoryHolderTest {
     }
 
     @Test
-    void testAuthorizationFileTakesPrecedenceOverAuthorizationValue() {
-        UrsaStorageConfig config = UrsaStorageConfig.builder().build();
+    void testAuthorizationFileTakesPrecedenceOverAuthorizationValue() throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of());
 
         System.setProperty(SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP,
                 "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory");
@@ -101,8 +104,7 @@ class KafkaManagedLedgerFactoryHolderTest {
         System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP, "Bearer token");
         System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP, "/mnt/secrets/token");
 
-        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(
-                config, KafkaManagedLedgerFactoryHolder.formatOxiaUrl(config));
+        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
 
         assertEquals("http://example:8001", properties.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP));
         assertEquals(
@@ -112,19 +114,64 @@ class KafkaManagedLedgerFactoryHolderTest {
     }
 
     @Test
-    void testBlankAuthorizationIsIgnored() {
-        UrsaStorageConfig config = UrsaStorageConfig.builder().build();
+    void testBlankAuthorizationIsIgnored() throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of());
 
         System.setProperty(SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP,
                 "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory");
         System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP, "http://example:8001");
         System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP, "   ");
 
-        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(
-                config, KafkaManagedLedgerFactoryHolder.formatOxiaUrl(config));
+        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
 
         assertEquals("http://example:8001", properties.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP));
         assertFalse(properties.containsKey(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP));
         assertFalse(properties.containsKey(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP));
+    }
+
+    // Verify "pulsar.storage.oxia.service.url" and "ursa.storage.oxia.service.url" are correctly parsed
+    @Test
+    void testOxiaServiceUrls() throws Exception {
+        // Default
+        verifyOxiaUrls("", "oxia://localhost:6648/default", "oxia://localhost:6648/default");
+
+        // Inherited from the deprecated "ursa.storage.oxia.service.url" and "ursa.storage.namespace" configs when
+        // the configs are not set
+        verifyOxiaUrls("""
+                ursa.storage.oxia.service.url=localhost:1111
+                ursa.storage.namespace=ns
+                """, "oxia://localhost:1111/ns", "oxia://localhost:1111/ns");
+
+        // The deprecated configs are ignored if the corresponding config is set
+        verifyOxiaUrls("""
+                ursa.storage.oxia.service.url=localhost:1111
+                ursa.storage.namespace=ns
+                pulsar.oxia.service.url=oxia://localhost:2222/ns2
+                """, "oxia://localhost:2222/ns2", "oxia://localhost:1111/ns");
+        verifyOxiaUrls("""
+                ursa.storage.oxia.service.url=localhost:1111
+                ursa.storage.namespace=ns
+                ursa.oxia.service.url=oxia://localhost:2222/ns2
+                """, "oxia://localhost:1111/ns", "oxia://localhost:2222/ns2");
+        verifyOxiaUrls("""
+                ursa.storage.oxia.service.url=localhost:1111
+                ursa.storage.namespace=ns
+                pulsar.oxia.service.url=oxia://localhost:2222/ns2
+                ursa.oxia.service.url=oxia://localhost:3333/ns3
+                """, "oxia://localhost:2222/ns2", "oxia://localhost:3333/ns3");
+    }
+
+    private static void verifyOxiaUrls(String content, String expectedPulsarOxiaUrl, String expectedUrsaOxiaUrl) throws Exception {
+        final var tempFile = TestUtils.tempFile();
+        try {
+            Files.writeString(tempFile.toPath(), content);
+            final var props = Utils.loadProps(tempFile.getPath(), null);
+            final var serviceConfig = KafkaManagedLedgerFactoryHolder.createServiceConfiguration(
+                    UrsaStorageConfig.fromConfigs(Utils.propsToMap(props)));
+            assertEquals(expectedPulsarOxiaUrl, serviceConfig.getMetadataStoreUrl());
+            assertEquals(expectedUrsaOxiaUrl, serviceConfig.getProperties().getProperty("oxiaPulsarStorageUrl"));
+        } finally {
+            Files.deleteIfExists(tempFile.toPath());
+        }
     }
 }

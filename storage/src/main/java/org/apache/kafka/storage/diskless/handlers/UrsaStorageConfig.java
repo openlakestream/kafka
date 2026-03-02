@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.diskless.handlers;
 
 import org.apache.kafka.server.config.ServerLogConfigs;
+import org.apache.kafka.storage.diskless.OxiaServiceUrl;
 
 import java.util.Map;
 
@@ -26,17 +27,22 @@ import java.util.Map;
 public class UrsaStorageConfig {
 
     private final boolean enabled;
-    private final String oxiaServiceUrl;
-    private final String walDirectory;
-    private final String namespace;
+    /**
+     * The metadata store URL used for Pulsar's metadata store:
+     * 1. Managed ledger: used for Ursa storage to store managed ledger's metadata
+     * 2. {@link org.apache.kafka.storage.diskless.UrsaPartitionedTopicsMetadataSync}
+     */
+    private final OxiaServiceUrl pulsarOxiaServiceUrl;
+
+    // The metadata store URL used for Ursa storage, e.g. the offset generation
+    private final OxiaServiceUrl ursaOxiaServiceUrl;
+
     private final String backendType;
     private final String storagePath;
     private final String compactionPrefix;
     private final long writeBufferFlushIntervalMs;
     private final int writeBufferSize;
     private final long writeBufferFlushSize;
-    private final long boundaryCacheRefreshIntervalMs;
-    public static final long BOUNDARY_CACHE_REFRESH_INTERVAL_MS_DEFAULT = 100L;
     private final int nonIdempotentMaxInFlightAppendsPerPartition;
     private final long nonIdempotentMaxInFlightBytesPerPartition;
     private final String s3Endpoint;
@@ -45,40 +51,35 @@ public class UrsaStorageConfig {
     private final String s3Bucket;
     private final String compactionBucket;
     private final String s3Region;
-    private final boolean topicDefaultEnabled;
 
     @SuppressWarnings("checkstyle:ParameterNumber")
-    public UrsaStorageConfig(boolean enabled,
-                             String oxiaServiceUrl,
-                             String walDirectory,
-                             String namespace,
-                             String backendType,
-                             String storagePath,
-                             String compactionPrefix,
-                             long writeBufferFlushIntervalMs,
-                             int writeBufferSize,
-                             long writeBufferFlushSize,
-                             long boundaryCacheRefreshIntervalMs,
-                             String s3Endpoint,
-                             String s3AccessKey,
-                             String s3SecretKey,
-                             String s3Bucket,
-                             String compactionBucket,
-                             String s3Region,
-                             int nonIdempotentMaxInFlightAppendsPerPartition,
-                             long nonIdempotentMaxInFlightBytesPerPartition,
-                             boolean topicDefaultEnabled) {
+    private UrsaStorageConfig(boolean enabled,
+                              OxiaServiceUrl pulsarOxiaServiceUrl,
+                              OxiaServiceUrl ursaOxiaServiceUrl,
+                              String backendType,
+                              String storagePath,
+                              String compactionPrefix,
+                              long writeBufferFlushIntervalMs,
+                              int writeBufferSize,
+                              long writeBufferFlushSize,
+                              String s3Endpoint,
+                              String s3AccessKey,
+                              String s3SecretKey,
+                              String s3Bucket,
+                              String compactionBucket,
+                              String s3Region,
+                              int nonIdempotentMaxInFlightAppendsPerPartition,
+                              long nonIdempotentMaxInFlightBytesPerPartition) {
+
         this.enabled = enabled;
-        this.oxiaServiceUrl = oxiaServiceUrl;
-        this.walDirectory = walDirectory;
-        this.namespace = namespace;
+        this.pulsarOxiaServiceUrl = pulsarOxiaServiceUrl;
+        this.ursaOxiaServiceUrl = ursaOxiaServiceUrl;
         this.backendType = backendType;
         this.storagePath = storagePath;
         this.compactionPrefix = compactionPrefix;
         this.writeBufferFlushIntervalMs = writeBufferFlushIntervalMs;
         this.writeBufferSize = writeBufferSize;
         this.writeBufferFlushSize = writeBufferFlushSize;
-        this.boundaryCacheRefreshIntervalMs = boundaryCacheRefreshIntervalMs;
         this.nonIdempotentMaxInFlightAppendsPerPartition = nonIdempotentMaxInFlightAppendsPerPartition;
         this.nonIdempotentMaxInFlightBytesPerPartition = nonIdempotentMaxInFlightBytesPerPartition;
         this.s3Endpoint = s3Endpoint;
@@ -87,7 +88,6 @@ public class UrsaStorageConfig {
         this.s3Bucket = s3Bucket;
         this.compactionBucket = compactionBucket;
         this.s3Region = s3Region;
-        this.topicDefaultEnabled = topicDefaultEnabled;
     }
 
     /**
@@ -96,18 +96,20 @@ public class UrsaStorageConfig {
      * @param configs the broker configuration map
      * @return a new UrsaStorageConfig
      */
-    public static UrsaStorageConfig fromConfigs(Map<String, ?> configs) {
+    public static UrsaStorageConfig fromConfigs(Map<String, ?> configs) throws Exception {
         boolean enabled = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG,
                 String.valueOf(ServerLogConfigs.URSA_STORAGE_ENABLE_DEFAULT)).equals("true");
 
         String oxiaServiceUrl = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_DEFAULT);
-
-        String walDirectory = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_CONFIG,
-                ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_DEFAULT);
-
         String namespace = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_NAMESPACE_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_NAMESPACE_DEFAULT);
+        final var defaultOxiaServiceUrl = new OxiaServiceUrl("oxia://" + oxiaServiceUrl + "/" + namespace);
+
+        final var pulsarOxiaServiceUrl = getOxiaServiceUrlConfig(configs, ServerLogConfigs.PULSAR_OXIA_SERVICE_URL_CONFIG,
+                defaultOxiaServiceUrl);
+        final var ursaOxiaServiceUrl = getOxiaServiceUrlConfig(configs, ServerLogConfigs.URSA_OXIA_SERVICE_URL_CONFIG,
+                defaultOxiaServiceUrl);
 
         String backendType = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_DEFAULT);
@@ -156,20 +158,12 @@ public class UrsaStorageConfig {
         String s3Region = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_S3_REGION_DEFAULT);
 
-        boolean topicDefaultEnabled = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_TOPIC_DEFAULT_ENABLE_CONFIG,
-                String.valueOf(ServerLogConfigs.URSA_STORAGE_TOPIC_DEFAULT_ENABLE_DEFAULT)).equals("true");
-
-        return new UrsaStorageConfig(enabled, oxiaServiceUrl, walDirectory, namespace,
+        return new UrsaStorageConfig(enabled, pulsarOxiaServiceUrl, ursaOxiaServiceUrl,
                 backendType, storagePath, compactionPrefix,
                 writeBufferFlushIntervalMs, writeBufferSize, writeBufferFlushSize,
-                BOUNDARY_CACHE_REFRESH_INTERVAL_MS_DEFAULT,
                 s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket, compactionBucket, s3Region,
-                nonIdempotentMaxInFlightAppendsPerPartition, nonIdempotentMaxInFlightBytesPerPartition,
-                topicDefaultEnabled);
-    }
-
-    public boolean isTopicDefaultEnabled() {
-        return topicDefaultEnabled;
+                nonIdempotentMaxInFlightAppendsPerPartition, nonIdempotentMaxInFlightBytesPerPartition
+        );
     }
 
     private static String getStringConfig(Map<String, ?> configs, String key, String defaultValue) {
@@ -187,20 +181,22 @@ public class UrsaStorageConfig {
         return value != null ? Integer.parseInt(String.valueOf(value)) : defaultValue;
     }
 
+    private static OxiaServiceUrl getOxiaServiceUrlConfig(Map<String, ?> configs, String key, OxiaServiceUrl defaultValue)
+            throws Exception {
+        Object value = configs.get(key);
+        return value != null ? new OxiaServiceUrl(String.valueOf(value)) : defaultValue;
+    }
+
     public boolean isEnabled() {
         return enabled;
     }
 
-    public String getOxiaServiceUrl() {
-        return oxiaServiceUrl;
+    public OxiaServiceUrl getPulsarOxiaServiceUrl() {
+        return pulsarOxiaServiceUrl;
     }
 
-    public String getWalDirectory() {
-        return walDirectory;
-    }
-
-    public String getNamespace() {
-        return namespace;
+    public OxiaServiceUrl getUrsaOxiaServiceUrl() {
+        return ursaOxiaServiceUrl;
     }
 
     public String getBackendType() {
@@ -225,10 +221,6 @@ public class UrsaStorageConfig {
 
     public long getWriteBufferFlushSize() {
         return writeBufferFlushSize;
-    }
-
-    public long getBoundaryCacheRefreshIntervalMs() {
-        return boundaryCacheRefreshIntervalMs;
     }
 
     public int getNonIdempotentMaxInFlightAppendsPerPartition() {
@@ -261,145 +253,5 @@ public class UrsaStorageConfig {
 
     public String getS3Region() {
         return s3Region;
-    }
-
-    public static Builder builder() {
-        return new Builder();
-    }
-
-    public static class Builder {
-        private boolean enabled = false;
-        private String oxiaServiceUrl = "localhost:6648";
-        private String walDirectory = "/tmp/ursa-wal";
-        private String namespace = "default";
-        private String backendType = ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_DEFAULT;
-        private String storagePath = ServerLogConfigs.URSA_STORAGE_PATH_DEFAULT;
-        private String compactionPrefix = ServerLogConfigs.URSA_STORAGE_COMPACTION_PREFIX_DEFAULT;
-        private long writeBufferFlushIntervalMs = ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DEFAULT;
-        private int writeBufferSize = ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_SIZE_DEFAULT;
-        private long writeBufferFlushSize = ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DEFAULT;
-        private long boundaryCacheRefreshIntervalMs = BOUNDARY_CACHE_REFRESH_INTERVAL_MS_DEFAULT;
-        private int nonIdempotentMaxInFlightAppendsPerPartition =
-                ServerLogConfigs.URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_APPENDS_PER_PARTITION_DEFAULT;
-        private long nonIdempotentMaxInFlightBytesPerPartition =
-                ServerLogConfigs.URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_BYTES_PER_PARTITION_DEFAULT;
-        private String s3Endpoint = ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_DEFAULT;
-        private String s3AccessKey = ServerLogConfigs.URSA_STORAGE_S3_ACCESS_KEY_DEFAULT;
-        private String s3SecretKey = ServerLogConfigs.URSA_STORAGE_S3_SECRET_KEY_DEFAULT;
-        private String s3Bucket = ServerLogConfigs.URSA_STORAGE_S3_BUCKET_DEFAULT;
-        private String compactionBucket = ServerLogConfigs.URSA_STORAGE_COMPACTION_BUCKET_DEFAULT;
-        private String s3Region = ServerLogConfigs.URSA_STORAGE_S3_REGION_DEFAULT;
-        private boolean topicDefaultEnabled = ServerLogConfigs.URSA_STORAGE_TOPIC_DEFAULT_ENABLE_DEFAULT;
-
-        public Builder enabled(boolean enabled) {
-            this.enabled = enabled;
-            return this;
-        }
-
-        public Builder oxiaServiceUrl(String oxiaServiceUrl) {
-            this.oxiaServiceUrl = oxiaServiceUrl;
-            return this;
-        }
-
-        public Builder walDirectory(String walDirectory) {
-            this.walDirectory = walDirectory;
-            return this;
-        }
-
-        public Builder namespace(String namespace) {
-            this.namespace = namespace;
-            return this;
-        }
-
-        public Builder backendType(String backendType) {
-            this.backendType = backendType;
-            return this;
-        }
-
-        public Builder storagePath(String storagePath) {
-            this.storagePath = storagePath;
-            return this;
-        }
-
-        public Builder compactionPrefix(String compactionPrefix) {
-            this.compactionPrefix = compactionPrefix;
-            return this;
-        }
-
-        public Builder compactionBucket(String compactionBucket) {
-            this.compactionBucket = compactionBucket;
-            return this;
-        }
-
-        public Builder writeBufferFlushIntervalMs(long writeBufferFlushIntervalMs) {
-            this.writeBufferFlushIntervalMs = writeBufferFlushIntervalMs;
-            return this;
-        }
-
-        public Builder writeBufferSize(int writeBufferSize) {
-            this.writeBufferSize = writeBufferSize;
-            return this;
-        }
-
-        public Builder writeBufferFlushSize(long writeBufferFlushSize) {
-            this.writeBufferFlushSize = writeBufferFlushSize;
-            return this;
-        }
-
-        public Builder boundaryCacheRefreshIntervalMs(long boundaryCacheRefreshIntervalMs) {
-            this.boundaryCacheRefreshIntervalMs = boundaryCacheRefreshIntervalMs;
-            return this;
-        }
-
-        public Builder nonIdempotentMaxInFlightAppendsPerPartition(int nonIdempotentMaxInFlightAppendsPerPartition) {
-            this.nonIdempotentMaxInFlightAppendsPerPartition = nonIdempotentMaxInFlightAppendsPerPartition;
-            return this;
-        }
-
-        public Builder nonIdempotentMaxInFlightBytesPerPartition(long nonIdempotentMaxInFlightBytesPerPartition) {
-            this.nonIdempotentMaxInFlightBytesPerPartition = nonIdempotentMaxInFlightBytesPerPartition;
-            return this;
-        }
-
-        public Builder s3Endpoint(String s3Endpoint) {
-            this.s3Endpoint = s3Endpoint;
-            return this;
-        }
-
-        public Builder s3AccessKey(String s3AccessKey) {
-            this.s3AccessKey = s3AccessKey;
-            return this;
-        }
-
-        public Builder s3SecretKey(String s3SecretKey) {
-            this.s3SecretKey = s3SecretKey;
-            return this;
-        }
-
-        public Builder s3Bucket(String s3Bucket) {
-            this.s3Bucket = s3Bucket;
-            return this;
-        }
-
-        public Builder s3Region(String s3Region) {
-            this.s3Region = s3Region;
-            return this;
-        }
-
-        public Builder topicDefaultEnabled(boolean topicDefaultEnabled) {
-            this.topicDefaultEnabled = topicDefaultEnabled;
-            return this;
-        }
-
-        public UrsaStorageConfig build() {
-            return new UrsaStorageConfig(enabled, oxiaServiceUrl, walDirectory, namespace,
-                    backendType, storagePath, compactionPrefix,
-                    writeBufferFlushIntervalMs, writeBufferSize, writeBufferFlushSize,
-                    boundaryCacheRefreshIntervalMs,
-                    s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket, compactionBucket, s3Region,
-                    nonIdempotentMaxInFlightAppendsPerPartition,
-                    nonIdempotentMaxInFlightBytesPerPartition,
-                    topicDefaultEnabled);
-        }
     }
 }

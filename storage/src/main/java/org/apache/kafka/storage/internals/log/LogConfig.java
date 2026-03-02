@@ -198,6 +198,10 @@ public class LogConfig extends AbstractConfig {
                     ServerLogConfigs.URSA_STORAGE_TOPIC_DEFAULT_ENABLE_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_DEFAULT,
                     new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_DOC)
+            .define(ServerLogConfigs.PULSAR_OXIA_SERVICE_URL_CONFIG, STRING, ServerLogConfigs.PULSAR_OXIA_SERVICE_URL_DEFAULT,
+                    new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.PULSAR_OXIA_SERVICE_URL_DOC)
+            .define(ServerLogConfigs.URSA_OXIA_SERVICE_URL_CONFIG, STRING, ServerLogConfigs.URSA_OXIA_SERVICE_URL_DEFAULT,
+                    new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_OXIA_SERVICE_URL_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_DEFAULT,
                     new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_NAMESPACE_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_NAMESPACE_DEFAULT,

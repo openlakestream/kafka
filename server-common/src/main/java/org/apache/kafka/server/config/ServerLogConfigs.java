@@ -190,14 +190,26 @@ public class ServerLogConfigs {
             "Enable diskless storage for topics by default when no topic-level override is provided. " +
                     "Internal topics remain on classic storage.";
 
+    // Deprecated (do not use annotation to pass checkstyle check)
     public static final String URSA_STORAGE_OXIA_SERVICE_URL_CONFIG = "ursa.storage.oxia.service.url";
     public static final String URSA_STORAGE_OXIA_SERVICE_URL_DEFAULT = "localhost:6648";
     public static final String URSA_STORAGE_OXIA_SERVICE_URL_DOC = "The Oxia service URL for Ursa storage metadata.";
+
+    public static final String PULSAR_OXIA_SERVICE_URL_CONFIG = "pulsar.oxia.service.url";
+    public static final String PULSAR_OXIA_SERVICE_URL_DEFAULT = "oxia://localhost:6648/default";
+    public static final String PULSAR_OXIA_SERVICE_URL_DOC = "The Oxia service URL for Pulsar metadata store. " +
+            "The format should be 'oxia://host:port/[namespace]'. If the namespace is not provided, 'default' will be used.";
+
+    public static final String URSA_OXIA_SERVICE_URL_CONFIG = "ursa.oxia.service.url";
+    public static final String URSA_OXIA_SERVICE_URL_DEFAULT = "oxia://localhost:6648/default";
+    public static final String URSA_OXIA_SERVICE_URL_DOC = "The Oxia service URL for Ursa storage metadata. " +
+            "The format should be 'oxia://host:port/[namespace]'. If the namespace is not provided, 'default' will be used.";
 
     public static final String URSA_STORAGE_WAL_DIRECTORY_CONFIG = "ursa.storage.wal.directory";
     public static final String URSA_STORAGE_WAL_DIRECTORY_DEFAULT = "/tmp/ursa-wal";
     public static final String URSA_STORAGE_WAL_DIRECTORY_DOC = "The directory for Ursa storage write-ahead log.";
 
+    // Deprecated (do not use annotation to pass checkstyle check)
     public static final String URSA_STORAGE_NAMESPACE_CONFIG = "ursa.storage.namespace";
     public static final String URSA_STORAGE_NAMESPACE_DEFAULT = "default";
     public static final String URSA_STORAGE_NAMESPACE_DOC = "The namespace for Ursa storage streams.";
