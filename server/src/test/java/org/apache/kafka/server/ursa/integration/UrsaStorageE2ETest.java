@@ -17,7 +17,10 @@
 package org.apache.kafka.server.ursa.integration;
 
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AlterConfigOp;
+import org.apache.kafka.clients.admin.ConfigEntry;
 import org.apache.kafka.clients.admin.ListOffsetsResult;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -27,7 +30,9 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.errors.InvalidConfigurationException;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
 import org.apache.kafka.metadata.BrokerState;
@@ -42,6 +47,8 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.testcontainers.utility.DockerImageName;
 
 import java.nio.charset.StandardCharsets;
@@ -52,6 +59,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -62,8 +70,10 @@ import io.streamnative.oxia.testcontainers.OxiaContainer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -585,6 +595,56 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
                 assertTrue(earliestOffset > 0,
                         "Expected earliest offset to advance after retention trim, but got " + earliestOffset
                                 + ". This reproduces the non-durable cursor pinning issue.");
+            }
+        }
+    }
+
+    /**
+     * Topic configuration mutation tests.
+     */
+    @Nested
+    @DisplayName("Topic Config Mutation Tests")
+    class TopicConfigMutationTests {
+
+        @ParameterizedTest(name = "Cannot alter ursa.storage.enable to {0}")
+        @ValueSource(booleans = {false, true})
+        @DisplayName("Cannot alter ursa.storage.enable after topic creation")
+        void testCannotAlterUrsaStorageEnableAfterTopicCreation(boolean newUrsaStorageEnabled) throws Exception {
+            boolean initialUrsaStorageEnabled = !newUrsaStorageEnabled;
+            String topicName = uniqueTopicName(initialUrsaStorageEnabled
+                    ? "immutable-diskless-config-topic"
+                    : "immutable-classic-config-topic");
+
+            if (initialUrsaStorageEnabled) {
+                createDisklessTopic(cluster, topicName);
+            } else {
+                try (Admin admin = Admin.create(cluster.clientProperties())) {
+                    NewTopic classicTopic = new NewTopic(topicName, 1, (short) 1)
+                            .configs(Map.of(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "false"));
+                    admin.createTopics(Collections.singleton(classicTopic))
+                            .all().get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                }
+            }
+            waitForTopicReady(cluster, topicName, 1);
+            assertCannotAlterUrsaStorageEnable(topicName, newUrsaStorageEnabled);
+        }
+
+        private void assertCannotAlterUrsaStorageEnable(String topicName, boolean newUrsaStorageEnabled) throws Exception {
+            try (Admin admin = Admin.create(cluster.clientProperties())) {
+                ConfigResource topicResource = new ConfigResource(ConfigResource.Type.TOPIC, topicName);
+                AlterConfigOp alterUrsaStorageEnableConfig = new AlterConfigOp(
+                        new ConfigEntry(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, Boolean.toString(newUrsaStorageEnabled)),
+                        AlterConfigOp.OpType.SET);
+
+                ExecutionException ex = assertThrows(ExecutionException.class,
+                        () -> admin.incrementalAlterConfigs(Map.of(topicResource, List.of(alterUrsaStorageEnableConfig)))
+                                .all().get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+
+                assertInstanceOf(InvalidConfigurationException.class, ex.getCause(),
+                        "Expected InvalidConfigurationException, got: " + ex.getCause());
+                assertTrue(ex.getCause().getMessage().contains(TopicConfig.URSA_STORAGE_ENABLE_CONFIG),
+                        "Error message should mention " + TopicConfig.URSA_STORAGE_ENABLE_CONFIG
+                                + ", got: " + ex.getCause().getMessage());
             }
         }
     }

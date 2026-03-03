@@ -344,6 +344,21 @@ public class ConfigurationControlManager {
         boolean newlyCreatedResource,
         boolean forwarded
     ) {
+        if (configResource.type() == Type.TOPIC && !newlyCreatedResource) {
+            for (ApiMessageAndVersion record : recordsExplicitlyAltered) {
+                ConfigRecord configRecord = (ConfigRecord) record.message();
+                if (TopicConfig.URSA_STORAGE_ENABLE_CONFIG.equals(configRecord.name())) {
+                    return DISALLOWED_TOPIC_URSA_STORAGE_TRANSITION_ERROR;
+                }
+            }
+            for (ApiMessageAndVersion record : recordsImplicitlyDeleted) {
+                ConfigRecord configRecord = (ConfigRecord) record.message();
+                if (TopicConfig.URSA_STORAGE_ENABLE_CONFIG.equals(configRecord.name())) {
+                    return DISALLOWED_TOPIC_URSA_STORAGE_TRANSITION_ERROR;
+                }
+            }
+        }
+
         Map<String, String> allConfigs = new HashMap<>();
         Map<String, String> existingConfigsMap = new HashMap<>();
         Map<String, String> alteredConfigsForAlterConfigPolicyCheck = new HashMap<>();
@@ -427,6 +442,10 @@ public class ConfigurationControlManager {
     static final ApiError INVALID_CORDONED_LOG_DIRS_ERROR =
             new ApiError(INVALID_CONFIG, "When updating " + CORDONED_LOG_DIRS_CONFIG + " via controllers, " +
                     " the new value must be a subset of the current configuration value.");
+
+    private static final ApiError DISALLOWED_TOPIC_URSA_STORAGE_TRANSITION_ERROR =
+        new ApiError(INVALID_CONFIG, "Topic-level " + TopicConfig.URSA_STORAGE_ENABLE_CONFIG +
+            " cannot be altered after topic creation. Delete and recreate the topic to change diskless mode.");
 
     boolean isDisallowedBrokerMinIsrTransition(ConfigRecord configRecord) {
         if (configRecord.name().equals(MIN_IN_SYNC_REPLICAS_CONFIG) &&
