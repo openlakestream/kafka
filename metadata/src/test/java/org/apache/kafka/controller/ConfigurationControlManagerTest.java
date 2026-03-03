@@ -435,6 +435,59 @@ public class ConfigurationControlManagerTest {
                 true, false));
     }
 
+    @Test
+    public void testDisallowDisklessEnableAlterForExistingTopics() {
+        ConfigurationControlManager manager = new ConfigurationControlManager.Builder().
+            setFeatureControl(createFeatureControlManager()).
+            setKafkaConfigSchema(SCHEMA).
+            build();
+
+        // Cannot enable diskless on an existing topic via incremental AlterConfigs.
+        Map<String, Entry<AlterConfigOp.OpType, String>> enableDiskless =
+            toMap(entry(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, entry(SET, "true")));
+        ControllerResult<ApiError> enableResult = manager.incrementalAlterConfig(MYTOPIC, enableDiskless, false);
+        assertEquals(Errors.INVALID_CONFIG, enableResult.response().error());
+        assertTrue(enableResult.response().message().contains(TopicConfig.URSA_STORAGE_ENABLE_CONFIG));
+        assertEquals(List.of(), enableResult.records());
+
+        // Cannot disable diskless on an existing topic via incremental AlterConfigs.
+        manager.replay(new ConfigRecord().
+            setResourceType(TOPIC.id()).setResourceName(MYTOPIC.name()).
+            setName(TopicConfig.URSA_STORAGE_ENABLE_CONFIG).setValue("true"));
+        Map<String, Entry<AlterConfigOp.OpType, String>> disableDiskless =
+            toMap(entry(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, entry(DELETE, "")));
+        ControllerResult<ApiError> disableResult = manager.incrementalAlterConfig(MYTOPIC, disableDiskless, false);
+        assertEquals(Errors.INVALID_CONFIG, disableResult.response().error());
+        assertTrue(disableResult.response().message().contains(TopicConfig.URSA_STORAGE_ENABLE_CONFIG));
+        assertEquals(List.of(), disableResult.records());
+
+        // Legacy AlterConfigs cannot delete diskless enable implicitly.
+        ControllerResult<Map<ConfigResource, ApiError>> legacyResult = manager.legacyAlterConfigs(
+            toMap(entry(MYTOPIC, toMap(entry("def", "901")))),
+            false);
+        assertEquals(Errors.INVALID_CONFIG, legacyResult.response().get(MYTOPIC).error());
+        assertTrue(legacyResult.response().get(MYTOPIC).message().contains(TopicConfig.URSA_STORAGE_ENABLE_CONFIG));
+        assertEquals(List.of(), legacyResult.records());
+    }
+
+    @Test
+    public void testAllowDisklessEnableAlterForNewlyCreatedTopics() {
+        ConfigurationControlManager manager = new ConfigurationControlManager.Builder().
+            setFeatureControl(createFeatureControlManager()).
+            setKafkaConfigSchema(SCHEMA).
+            build();
+
+        Map<String, Entry<AlterConfigOp.OpType, String>> enableDiskless =
+            toMap(entry(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, entry(SET, "true")));
+        ControllerResult<ApiError> result = manager.incrementalAlterConfig(MYTOPIC, enableDiskless, true);
+        assertEquals(ControllerResult.atomicOf(List.of(new ApiMessageAndVersion(
+            new ConfigRecord().
+                setResourceType(TOPIC.id()).setResourceName(MYTOPIC.name()).
+                setName(TopicConfig.URSA_STORAGE_ENABLE_CONFIG).setValue("true"),
+            CONFIG_RECORD.highestSupportedVersion())),
+            ApiError.NONE), result);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     public void testMaybeGenerateElrSafetyRecords(boolean setStaticConfig) {
