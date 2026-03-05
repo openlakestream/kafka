@@ -681,8 +681,8 @@ bundled under ./libs.
 - orc-shims-1.9.7
 - org.everit.json.schema-1.14.4
 - osgi-resource-locator-1.0.3
-- oxia-client-0.7.2
-- oxia-client-api-0.7.2
+- oxia-client-0.7.4
+- oxia-client-api-0.7.4
 - parquet-avro-1.16.0
 - parquet-column-1.16.0
 - parquet-common-1.16.0
