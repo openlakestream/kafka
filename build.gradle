@@ -113,6 +113,8 @@ ext {
 
   commitId = determineCommitId()
 
+  ursaStorageVersion = '4.1.3.2'
+
   // Closure to exclude ursa-storage and pulsar dependencies from test classpath.
   // These dependencies significantly slow down ClassGraph.scan() during plugin discovery
   // and are not needed for most integration tests.
@@ -1112,8 +1114,8 @@ project(':server') {
     testImplementation 'org.testcontainers:localstack:1.21.4'
     testImplementation 'org.awaitility:awaitility:4.2.0'
     // Needed by `PulsarStorageConfig` (depends on `PulsarConfiguration` interface).
-    testImplementation 'io.streamnative:pulsar-broker-common:4.2.0-SNAPSHOT'
-    testImplementation('io.streamnative:ursa-storage-core:4.2.0-SNAPSHOT') {
+    testImplementation "io.streamnative:pulsar-broker-common:$ursaStorageVersion"
+    testImplementation("io.streamnative:ursa-storage-core:$ursaStorageVersion") {
       exclude group: 'io.streamnative', module: 'pulsar-broker'
       exclude group: 'io.streamnative', module: 'pulsar-client-original'
       exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
@@ -1122,7 +1124,7 @@ project(':server') {
       exclude group: 'org.apache.kafka', module: 'kafka-clients'
     }
     // Required at runtime for parquet reads (loaded via `-Dursa.externalReaderFactoryClass=...`).
-    testRuntimeOnly('io.streamnative:ursa-storage-lakehouse:4.2.0-SNAPSHOT') {
+    testRuntimeOnly("io.streamnative:ursa-storage-lakehouse:$ursaStorageVersion") {
       // Reuse the project's Kafka client classes to avoid version conflicts.
       exclude group: 'org.apache.kafka', module: 'kafka-clients'
       // Avoid pulling in StreamNative Pulsar broker/client artifacts that are unused in this build.
@@ -2473,19 +2475,19 @@ project(':storage') {
     implementation libs.slf4jApi
     implementation libs.jacksonDatabind
     implementation libs.metrics
-    implementation('io.streamnative:ursa-storage-core:4.2.0-SNAPSHOT') {
+    implementation("io.streamnative:ursa-storage-core:$ursaStorageVersion") {
       exclude group: 'io.streamnative', module: 'pulsar-broker'
       exclude group: 'io.streamnative', module: 'pulsar-client-original'
       exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
     }
-    implementation('io.streamnative:ursa-storage-ml:4.2.0-SNAPSHOT') {
+    implementation("io.streamnative:ursa-storage-ml:$ursaStorageVersion") {
       exclude group: 'io.streamnative', module: 'pulsar-broker'
       exclude group: 'io.streamnative', module: 'pulsar-client-original'
       exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
     }
     // Required at runtime for parquet reads when `-Dursa.externalReaderFactoryClass=...LakehouseReaderFactory` is set
     // (e.g. `docker-compose-localstack-compaction.yml`).
-    runtimeOnly('io.streamnative:ursa-storage-lakehouse:4.2.0-SNAPSHOT') {
+    runtimeOnly("io.streamnative:ursa-storage-lakehouse:$ursaStorageVersion") {
       // Reuse the project's Kafka client classes to avoid version conflicts.
       exclude group: 'org.apache.kafka', module: 'kafka-clients'
       // Avoid pulling in StreamNative Pulsar broker/client artifacts that are unused in this build.
@@ -2493,12 +2495,12 @@ project(':storage') {
       exclude group: 'io.streamnative', module: 'pulsar-client-original'
       exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
     }
-    implementation('io.streamnative:managed-ledger:4.2.0-SNAPSHOT')
-    implementation('io.streamnative:pulsar-broker-common:4.2.0-SNAPSHOT') {
+    implementation("io.streamnative:managed-ledger:$ursaStorageVersion")
+    implementation("io.streamnative:pulsar-broker-common:$ursaStorageVersion") {
       exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
       exclude group: 'io.streamnative', module: 'pulsar-client-original'
     }
-    implementation('io.streamnative:pulsar-broker:4.2.0-SNAPSHOT') {
+    implementation("io.streamnative:pulsar-broker:$ursaStorageVersion") {
       // Only used for a small set of API types (e.g. ManagedLedgerStorage / BookKeeperClientFactory).
       // Avoid pulling the broker dependency graph (Jetty/Jersey, etc.) into Kafka's binary distribution.
       transitive = false
