@@ -27,6 +27,7 @@ import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
 import org.apache.kafka.metadata.BrokerState;
 import org.apache.kafka.server.config.ServerLogConfigs;
+import org.apache.kafka.server.metrics.KafkaYammerMetrics;
 import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.AfterAll;
@@ -54,11 +55,15 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+import javax.management.ObjectName;
 
 import io.streamnative.oxia.testcontainers.OxiaContainer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -291,6 +296,60 @@ public class UrsaStorageS3E2ETest extends UrsaStorageE2ETestBase {
             }
 
             log.info("S3 data persistence and HWM recovery test passed - all {} records have correct continuous offsets", totalRecords);
+        }
+    }
+
+    /**
+     * Metrics exposure tests for diskless topics.
+     */
+    @Nested
+    @DisplayName("Metrics Tests")
+    class MetricsTests {
+
+        @Test
+        @DisplayName("Diskless log metrics are exposed without UnifiedLog segment metric")
+        void testDisklessLogMetricsExposedWithoutUnifiedLog() throws Exception {
+            String topicName = uniqueTopicName("s3-metrics-topic");
+            int numRecords = 20;
+
+            createDisklessTopic(cluster, topicName);
+            waitForTopicReady(cluster, topicName, 1);
+
+            var broker = cluster.brokers().values().iterator().next();
+            broker.shutdown();
+            broker.awaitShutdown();
+            broker.startup();
+            TestUtils.waitForCondition(
+                    () -> broker.brokerState() == BrokerState.RUNNING,
+                    30_000L,
+                    "Broker did not reach RUNNING state after restart");
+
+            produceRecords(cluster.bootstrapServers(), topicName, numRecords);
+
+            AtomicReference<String> lastMetricSnapshot = new AtomicReference<>("size=null,start=null,end=null");
+            TestUtils.waitForCondition(() -> {
+                Long size = jmxGaugeLongValue("Size", topicName, 0);
+                Long logStartOffset = jmxGaugeLongValue("LogStartOffset", topicName, 0);
+                Long logEndOffset = jmxGaugeLongValue("LogEndOffset", topicName, 0);
+                Long numLogSegments = jmxGaugeLongValue("NumLogSegments", topicName, 0);
+                lastMetricSnapshot.set("size=" + size + ",start=" + logStartOffset + ",end=" + logEndOffset + ",segments=" + numLogSegments);
+
+                return hasExpectedDisklessMetricValues(size, logStartOffset, logEndOffset) && numLogSegments == null;
+            }, 30_000L, "Timed out waiting for diskless log metrics for topic " + topicName
+                    + ", latest metrics: " + lastMetricSnapshot.get());
+
+            Long size = jmxGaugeLongValue("Size", topicName, 0);
+            Long logStartOffset = jmxGaugeLongValue("LogStartOffset", topicName, 0);
+            Long logEndOffset = jmxGaugeLongValue("LogEndOffset", topicName, 0);
+            Long numLogSegments = jmxGaugeLongValue("NumLogSegments", topicName, 0);
+
+            assertNotNull(size, "Size metric should exist");
+            assertNotNull(logStartOffset, "LogStartOffset metric should exist");
+            assertNotNull(logEndOffset, "LogEndOffset metric should exist");
+            assertNull(numLogSegments, "NumLogSegments should not exist for diskless topics");
+            assertTrue(size > 0L, "Size metric should be positive after produce");
+            assertEquals(0L, (long) logStartOffset, "LogStartOffset should be non-negative");
+            assertEquals(20L, (long) logEndOffset, "LogEndOffset should be positive after produce");
         }
     }
 
@@ -708,4 +767,85 @@ public class UrsaStorageS3E2ETest extends UrsaStorageE2ETestBase {
             log.info("Multiple producer sessions test passed - {} sequential offsets verified", totalRecords);
         }
     }
+
+    private static Long jmxGaugeLongValue(String metricName, String topic, int partition) {
+        String partitionText = Integer.toString(partition);
+        for (var entry : KafkaYammerMetrics.defaultRegistry().allMetrics().entrySet()) {
+            var name = entry.getKey();
+            if (!isKafkaLogMetric(name)) {
+                continue;
+            }
+
+            ObjectName objectName = parseObjectName(name.getMBeanName());
+            if (objectName == null || !isTargetMetric(objectName, metricName, topic, partitionText)) {
+                continue;
+            }
+
+            Long metricValue = metricValueAsLong(entry.getValue());
+            if (metricValue != null) {
+                return metricValue;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isKafkaLogMetric(com.yammer.metrics.core.MetricName metricName) {
+        return "kafka.log".equals(metricName.getGroup()) && "Log".equals(metricName.getType());
+    }
+
+    private static ObjectName parseObjectName(String mBeanName) {
+        try {
+            return new ObjectName(mBeanName);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static boolean isTargetMetric(
+            ObjectName objectName,
+            String metricName,
+            String topic,
+            String partitionText
+    ) {
+        return metricName.equals(objectName.getKeyProperty("name"))
+                && topic.equals(objectName.getKeyProperty("topic"))
+                && partitionText.equals(objectName.getKeyProperty("partition"));
+    }
+
+    private static Long metricValueAsLong(Object metric) {
+        Object value = metricValue(metric);
+        if (value instanceof Number numberValue) {
+            return numberValue.longValue();
+        }
+        return null;
+    }
+
+    private static Object metricValue(Object metric) {
+        if (metric == null) {
+            return null;
+        }
+        if (metric instanceof com.yammer.metrics.core.Gauge<?> gauge) {
+            return gauge.value();
+        }
+        try {
+            return metric.getClass().getMethod("value").invoke(metric);
+        } catch (Exception ignored) {
+            try {
+                return metric.getClass().getMethod("value$mcJ$sp").invoke(metric);
+            } catch (Exception ignoredAgain) {
+                return null;
+            }
+        }
+    }
+
+    private static boolean hasExpectedDisklessMetricValues(Long size, Long logStartOffset, Long logEndOffset) {
+        if (size == null || logStartOffset == null || logEndOffset == null) {
+            return false;
+        }
+        if (size <= 0L || logStartOffset < 0L || logEndOffset <= 0L) {
+            return false;
+        }
+        return logEndOffset >= logStartOffset;
+    }
+
 }

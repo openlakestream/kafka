@@ -235,7 +235,6 @@ final class NonIdempotentPartitionAppendPipeline {
         return addFuture.whenComplete((ignored, error) -> data.release())
                 .thenApply(position -> {
                     long logAppendTime = state.time().milliseconds();
-                    state.getPartitionState(tp).incrementCumulativeSize(dataSize);
                     return new PartitionResponse(Errors.NONE, position.getEntryId(), logAppendTime, 0L);
                 });
     }

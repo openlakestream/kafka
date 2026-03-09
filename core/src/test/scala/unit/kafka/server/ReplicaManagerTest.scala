@@ -2456,6 +2456,69 @@ class ReplicaManagerTest {
     }
   }
 
+  @Test
+  def testPreVerificationErrorForNonHostedDisklessPartition(): Unit = {
+    val localId = 1
+    val tp0 = new TopicPartition(topic, 0)
+    val transactionalId = "txn-id"
+    val producerId = 24L
+    val producerEpoch = 0.toShort
+    val mockDisklessStorageSupport = mock(classOf[DisklessStorageReplicaManagerSupport])
+    when(mockDisklessStorageSupport.isDisklessStorageTopic(tp0.topic)).thenReturn(true)
+
+    val replicaManager = setupReplicaManagerWithMockedPurgatories(
+      timer = new MockTimer(time),
+      brokerId = localId,
+      mockDisklessStorageSupport = Some(mockDisklessStorageSupport)
+    )
+
+    try {
+      val result = maybeStartTransactionVerificationForPartition(replicaManager, tp0, transactionalId, producerId, producerEpoch)
+
+      verify(addPartitionsToTxnManager, times(0)).addOrVerifyTransaction(any(), any(), any(), any(), any[AddPartitionsToTxnManager.AppendCallback](), any())
+      assertEquals(Errors.NOT_LEADER_OR_FOLLOWER, result.assertFired.left.getOrElse(Errors.NONE))
+    } finally {
+      replicaManager.shutdown(checkpointHW = false)
+    }
+  }
+
+  @Test
+  def testPreVerificationErrorForHostedDisklessPartition(): Unit = {
+    val localId = 1
+    val tp0 = new TopicPartition(topic, 0)
+    val transactionalId = "txn-id"
+    val producerId = 24L
+    val producerEpoch = 0.toShort
+    val mockDisklessStorageSupport = mock(classOf[DisklessStorageReplicaManagerSupport])
+    when(mockDisklessStorageSupport.isDisklessStorageTopic(tp0.topic)).thenReturn(true)
+
+    val replicaManager = setupReplicaManagerWithMockedPurgatories(
+      timer = new MockTimer(time),
+      brokerId = localId,
+      mockDisklessStorageSupport = Some(mockDisklessStorageSupport)
+    )
+
+    try {
+      val leaderDelta = topicsCreateDelta(
+        localId,
+        isStartIdLeader = true,
+        partitions = List(tp0.partition),
+        topicName = topic,
+        topicId = topicIds(topic)
+      )
+      replicaManager.applyDelta(leaderDelta, imageFromTopics(leaderDelta.apply()))
+
+      assertEquals(HostedPartition.None, replicaManager.getPartition(tp0))
+
+      val result = maybeStartTransactionVerificationForPartition(replicaManager, tp0, transactionalId, producerId, producerEpoch)
+
+      verify(addPartitionsToTxnManager, times(0)).addOrVerifyTransaction(any(), any(), any(), any(), any[AddPartitionsToTxnManager.AppendCallback](), any())
+      assertEquals(Errors.INVALID_REQUEST, result.assertFired.left.getOrElse(Errors.NONE))
+    } finally {
+      replicaManager.shutdown(checkpointHW = false)
+    }
+  }
+
   private def sendProducerAppend(
     replicaManager: ReplicaManager,
     topicPartition: TopicIdPartition,
@@ -4857,8 +4920,9 @@ class ReplicaManagerTest {
   @Test
   def testDeltaRemovedTopicCleansDisklessStorageSupport(): Unit = {
     val localId = 1
-    val topicPartition = new TopicPartition("foo", 0)
+    val topicPartition = new TopicPartition("diskless-topic", 0)
     val mockDisklessStorageSupport = mock(classOf[DisklessStorageReplicaManagerSupport])
+    when(mockDisklessStorageSupport.isDisklessStorageTopic(topicPartition.topic)).thenReturn(true)
     val replicaManager = setupReplicaManagerWithMockedPurgatories(
       timer = new MockTimer(time),
       brokerId = localId,
@@ -4866,9 +4930,10 @@ class ReplicaManagerTest {
     )
 
     try {
-      val leaderTopicsDelta = topicsCreateDelta(localId, true)
+      val leaderTopicsDelta = topicsCreateDelta(localId, true, topicName = topicPartition.topic)
       val leaderMetadataImage = imageFromTopics(leaderTopicsDelta.apply())
       replicaManager.applyDelta(leaderTopicsDelta, leaderMetadataImage)
+      assertEquals(HostedPartition.None, replicaManager.getPartition(topicPartition))
 
       val removeTopicsDelta = topicsDeleteDelta(leaderMetadataImage.topics())
       val removeMetadataImage = imageFromTopics(removeTopicsDelta.apply())
@@ -4884,8 +4949,9 @@ class ReplicaManagerTest {
   @Test
   def testDeltaRemovedReplicaCleansDisklessStorageSupportWithoutDeletingPartitionState(): Unit = {
     val localId = 1
-    val topicPartition = new TopicPartition("foo", 0)
+    val topicPartition = new TopicPartition("diskless-topic", 0)
     val mockDisklessStorageSupport = mock(classOf[DisklessStorageReplicaManagerSupport])
+    when(mockDisklessStorageSupport.isDisklessStorageTopic(topicPartition.topic)).thenReturn(true)
     val replicaManager = setupReplicaManagerWithMockedPurgatories(
       timer = new MockTimer(time),
       brokerId = localId,
@@ -4893,9 +4959,10 @@ class ReplicaManagerTest {
     )
 
     try {
-      val leaderTopicsDelta = topicsCreateDelta(localId, true)
+      val leaderTopicsDelta = topicsCreateDelta(localId, true, topicName = topicPartition.topic)
       val leaderMetadataImage = imageFromTopics(leaderTopicsDelta.apply())
       replicaManager.applyDelta(leaderTopicsDelta, leaderMetadataImage)
+      assertEquals(HostedPartition.None, replicaManager.getPartition(topicPartition))
 
       val reassignmentDelta = new TopicsDelta(leaderMetadataImage.topics())
       reassignmentDelta.replay(new PartitionChangeRecord()
@@ -4910,6 +4977,63 @@ class ReplicaManagerTest {
 
       verify(mockDisklessStorageSupport, times(1))
         .cleanupPartition(new TopicIdPartition(FOO_UUID, topicPartition), false)
+    } finally {
+      replicaManager.shutdown(checkpointHW = false)
+    }
+  }
+
+  @Test
+  def testDisklessLeaderTransitionDoesNotCreateUnifiedLog(): Unit = {
+    val localId = 1
+    val topicPartition = new TopicPartition("diskless-topic", 0)
+
+    val mockDisklessStorageSupport = mock(classOf[DisklessStorageReplicaManagerSupport])
+    when(mockDisklessStorageSupport.isDisklessStorageTopic(topicPartition.topic)).thenReturn(true)
+
+    val replicaManager = setupReplicaManagerWithMockedPurgatories(
+      timer = new MockTimer(time),
+      brokerId = localId,
+      mockDisklessStorageSupport = Some(mockDisklessStorageSupport)
+    )
+
+    try {
+      val createDelta = topicsCreateDelta(localId, isStartIdLeader = true, topicName = topicPartition.topic)
+      val createdImage = imageFromTopics(createDelta.apply())
+      replicaManager.applyDelta(createDelta, createdImage)
+
+      assertEquals(HostedPartition.None, replicaManager.getPartition(topicPartition))
+      assertEquals(None, replicaManager.getLog(topicPartition))
+    } finally {
+      replicaManager.shutdown(checkpointHW = false)
+    }
+  }
+
+  @Test
+  def testDisklessStopPartitionsCleanupWithoutPartitionObject(): Unit = {
+    val localId = 1
+    val topicPartition = new TopicPartition("diskless-topic", 0)
+    val mockDisklessStorageSupport = mock(classOf[DisklessStorageReplicaManagerSupport])
+    when(mockDisklessStorageSupport.isDisklessStorageTopic(topicPartition.topic)).thenReturn(true)
+
+    val replicaManager = setupReplicaManagerWithMockedPurgatories(
+      timer = new MockTimer(time),
+      brokerId = localId,
+      mockDisklessStorageSupport = Some(mockDisklessStorageSupport)
+    )
+
+    try {
+      val createDelta = topicsCreateDelta(localId, isStartIdLeader = true, topicName = topicPartition.topic)
+      val createdImage = imageFromTopics(createDelta.apply())
+      replicaManager.applyDelta(createDelta, createdImage)
+
+      assertEquals(HostedPartition.None, replicaManager.getPartition(topicPartition))
+
+      val deleteDelta = topicsDeleteDelta(createdImage.topics())
+      val deletedImage = imageFromTopics(deleteDelta.apply())
+      replicaManager.applyDelta(deleteDelta, deletedImage)
+
+      verify(mockDisklessStorageSupport, times(1))
+        .cleanupPartition(new TopicIdPartition(FOO_UUID, topicPartition), true)
     } finally {
       replicaManager.shutdown(checkpointHW = false)
     }
@@ -6428,6 +6552,9 @@ class ReplicaManagerTest {
     val disklessTopic = "diskless-topic"
     val topicPartition = new TopicPartition(disklessTopic, 0)
     val disklessTopicId = Uuid.randomUuid()
+    val sizeMetricSuffix = s"type=Log,name=Size,topic=${topicPartition.topic},partition=${topicPartition.partition}"
+    val logStartMetricSuffix = s"type=Log,name=LogStartOffset,topic=${topicPartition.topic},partition=${topicPartition.partition}"
+    val logEndMetricSuffix = s"type=Log,name=LogEndOffset,topic=${topicPartition.topic},partition=${topicPartition.partition}"
 
     val mockReplicaFetcherManager = mock(classOf[ReplicaFetcherManager])
     val mockDisklessStorageSupport = mock(classOf[DisklessStorageReplicaManagerSupport])
@@ -6459,8 +6586,10 @@ class ReplicaManagerTest {
       val followerMetadataImage = imageFromTopics(followerTopicsDelta.apply())
       replicaManager.applyDelta(followerTopicsDelta, followerMetadataImage)
 
-      val HostedPartition.Online(followerPartition) = replicaManager.getPartition(topicPartition)
-      assertFalse(followerPartition.isLeader)
+      assertEquals(HostedPartition.None, replicaManager.getPartition(topicPartition))
+      assertEquals(None, yammerGaugeValue[Long](sizeMetricSuffix))
+      assertEquals(None, yammerGaugeValue[Long](logStartMetricSuffix))
+      assertEquals(None, yammerGaugeValue[Long](logEndMetricSuffix))
 
       verify(mockReplicaFetcherManager, never()).addFetcherForPartitions(any())
     } finally {

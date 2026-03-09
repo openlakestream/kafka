@@ -79,10 +79,7 @@ public class UrsaManagedLedgerWriter extends AbstractUrsaStorageWriter {
                                 log.debug("Append completed for partition {} with baseOffset {}", tp, baseOffset);
 
                                 return updateStateAfterWrite(tp, records, baseOffset, logAppendTime)
-                                        .thenApply(ignored -> {
-                                            state.getPartitionState(tp).incrementCumulativeSize(dataSize);
-                                            return new PartitionResponse(Errors.NONE, baseOffset, logAppendTime, 0L);
-                                        });
+                                        .thenApply(ignored -> new PartitionResponse(Errors.NONE, baseOffset, logAppendTime, 0L));
                             });
                 });
     }
