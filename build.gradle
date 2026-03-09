@@ -1697,7 +1697,9 @@ project(':group-coordinator') {
     outputs.dir("${projectDir}/build/generated/main/java/org/apache/kafka/coordinator/group/generated")
   }
 
-  compileJava.dependsOn 'processMessages'
+  tasks.named('compileJava').configure {
+    dependsOn 'processMessages'
+  }
   srcJar.dependsOn 'processMessages'
 }
 
@@ -2584,7 +2586,10 @@ project(':storage') {
   sourceSets {
     main {
       java {
-        srcDirs = ["src/main/java", "${projectDir}/build/generated/main/java"]
+        srcDirs = [
+          "src/main/java",
+          "${projectDir}/build/generated/main/java"
+        ]
       }
     }
     test {

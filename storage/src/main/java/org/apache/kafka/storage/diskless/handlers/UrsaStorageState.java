@@ -22,8 +22,7 @@ import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.server.metrics.KafkaMetricsGroup;
 import org.apache.kafka.server.metrics.KafkaYammerMetrics;
-import org.apache.kafka.storage.diskless.idempotent.ProducerStateStore;
-import org.apache.kafka.storage.diskless.idempotent.UrsaProducerStateStore;
+import org.apache.kafka.storage.diskless.idempotent.ProducerStateManager;
 import org.apache.kafka.storage.internals.log.LogMetricNames;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
@@ -48,10 +47,14 @@ import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
+import io.oxia.client.api.AsyncOxiaClient;
 import io.streamnative.ursa.mledger.UrsaPosition;
 
 /**
@@ -68,10 +71,14 @@ public class UrsaStorageState implements Closeable {
     private final BrokerTopicStats brokerTopicStats;
     private final KafkaMetricsGroup logMetricsGroup = new KafkaMetricsGroup("kafka.log", "Log");
 
-    private final ProducerStateStore producerStateStore;
+    private final ConcurrentHashMap<TopicIdPartition, ProducerStateManager> producerStateManagers =
+        new ConcurrentHashMap<>();
 
     private final KafkaManagedLedgerFactoryHolder managedLedgerFactoryHolder;
     private final ManagedLedgerFactory managedLedgerFactory;
+    private final Supplier<AsyncOxiaClient> oxiaClientSupplier;
+    private final ScheduledExecutorService producerStateScheduler;
+    private final Function<TopicIdPartition, ProducerStateManager> producerStateManagerFactory;
     private final Map<String, Object> logConfigDefaults;
     private final Function<String, Map<String, String>> topicConfigSupplier;
     private final ConcurrentHashMap<TopicIdPartition, CompletableFuture<ManagedLedger>> managedLedgerCache =
@@ -85,20 +92,9 @@ public class UrsaStorageState implements Closeable {
             int brokerId,
             UrsaStorageConfig config,
             BrokerTopicStats brokerTopicStats) {
-        this(time, brokerId, config, brokerTopicStats, null, null, null);
-    }
-
-    /**
-     * Creates UrsaStorageState with a custom ProducerStateStore.
-     * Useful for testing idempotent validation logic.
-     */
-    public UrsaStorageState(
-            Time time,
-            int brokerId,
-            UrsaStorageConfig config,
-            BrokerTopicStats brokerTopicStats,
-            ProducerStateStore producerStateStore) {
-        this(time, brokerId, config, brokerTopicStats, producerStateStore, null, null);
+        this(time, brokerId, config, brokerTopicStats,
+            (Map<String, Object>) null,
+            (Function<String, Map<String, String>>) null);
     }
 
     public UrsaStorageState(
@@ -108,23 +104,29 @@ public class UrsaStorageState implements Closeable {
             BrokerTopicStats brokerTopicStats,
             Map<String, Object> logConfigDefaults,
             Function<String, Map<String, String>> topicConfigSupplier) {
-        this(time, brokerId, config, brokerTopicStats, null, logConfigDefaults, topicConfigSupplier);
+        this(time, brokerId, config, brokerTopicStats, logConfigDefaults, topicConfigSupplier, null);
     }
 
-    public UrsaStorageState(
+    private UrsaStorageState(
             Time time,
             int brokerId,
             UrsaStorageConfig config,
             BrokerTopicStats brokerTopicStats,
-            ProducerStateStore producerStateStore,
             Map<String, Object> logConfigDefaults,
-            Function<String, Map<String, String>> topicConfigSupplier) {
+            Function<String, Map<String, String>> topicConfigSupplier,
+            Function<TopicIdPartition, ProducerStateManager> producerStateManagerFactory) {
         this.time = time;
         this.brokerId = brokerId;
         this.config = config;
         this.brokerTopicStats = brokerTopicStats;
         this.logConfigDefaults = logConfigDefaults != null ? logConfigDefaults : Collections.emptyMap();
         this.topicConfigSupplier = topicConfigSupplier;
+        this.producerStateManagerFactory = producerStateManagerFactory;
+        this.producerStateScheduler = new ScheduledThreadPoolExecutor(1, runnable -> {
+            Thread thread = new Thread(runnable, "producer-state-manager");
+            thread.setDaemon(true);
+            return thread;
+        });
 
         KafkaManagedLedgerFactoryHolder holder;
         try {
@@ -135,10 +137,7 @@ public class UrsaStorageState implements Closeable {
         }
         this.managedLedgerFactoryHolder = holder;
         this.managedLedgerFactory = holder.factory();
-
-        this.producerStateStore = producerStateStore != null 
-                ? producerStateStore 
-                : new UrsaProducerStateStore(holder::oxiaClient, time);
+        this.oxiaClientSupplier = holder::oxiaClient;
     }
 
     UrsaStorageState(
@@ -146,15 +145,21 @@ public class UrsaStorageState implements Closeable {
             int brokerId,
             UrsaStorageConfig config,
             BrokerTopicStats brokerTopicStats,
-            ProducerStateStore producerStateStore,
-            ManagedLedgerFactory managedLedgerFactory) {
+            ManagedLedgerFactory managedLedgerFactory,
+            Function<TopicIdPartition, ProducerStateManager> producerStateManagerFactory) {
         this.time = Objects.requireNonNull(time, "time must not be null");
         this.brokerId = brokerId;
         this.config = Objects.requireNonNull(config, "config must not be null");
         this.brokerTopicStats = Objects.requireNonNull(brokerTopicStats, "brokerTopicStats must not be null");
-        this.producerStateStore = Objects.requireNonNull(producerStateStore, "producerStateStore must not be null");
+        this.producerStateManagerFactory = producerStateManagerFactory;
         this.managedLedgerFactoryHolder = null;
         this.managedLedgerFactory = Objects.requireNonNull(managedLedgerFactory, "managedLedgerFactory must not be null");
+        this.oxiaClientSupplier = () -> null;
+        this.producerStateScheduler = new ScheduledThreadPoolExecutor(1, runnable -> {
+            Thread thread = new Thread(runnable, "producer-state-manager-test");
+            thread.setDaemon(true);
+            return thread;
+        });
         this.logConfigDefaults = Collections.emptyMap();
         this.topicConfigSupplier = null;
     }
@@ -175,8 +180,22 @@ public class UrsaStorageState implements Closeable {
         return brokerTopicStats;
     }
 
-    public ProducerStateStore producerStateStore() {
-        return producerStateStore;
+    public ProducerStateManager getOrCreateProducerStateManager(TopicIdPartition tp) {
+        return producerStateManagers.computeIfAbsent(tp, this::newProducerStateManager);
+    }
+
+    private ProducerStateManager newProducerStateManager(TopicIdPartition tp) {
+        if (producerStateManagerFactory != null) {
+            return producerStateManagerFactory.apply(tp);
+        }
+        return new ProducerStateManager(
+            tp,
+            oxiaClientSupplier,
+            () -> getOrCreateManagedLedger(tp),
+            config.getProducerStateSnapshotIntervalMs(),
+            config.getProducerStateSnapshotRecordThreshold(),
+            producerStateScheduler
+        );
     }
 
     public CompletableFuture<ManagedLedger> getOrCreateManagedLedger(TopicIdPartition tp) {
@@ -268,16 +287,13 @@ public class UrsaStorageState implements Closeable {
             });
         }
 
-        try {
-            CompletableFuture<Void> producerStateFuture = deletePartition
-                    ? producerStateStore.deletePartition(tp)
-                    : producerStateStore.clearPartition(tp);
-            producerStateFuture.exceptionally(e -> {
-                log.warn("Failed to clear producer state for partition {}", tp, e);
+        ProducerStateManager producerStateManager = producerStateManagers.remove(tp);
+        if (producerStateManager != null) {
+            cleaned = true;
+            producerStateManager.cleanup(deletePartition).exceptionally(e -> {
+                log.warn("Failed to cleanup producer state manager for partition {}", tp, e);
                 return null;
             });
-        } catch (Throwable t) {
-            log.warn("Failed to clear producer state for partition {}", tp, t);
         }
 
         return cleaned;
@@ -568,7 +584,17 @@ public class UrsaStorageState implements Closeable {
     public void close() throws IOException {
         removeAllDisklessLogMetrics();
         managedLedgerCache.clear();
-        producerStateStore.close();
+        producerStateManagers.values().forEach(ProducerStateManager::close);
+        producerStateManagers.clear();
+        producerStateScheduler.shutdown();
+        try {
+            if (!producerStateScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                producerStateScheduler.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            producerStateScheduler.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
         if (managedLedgerFactoryHolder != null) {
             managedLedgerFactoryHolder.close();
         }

@@ -51,6 +51,8 @@ public class UrsaStorageConfig {
     private final String s3Bucket;
     private final String compactionBucket;
     private final String s3Region;
+    private final long producerStateSnapshotIntervalMs;
+    private final int producerStateSnapshotRecordThreshold;
 
     @SuppressWarnings("checkstyle:ParameterNumber")
     private UrsaStorageConfig(boolean enabled,
@@ -68,6 +70,8 @@ public class UrsaStorageConfig {
                               String s3Bucket,
                               String compactionBucket,
                               String s3Region,
+                              long producerStateSnapshotIntervalMs,
+                              int producerStateSnapshotRecordThreshold,
                               int nonIdempotentMaxInFlightAppendsPerPartition,
                               long nonIdempotentMaxInFlightBytesPerPartition) {
 
@@ -88,6 +92,8 @@ public class UrsaStorageConfig {
         this.s3Bucket = s3Bucket;
         this.compactionBucket = compactionBucket;
         this.s3Region = s3Region;
+        this.producerStateSnapshotIntervalMs = producerStateSnapshotIntervalMs;
+        this.producerStateSnapshotRecordThreshold = producerStateSnapshotRecordThreshold;
     }
 
     /**
@@ -158,10 +164,19 @@ public class UrsaStorageConfig {
         String s3Region = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_S3_REGION_DEFAULT);
 
+        long producerStateSnapshotIntervalMs = getLongConfig(configs,
+                ServerLogConfigs.URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_CONFIG,
+                ServerLogConfigs.URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_DEFAULT);
+
+        int producerStateSnapshotRecordThreshold = getIntConfig(configs,
+                ServerLogConfigs.URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_RECORD_THRESHOLD_CONFIG,
+                ServerLogConfigs.URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_RECORD_THRESHOLD_DEFAULT);
+
         return new UrsaStorageConfig(enabled, pulsarOxiaServiceUrl, ursaOxiaServiceUrl,
                 backendType, storagePath, compactionPrefix,
                 writeBufferFlushIntervalMs, writeBufferSize, writeBufferFlushSize,
                 s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket, compactionBucket, s3Region,
+                producerStateSnapshotIntervalMs, producerStateSnapshotRecordThreshold,
                 nonIdempotentMaxInFlightAppendsPerPartition, nonIdempotentMaxInFlightBytesPerPartition
         );
     }
@@ -253,5 +268,13 @@ public class UrsaStorageConfig {
 
     public String getS3Region() {
         return s3Region;
+    }
+
+    public long getProducerStateSnapshotIntervalMs() {
+        return producerStateSnapshotIntervalMs;
+    }
+
+    public int getProducerStateSnapshotRecordThreshold() {
+        return producerStateSnapshotRecordThreshold;
     }
 }

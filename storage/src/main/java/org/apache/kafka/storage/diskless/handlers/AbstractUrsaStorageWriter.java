@@ -24,10 +24,6 @@ import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse;
 import org.apache.kafka.storage.diskless.Writer;
 import org.apache.kafka.storage.diskless.handlers.RecordAnalyzer.RecordAnalysisResult;
-import org.apache.kafka.storage.diskless.idempotent.ProducerStateStore;
-import org.apache.kafka.storage.diskless.idempotent.ProducerStateStore.SequenceValidationRequest;
-import org.apache.kafka.storage.diskless.idempotent.ProducerStateStore.StateUpdateRequest;
-import org.apache.kafka.storage.diskless.idempotent.ProducerStateStore.ValidationResult;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +36,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -51,6 +49,7 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
 
     private static final Logger log = LoggerFactory.getLogger(AbstractUrsaStorageWriter.class);
     private static final CompletableFuture<Void> COMPLETED = CompletableFuture.completedFuture(null);
+    private static final Executor SEQUENCED_WRITE_EXECUTOR = ForkJoinPool.commonPool();
 
     protected final UrsaStorageState state;
     private final ConcurrentHashMap<TopicIdPartition, CompletableFuture<Void>> partitionWriteTails =
@@ -74,9 +73,9 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
      * @param tp the partition to append to
      * @param records the records to append
      * @param analysisResult the analysis result for the records
-     * @return a future containing the partition response
+     * @return a handle containing submission and completion futures
      */
-    protected abstract CompletableFuture<PartitionResponse> performIdempotentAppend(
+    protected abstract SequencedWrite<PartitionResponse> performIdempotentAppend(
             TopicIdPartition tp,
             MemoryRecords records,
             RecordAnalysisResult analysisResult);
@@ -132,7 +131,12 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
             }
         }
 
-        // Analyze and validate records once, before any write path
+        if (hasProducerId) {
+            return enqueuePartitionWrite(tp, () -> writeIdempotent(tp, records))
+                    .thenApply(response -> new AbstractMap.SimpleEntry<>(tp, response));
+        }
+
+        // Analyze and validate records once, before non-idempotent write path
         RecordAnalysisResult analysisResult;
         try {
             analysisResult = RecordAnalyzer.analyzeAndValidateRecords(
@@ -151,32 +155,13 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
                     new AbstractMap.SimpleEntry<>(tp, new PartitionResponse(Errors.NONE)));
         }
 
-        if (hasProducerId) {
-            return enqueuePartitionWrite(tp, () -> writeIdempotent(tp, records, analysisResult))
-                    .thenApply(response -> new AbstractMap.SimpleEntry<>(tp, response));
-        }
-
         return appendToNonIdempotentPipeline(tp, records, analysisResult)
                 .thenApply(response -> new AbstractMap.SimpleEntry<>(tp, response));
     }
 
-    private CompletableFuture<PartitionResponse> appendToNonIdempotentPipeline(
-            TopicIdPartition tp,
-            MemoryRecords records,
-            RecordAnalysisResult analysisResult) {
-        while (true) {
-            NonIdempotentPartitionAppendPipeline pipeline = getOrCreateNonIdempotentPipeline(tp);
-            var result = pipeline.tryAppend(records, analysisResult);
-            if (result.isPresent()) {
-                return result.get();
-            }
-            nonIdempotentPipelines.remove(tp, pipeline);
-        }
-    }
-
     private <T> CompletableFuture<T> enqueuePartitionWrite(
             TopicIdPartition tp,
-            Supplier<CompletableFuture<T>> task) {
+            Supplier<SequencedWrite<T>> task) {
 
         CompletableFuture<Void> newTail = new CompletableFuture<>();
         CompletableFuture<Void> previousTail;
@@ -194,13 +179,26 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
 
         CompletableFuture<T> result = new CompletableFuture<>();
 
-        previousTail.whenComplete((ignored, previousError) -> {
-            CompletableFuture<T> taskFuture;
+        previousTail.whenCompleteAsync((ignored, previousError) -> {
+            SequencedWrite<T> write;
             try {
-                taskFuture = task.get();
+                write = task.get();
             } catch (Throwable t) {
                 result.completeExceptionally(t);
                 completeTailAndMaybeCleanup(tp, newTail);
+                return;
+            }
+
+            CompletableFuture<Void> submittedFuture = write.submittedFuture();
+            if (submittedFuture == null) {
+                submittedFuture = COMPLETED;
+            }
+            submittedFuture.whenComplete((submittedValue, submittedError) ->
+                completeTailAndMaybeCleanup(tp, newTail));
+
+            CompletableFuture<T> taskFuture = write.resultFuture();
+            if (taskFuture == null) {
+                result.completeExceptionally(new IllegalStateException("Missing write result future for " + tp));
                 return;
             }
 
@@ -210,29 +208,54 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
                 } else {
                     result.complete(value);
                 }
-                completeTailAndMaybeCleanup(tp, newTail);
             });
-        });
+        }, SEQUENCED_WRITE_EXECUTOR);
 
         return result;
     }
 
-    private CompletableFuture<PartitionResponse> writeIdempotent(
+    private CompletableFuture<PartitionResponse> appendToNonIdempotentPipeline(
             TopicIdPartition tp,
             MemoryRecords records,
             RecordAnalysisResult analysisResult) {
+        while (true) {
+            NonIdempotentPartitionAppendPipeline pipeline = getOrCreateNonIdempotentPipeline(tp);
+            var result = pipeline.tryAppend(records, analysisResult);
+            if (result.isPresent()) {
+                return result.get();
+            }
+            nonIdempotentPipelines.remove(tp, pipeline);
+        }
+    }
 
-        return validateBeforeWrite(tp, records)
-                .thenCompose(validationError -> {
-                    if (validationError != null) {
-                        return CompletableFuture.completedFuture(validationError);
-                    }
-                    return performIdempotentAppend(tp, records, analysisResult);
-                })
-                .exceptionally(e -> {
-                    log.error("Failed to write to partition {}", tp, e);
-                    return new PartitionResponse(Errors.KAFKA_STORAGE_ERROR);
-                });
+    private SequencedWrite<PartitionResponse> writeIdempotent(TopicIdPartition tp, MemoryRecords records) {
+        RecordAnalysisResult analysisResult;
+        try {
+            analysisResult = RecordAnalyzer.analyzeAndValidateRecords(
+                records,
+                new TopicPartition(tp.topic(), tp.partition()),
+                0
+            );
+        } catch (Exception e) {
+            log.warn("Record validation failed for partition {}: {}", tp, e.getMessage());
+            return new SequencedWrite<>(
+                COMPLETED,
+                CompletableFuture.completedFuture(new PartitionResponse(Errors.INVALID_RECORD)));
+        }
+
+        if (analysisResult.validBytes() <= 0) {
+            return new SequencedWrite<>(
+                COMPLETED,
+                CompletableFuture.completedFuture(new PartitionResponse(Errors.NONE)));
+        }
+
+        SequencedWrite<PartitionResponse> write = performIdempotentAppend(tp, records, analysisResult);
+        CompletableFuture<PartitionResponse> mappedResult = write.resultFuture()
+            .exceptionally(e -> {
+                log.error("Failed to write to partition {}", tp, e);
+                return new PartitionResponse(Errors.KAFKA_STORAGE_ERROR);
+            });
+        return new SequencedWrite<>(write.submittedFuture(), mappedResult);
     }
 
     private NonIdempotentPartitionAppendPipeline getOrCreateNonIdempotentPipeline(TopicIdPartition tp) {
@@ -243,85 +266,6 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
                 state.config().getNonIdempotentMaxInFlightBytesPerPartition(),
                 pipeline -> nonIdempotentPipelines.remove(key, pipeline)
         ));
-    }
-
-    protected CompletableFuture<PartitionResponse> validateBeforeWrite(
-            TopicIdPartition tp,
-            MemoryRecords records) {
-
-        ProducerStateStore store = state.producerStateStore();
-        List<SequenceValidationRequest> requests = new ArrayList<>();
-
-        for (RecordBatch batch : records.batches()) {
-            if (!batch.hasProducerId()) {
-                continue;
-            }
-
-            requests.add(SequenceValidationRequest.builder()
-                .topicPartition(tp)
-                .producerId(batch.producerId())
-                .producerEpoch(batch.producerEpoch())
-                .baseSequence(batch.baseSequence())
-                .lastSequence(batch.lastSequence())
-                .build());
-        }
-
-        if (requests.isEmpty()) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        return store.validateAll(requests).thenApply(validationResult -> {
-            if (validationResult instanceof ValidationResult.Success) {
-                return null;
-            } else if (validationResult instanceof ValidationResult.Duplicate dup) {
-                return new PartitionResponse(Errors.NONE, dup.cachedOffset(), dup.cachedTimestamp(), 0L);
-            } else if (validationResult instanceof ValidationResult.InvalidEpoch inv) {
-                log.warn("Invalid producer epoch: {}", inv.message());
-                return new PartitionResponse(Errors.INVALID_PRODUCER_EPOCH, inv.message());
-            } else if (validationResult instanceof ValidationResult.OutOfOrderSequence oos) {
-                log.warn("Out of order sequence: {}", oos.message());
-                return new PartitionResponse(Errors.OUT_OF_ORDER_SEQUENCE_NUMBER, oos.message());
-            } else {
-                throw new IllegalStateException("Unknown validation result: " + validationResult);
-            }
-        });
-    }
-
-    protected CompletableFuture<Void> updateStateAfterWrite(
-            TopicIdPartition tp,
-            MemoryRecords records,
-            long baseOffset,
-            long logAppendTime) {
-
-        ProducerStateStore store = state.producerStateStore();
-        CompletableFuture<Void> result = CompletableFuture.completedFuture(null);
-
-        long currentOffset = baseOffset;
-        for (RecordBatch batch : records.batches()) {
-            if (!batch.hasProducerId()) {
-                int batchRecordCount = batch.countOrNull() != null ? batch.countOrNull() : 0;
-                currentOffset += batchRecordCount;
-                continue;
-            }
-
-            final long batchBaseOffset = currentOffset;
-            int batchRecordCount = batch.countOrNull() != null ? batch.countOrNull() : 0;
-            currentOffset += batchRecordCount;
-
-            StateUpdateRequest request = StateUpdateRequest.builder()
-                .topicPartition(tp)
-                .producerId(batch.producerId())
-                .producerEpoch(batch.producerEpoch())
-                .baseSequence(batch.baseSequence())
-                .lastSequence(batch.lastSequence())
-                .assignedOffset(batchBaseOffset)
-                .timestamp(logAppendTime)
-                .build();
-
-            result = result.thenCompose(ignored -> store.updateAfterWrite(request));
-        }
-
-        return result;
     }
 
     @Override
@@ -355,5 +299,23 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
     private void completeTailAndMaybeCleanup(TopicIdPartition tp, CompletableFuture<Void> newTail) {
         newTail.complete(null);
         partitionWriteTails.remove(tp, newTail);
+    }
+
+    protected static final class SequencedWrite<T> {
+        private final CompletableFuture<Void> submittedFuture;
+        private final CompletableFuture<T> resultFuture;
+
+        SequencedWrite(CompletableFuture<Void> submittedFuture, CompletableFuture<T> resultFuture) {
+            this.submittedFuture = submittedFuture;
+            this.resultFuture = resultFuture;
+        }
+
+        CompletableFuture<Void> submittedFuture() {
+            return submittedFuture;
+        }
+
+        CompletableFuture<T> resultFuture() {
+            return resultFuture;
+        }
     }
 }

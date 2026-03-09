@@ -443,6 +443,8 @@ No protocol changes required.
 | `ursa.storage.write.buffer.flush.interval.ms` | long | `250` | Write buffer flush interval |
 | `ursa.storage.write.buffer.size` | int | `4194304` (4MB) | Size of each WAL write buffer segment |
 | `ursa.storage.write.buffer.flush.size` | long | `268435456` (256MB) | Write buffer flush size threshold |
+| `ursa.storage.producer.state.snapshot.interval.ms` | long | `30000` | Periodic interval (ms) for producer-state snapshot. Set `<= 0` to disable time-based snapshot. |
+| `ursa.storage.producer.state.snapshot.record.threshold` | int | `10000` | Number of appended records that triggers producer-state snapshot. Set `<= 0` to disable threshold-based snapshot. |
 | `ursa.storage.non.idempotent.max.in.flight.appends.per.partition` | int | `16` | Maximum in-flight non-idempotent appends per partition |
 | `ursa.storage.non.idempotent.max.in.flight.bytes.per.partition` | long | `-1` | Maximum bytes of in-flight non-idempotent appends per partition (-1 disables) |
 | `ursa.storage.s3.endpoint` | string | `""` | S3 endpoint URL |

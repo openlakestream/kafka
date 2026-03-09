@@ -258,6 +258,20 @@ public class ServerLogConfigs {
             "Maximum total bytes of in-flight non-idempotent appends per partition (stream). Set to a positive value to bound memory; "
                     + "non-positive disables the byte limit.";
 
+    public static final String URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_CONFIG =
+            "ursa.storage.producer.state.snapshot.interval.ms";
+    public static final long URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_DEFAULT = 30_000L;
+    public static final String URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_DOC =
+            "Periodic interval in milliseconds for taking producer-state snapshots for idempotent diskless topics. "
+                    + "Set to 0 or a negative value to disable time-based snapshots.";
+
+    public static final String URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_RECORD_THRESHOLD_CONFIG =
+            "ursa.storage.producer.state.snapshot.record.threshold";
+    public static final int URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_RECORD_THRESHOLD_DEFAULT = 10_000;
+    public static final String URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_RECORD_THRESHOLD_DOC =
+            "Number of appended records that triggers a producer-state snapshot for idempotent diskless topics. "
+                    + "Set to 0 or a negative value to disable threshold-based snapshots.";
+
     // S3 Storage Configuration
     public static final String URSA_STORAGE_S3_ENDPOINT_CONFIG = "ursa.storage.s3.endpoint";
     public static final String URSA_STORAGE_S3_ENDPOINT_DEFAULT = "";

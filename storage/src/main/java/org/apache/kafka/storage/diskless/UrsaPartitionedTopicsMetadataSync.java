@@ -17,7 +17,7 @@
 package org.apache.kafka.storage.diskless;
 
 import org.apache.kafka.storage.diskless.handlers.KafkaManagedLedgerNaming;
-import org.apache.kafka.storage.diskless.idempotent.ProducerStateSnapshot;
+import org.apache.kafka.storage.diskless.idempotent.ProducerStateSnapshotKeys;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -72,7 +72,7 @@ public final class UrsaPartitionedTopicsMetadataSync implements AutoCloseable {
                 String mlKey = managedLedgerMetadataPath(topicName, partition);
                 enqueue("delete " + mlKey, context, () -> store.delete(mlKey));
                 if (topicId != null && !topicId.isBlank()) {
-                    String producerStateKey = ProducerStateSnapshot.generateSnapshotKey(topicId, partition);
+                    String producerStateKey = ProducerStateSnapshotKeys.snapshotKey(topicId, partition);
                     enqueue("delete " + producerStateKey, context, () -> store.delete(producerStateKey));
                 }
             }
