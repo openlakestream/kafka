@@ -20,21 +20,31 @@ import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.server.metrics.KafkaMetricsGroup;
+import org.apache.kafka.server.metrics.KafkaYammerMetrics;
 import org.apache.kafka.storage.diskless.idempotent.ProducerStateStore;
+import org.apache.kafka.storage.internals.log.LogMetricNames;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
 import org.apache.bookkeeper.mledger.ManagedLedger;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
+import org.apache.bookkeeper.mledger.Position;
+import org.apache.bookkeeper.mledger.PositionFactory;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -46,6 +56,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class UrsaStorageStateTest {
+    private static final String LOG_METRIC_GROUP = "kafka.log";
+    private static final String LOG_METRIC_TYPE = "Log";
 
     @Test
     void testCleanupPartitionClosesManagedLedgerAndClearsProducerState() throws Exception {
@@ -77,26 +89,25 @@ class UrsaStorageStateTest {
                 any()
         );
 
-        UrsaStorageState state = new UrsaStorageState(
+        try (UrsaStorageState state = new UrsaStorageState(
                 Time.SYSTEM,
                 1,
                 mock(UrsaStorageConfig.class),
                 mock(BrokerTopicStats.class),
                 producerStateStore,
-                managedLedgerFactory);
+                managedLedgerFactory)) {
+            state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
 
-        state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
-        state.getPartitionState(tp);
+            assertTrue(state.cleanupPartition(tp));
 
-        assertTrue(state.cleanupPartition(tp));
+            verify(producerStateStore, times(1)).clearPartition(tp);
+            verify(managedLedgerFactory, times(1)).asyncOpen(anyString(), any(), any(), any(), any());
 
-        verify(producerStateStore, times(1)).clearPartition(tp);
-        verify(managedLedgerFactory, times(1)).asyncOpen(anyString(), any(), any(), any(), any());
+            assertTrue(closeLatch.await(5, TimeUnit.SECONDS));
 
-        assertTrue(closeLatch.await(5, TimeUnit.SECONDS));
-
-        state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
-        verify(managedLedgerFactory, times(2)).asyncOpen(anyString(), any(), any(), any(), any());
+            state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
+            verify(managedLedgerFactory, times(2)).asyncOpen(anyString(), any(), any(), any(), any());
+        }
     }
 
     @Test
@@ -119,5 +130,193 @@ class UrsaStorageStateTest {
 
         verify(producerStateStore, times(1)).clearPartition(tp);
         verify(managedLedgerFactory, never()).asyncOpen(anyString(), any(), any(), any(), any());
+    }
+
+    @Test
+    void testDisklessLogMetricsRegisteredAfterManagedLedgerOpen() throws Exception {
+        TopicIdPartition tp = new TopicIdPartition(Uuid.randomUuid(), new TopicPartition("metric-open-topic", 0));
+
+        ProducerStateStore producerStateStore = mock(ProducerStateStore.class);
+        when(producerStateStore.clearPartition(tp)).thenReturn(CompletableFuture.completedFuture(null));
+
+        ManagedLedgerFactory managedLedgerFactory = mock(ManagedLedgerFactory.class);
+        ManagedLedger managedLedger = mock(ManagedLedger.class);
+        Position firstPosition = mock(Position.class);
+        Position lastConfirmedPosition = mock(Position.class);
+        when(managedLedger.getTotalSize()).thenReturn(1234L);
+        when(firstPosition.getEntryId()).thenReturn(5L);
+        when(firstPosition.compareTo(PositionFactory.EARLIEST)).thenReturn(1);
+        when(lastConfirmedPosition.getEntryId()).thenReturn(41L);
+        when(managedLedger.getFirstPosition()).thenReturn(firstPosition);
+        when(managedLedger.getLastConfirmedEntry()).thenReturn(lastConfirmedPosition);
+        doAnswer(invocation -> {
+            AsyncCallbacks.OpenLedgerCallback callback = invocation.getArgument(2);
+            callback.openLedgerComplete(managedLedger, invocation.getArgument(3));
+            return null;
+        }).when(managedLedgerFactory).asyncOpen(anyString(), any(ManagedLedgerConfig.class), any(), any(), any());
+
+        try (UrsaStorageState state = new UrsaStorageState(
+                Time.SYSTEM,
+                1,
+                mock(UrsaStorageConfig.class),
+                mock(BrokerTopicStats.class),
+                producerStateStore,
+                managedLedgerFactory)) {
+            assertNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
+            assertNull(jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
+            assertNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
+
+            state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
+
+            assertEquals(1234L, jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
+            assertEquals(5L, jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
+            assertEquals(42L, jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
+        }
+    }
+
+    @Test
+    void testDisklessLogMetricsRemovedOnCleanupPartition() throws Exception {
+        TopicIdPartition tp = new TopicIdPartition(Uuid.randomUuid(), new TopicPartition("metric-cleanup-topic", 0));
+
+        ProducerStateStore producerStateStore = mock(ProducerStateStore.class);
+        when(producerStateStore.clearPartition(tp)).thenReturn(CompletableFuture.completedFuture(null));
+
+        ManagedLedgerFactory managedLedgerFactory = mock(ManagedLedgerFactory.class);
+        ManagedLedger managedLedger = mock(ManagedLedger.class);
+        when(managedLedger.getTotalSize()).thenReturn(100L);
+        doAnswer(invocation -> {
+            AsyncCallbacks.OpenLedgerCallback callback = invocation.getArgument(2);
+            callback.openLedgerComplete(managedLedger, invocation.getArgument(3));
+            return null;
+        }).when(managedLedgerFactory).asyncOpen(anyString(), any(ManagedLedgerConfig.class), any(), any(), any());
+
+        try (UrsaStorageState state = new UrsaStorageState(
+                Time.SYSTEM,
+                1,
+                mock(UrsaStorageConfig.class),
+                mock(BrokerTopicStats.class),
+                producerStateStore,
+                managedLedgerFactory)) {
+            state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
+            assertNotNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
+            assertNotNull(jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
+            assertNotNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
+
+            state.cleanupPartition(tp, false);
+
+            assertNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
+            assertNull(jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
+            assertNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
+        }
+    }
+
+    @Test
+    void testDisklessLogMetricsRemovedOnStateClose() throws Exception {
+        TopicIdPartition tp0 = new TopicIdPartition(Uuid.randomUuid(), new TopicPartition("metric-close-topic", 0));
+        TopicIdPartition tp1 = new TopicIdPartition(Uuid.randomUuid(), new TopicPartition("metric-close-topic", 1));
+
+        ProducerStateStore producerStateStore = mock(ProducerStateStore.class);
+        when(producerStateStore.clearPartition(any())).thenReturn(CompletableFuture.completedFuture(null));
+
+        ManagedLedgerFactory managedLedgerFactory = mock(ManagedLedgerFactory.class);
+        ManagedLedger managedLedger = mock(ManagedLedger.class);
+        when(managedLedger.getTotalSize()).thenReturn(100L);
+        doAnswer(invocation -> {
+            AsyncCallbacks.OpenLedgerCallback callback = invocation.getArgument(2);
+            callback.openLedgerComplete(managedLedger, invocation.getArgument(3));
+            return null;
+        }).when(managedLedgerFactory).asyncOpen(anyString(), any(ManagedLedgerConfig.class), any(), any(), any());
+
+        UrsaStorageState state = new UrsaStorageState(
+                Time.SYSTEM,
+                1,
+                mock(UrsaStorageConfig.class),
+                mock(BrokerTopicStats.class),
+                producerStateStore,
+                managedLedgerFactory);
+
+        state.getOrCreateManagedLedger(tp0).get(5, TimeUnit.SECONDS);
+        state.getOrCreateManagedLedger(tp1).get(5, TimeUnit.SECONDS);
+        assertNotNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp0.topicPartition()));
+        assertNotNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp1.topicPartition()));
+
+        state.close();
+
+        assertNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp0.topicPartition()));
+        assertNull(jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp0.topicPartition()));
+        assertNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp0.topicPartition()));
+        assertNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp1.topicPartition()));
+        assertNull(jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp1.topicPartition()));
+        assertNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp1.topicPartition()));
+    }
+
+    @Test
+    void testDisklessLogMetricsSkipWhenMetricAlreadyExists() throws Exception {
+        TopicPartition topicPartition = new TopicPartition("metric-conflict-topic-" + Uuid.randomUuid(), 0);
+        TopicIdPartition tp = new TopicIdPartition(Uuid.randomUuid(), topicPartition);
+
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put("topic", topicPartition.topic());
+        tags.put("partition", String.valueOf(topicPartition.partition()));
+        KafkaMetricsGroup externalMetricsGroup = new KafkaMetricsGroup(LOG_METRIC_GROUP, LOG_METRIC_TYPE);
+        externalMetricsGroup.newGauge(LogMetricNames.SIZE, () -> 777L, tags);
+        externalMetricsGroup.newGauge(LogMetricNames.LOG_START_OFFSET, () -> 11L, tags);
+        externalMetricsGroup.newGauge(LogMetricNames.LOG_END_OFFSET, () -> 22L, tags);
+
+        ProducerStateStore producerStateStore = mock(ProducerStateStore.class);
+        when(producerStateStore.clearPartition(tp)).thenReturn(CompletableFuture.completedFuture(null));
+
+        ManagedLedgerFactory managedLedgerFactory = mock(ManagedLedgerFactory.class);
+        ManagedLedger managedLedger = mock(ManagedLedger.class);
+        when(managedLedger.getTotalSize()).thenReturn(1234L);
+        doAnswer(invocation -> {
+            AsyncCallbacks.OpenLedgerCallback callback = invocation.getArgument(2);
+            callback.openLedgerComplete(managedLedger, invocation.getArgument(3));
+            return null;
+        }).when(managedLedgerFactory).asyncOpen(anyString(), any(ManagedLedgerConfig.class), any(), any(), any());
+
+        try (UrsaStorageState state = new UrsaStorageState(
+                Time.SYSTEM,
+                1,
+                mock(UrsaStorageConfig.class),
+                mock(BrokerTopicStats.class),
+                producerStateStore,
+                managedLedgerFactory)) {
+            assertEquals(777L, jmxGaugeLongValue(LogMetricNames.SIZE, topicPartition));
+            assertEquals(11L, jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, topicPartition));
+            assertEquals(22L, jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, topicPartition));
+
+            state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
+            assertEquals(777L, jmxGaugeLongValue(LogMetricNames.SIZE, topicPartition));
+            assertEquals(11L, jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, topicPartition));
+            assertEquals(22L, jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, topicPartition));
+        } finally {
+            externalMetricsGroup.removeMetric(LogMetricNames.SIZE, tags);
+            externalMetricsGroup.removeMetric(LogMetricNames.LOG_START_OFFSET, tags);
+            externalMetricsGroup.removeMetric(LogMetricNames.LOG_END_OFFSET, tags);
+        }
+    }
+
+    private static Long jmxGaugeLongValue(String metricName, TopicPartition topicPartition) {
+        String suffix = "type=Log,name=" + metricName
+                + ",topic=" + topicPartition.topic()
+                + ",partition=" + topicPartition.partition();
+        for (var entry : KafkaYammerMetrics.defaultRegistry().allMetrics().entrySet()) {
+            var name = entry.getKey();
+            if (!LOG_METRIC_GROUP.equals(name.getGroup()) || !LOG_METRIC_TYPE.equals(name.getType())) {
+                continue;
+            }
+            if (!name.getMBeanName().endsWith(suffix)) {
+                continue;
+            }
+            Object metric = entry.getValue();
+            if (metric instanceof com.yammer.metrics.core.Gauge<?> gauge) {
+                Object value = gauge.value();
+                if (value instanceof Number numberValue) {
+                    return numberValue.longValue();
+                }
+            }
+        }
+        return null;
     }
 }

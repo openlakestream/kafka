@@ -17,10 +17,14 @@
 package org.apache.kafka.storage.diskless.handlers;
 
 import org.apache.kafka.common.TopicIdPartition;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.server.metrics.KafkaMetricsGroup;
+import org.apache.kafka.server.metrics.KafkaYammerMetrics;
 import org.apache.kafka.storage.diskless.idempotent.ProducerStateStore;
 import org.apache.kafka.storage.diskless.idempotent.UrsaProducerStateStore;
+import org.apache.kafka.storage.internals.log.LogMetricNames;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
@@ -28,6 +32,8 @@ import org.apache.bookkeeper.mledger.ManagedLedger;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
+import org.apache.bookkeeper.mledger.Position;
+import org.apache.bookkeeper.mledger.PositionFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,19 +42,21 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 
+import io.streamnative.ursa.mledger.UrsaPosition;
+
 /**
  * Shared state container for Ursa storage components.
- * Manages ManagedLedger instances and partition state for UrsaManagedLedgerReader and UrsaManagedLedgerWriter.
+ * Manages ManagedLedger instances for UrsaManagedLedgerReader and UrsaManagedLedgerWriter.
  */
 public class UrsaStorageState implements Closeable {
 
@@ -58,8 +66,7 @@ public class UrsaStorageState implements Closeable {
     private final int brokerId;
     private final UrsaStorageConfig config;
     private final BrokerTopicStats brokerTopicStats;
-
-    private final ConcurrentHashMap<TopicIdPartition, PartitionState> partitionStates = new ConcurrentHashMap<>();
+    private final KafkaMetricsGroup logMetricsGroup = new KafkaMetricsGroup("kafka.log", "Log");
 
     private final ProducerStateStore producerStateStore;
 
@@ -197,16 +204,26 @@ public class UrsaStorageState implements Closeable {
         CompletableFuture<ManagedLedger> configuredFuture = openFuture.thenApply(managedLedger ->
                 applyRetentionConfig(tp, managedLedger));
 
+        CompletableFuture<ManagedLedger> raced = managedLedgerCache.putIfAbsent(tp, configuredFuture);
+        if (raced != null) {
+            return raced.thenApply(managedLedger -> applyRetentionConfig(tp, managedLedger));
+        }
+
         // Evict from cache on failure to allow retry after transient errors
         configuredFuture.whenComplete((ledger, error) -> {
             if (error != null) {
                 managedLedgerCache.remove(tp, configuredFuture);
                 log.warn("Failed to open ManagedLedger for partition {}, evicting from cache", tp, error);
+                return;
             }
+            if (managedLedgerCache.get(tp) != configuredFuture) {
+                log.debug("Skipping diskless log metric registration for partition {} because this future is not cache owner", tp);
+                return;
+            }
+            maybeRegisterDisklessLogMetrics(tp, ledger);
         });
 
-        CompletableFuture<ManagedLedger> raced = managedLedgerCache.putIfAbsent(tp, configuredFuture);
-        return raced != null ? raced.thenApply(managedLedger -> applyRetentionConfig(tp, managedLedger)) : configuredFuture;
+        return configuredFuture;
     }
 
     /**
@@ -234,7 +251,7 @@ public class UrsaStorageState implements Closeable {
             return false;
         }
 
-        boolean cleaned = partitionStates.remove(tp) != null;
+        boolean cleaned = removeDisklessLogMetrics(tp);
 
         CompletableFuture<ManagedLedger> ledgerFuture = managedLedgerCache.remove(tp);
         if (ledgerFuture != null) {
@@ -264,13 +281,6 @@ public class UrsaStorageState implements Closeable {
         }
 
         return cleaned;
-    }
-
-    /**
-     * Gets the partition state, creating one if necessary.
-     */
-    public PartitionState getPartitionState(TopicIdPartition tp) {
-        return partitionStates.computeIfAbsent(tp, k -> new PartitionState());
     }
 
     private ManagedLedger applyRetentionConfig(TopicIdPartition tp, ManagedLedger managedLedger) {
@@ -455,24 +465,108 @@ public class UrsaStorageState implements Closeable {
     private record RetentionConfig(long retentionMs, long retentionBytes) {
     }
 
-    /**
-     * Gets the next offset for a partition.
-     */
-    public long getNextOffset(TopicIdPartition tp) {
-        PartitionState state = partitionStates.get(tp);
-        return state != null ? state.getNextOffset() : 0;
+    private void maybeRegisterDisklessLogMetrics(TopicIdPartition topicIdPartition, ManagedLedger managedLedger) {
+        if (topicIdPartition == null || managedLedger == null) {
+            return;
+        }
+        TopicPartition topicPartition = topicIdPartition.topicPartition();
+        Map<String, String> tags = createLogMetricTags(topicPartition);
+
+        logMetricsGroup.newGauge(
+                LogMetricNames.SIZE,
+                () -> Math.max(0L, readPartitionSize(managedLedger)),
+                tags
+        );
+        logMetricsGroup.newGauge(
+                LogMetricNames.LOG_START_OFFSET,
+                () -> Math.max(0L, readPartitionLogStartOffset(managedLedger)),
+                tags
+        );
+        logMetricsGroup.newGauge(
+                LogMetricNames.LOG_END_OFFSET,
+                () -> Math.max(0L, readPartitionLogEndOffset(managedLedger)),
+                tags
+        );
     }
 
-    /**
-     * Increments the offset for a partition and returns the base offset.
-     */
-    public long incrementOffset(TopicIdPartition tp, int count) {
-        return getPartitionState(tp).incrementOffset(count);
+    private boolean hasAnyExistingLogMetrics(Map<String, String> tags) {
+        return metricExists(LogMetricNames.SIZE, tags)
+                || metricExists(LogMetricNames.LOG_START_OFFSET, tags)
+                || metricExists(LogMetricNames.LOG_END_OFFSET, tags);
+    }
+
+    private boolean metricExists(String metricName, Map<String, String> tags) {
+        return KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(logMetricsGroup.metricName(metricName, tags));
+    }
+
+    private Map<String, String> createLogMetricTags(TopicPartition topicPartition) {
+        LinkedHashMap<String, String> tags = new LinkedHashMap<>();
+        tags.put("topic", topicPartition.topic());
+        tags.put("partition", String.valueOf(topicPartition.partition()));
+        return tags;
+    }
+
+    private boolean removeDisklessLogMetrics(TopicIdPartition topicIdPartition) {
+        Map<String, String> tags = createLogMetricTags(topicIdPartition.topicPartition());
+        boolean existing = hasAnyExistingLogMetrics(tags);
+        removeLogMetrics(tags);
+        return existing;
+    }
+
+    private void removeAllDisklessLogMetrics() {
+        managedLedgerCache.keySet().stream()
+                .map(TopicIdPartition::topicPartition)
+                .distinct()
+                .forEach(topicPartition -> removeLogMetrics(createLogMetricTags(topicPartition)));
+    }
+
+    private void removeLogMetrics(Map<String, String> tags) {
+        logMetricsGroup.removeMetric(LogMetricNames.SIZE, tags);
+        logMetricsGroup.removeMetric(LogMetricNames.LOG_START_OFFSET, tags);
+        logMetricsGroup.removeMetric(LogMetricNames.LOG_END_OFFSET, tags);
+    }
+
+    private long readPartitionSize(ManagedLedger managedLedger) {
+        return Math.max(0L, managedLedger.getTotalSize());
+    }
+
+    private long readPartitionLogStartOffset(ManagedLedger managedLedger) {
+        return resolveLogStartOffset(managedLedger);
+    }
+
+    private long readPartitionLogEndOffset(ManagedLedger managedLedger) {
+        return resolveLogEndOffset(managedLedger);
+    }
+
+    private long resolveLogStartOffset(ManagedLedger managedLedger) {
+        Position firstPosition = managedLedger.getFirstPosition();
+        if (isInvalidPosition(firstPosition)) {
+            return 0L;
+        }
+        if (firstPosition.compareTo(PositionFactory.EARLIEST) == 0) {
+            return 0L;
+        }
+        return Math.max(0L, firstPosition.getEntryId());
+    }
+
+    private long resolveLogEndOffset(ManagedLedger managedLedger) {
+        Position lastConfirmedEntry = managedLedger.getLastConfirmedEntry();
+        if (isInvalidPosition(lastConfirmedEntry)) {
+            return 0L;
+        }
+        if (lastConfirmedEntry instanceof UrsaPosition ursaPosition) {
+            return Math.max(0L, ursaPosition.getEntryId() + Math.max(1, ursaPosition.numMessages()));
+        }
+        return Math.max(0L, lastConfirmedEntry.getEntryId() + 1);
+    }
+
+    private boolean isInvalidPosition(Position position) {
+        return position == null || position.getEntryId() < 0;
     }
 
     @Override
     public void close() throws IOException {
-        partitionStates.clear();
+        removeAllDisklessLogMetrics();
         managedLedgerCache.clear();
         producerStateStore.close();
         if (managedLedgerFactoryHolder != null) {
@@ -480,35 +574,4 @@ public class UrsaStorageState implements Closeable {
         }
     }
 
-    /**
-     * Tracks per-partition state for offset and cumulative size management.
-     */
-    public static class PartitionState {
-        private final AtomicLong nextOffset = new AtomicLong(0);
-        private final AtomicLong cumulativeSize = new AtomicLong(0);
-
-        public long incrementOffset(int count) {
-            return nextOffset.getAndAdd(count);
-        }
-
-        public long incrementCumulativeSize(long size) {
-            return cumulativeSize.getAndAdd(size);
-        }
-
-        public long getNextOffset() {
-            return nextOffset.get();
-        }
-
-        public long getCumulativeSize() {
-            return cumulativeSize.get();
-        }
-
-        public void setNextOffset(long offset) {
-            nextOffset.set(offset);
-        }
-
-        public void setCumulativeSize(long size) {
-            cumulativeSize.set(size);
-        }
-    }
 }
