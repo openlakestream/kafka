@@ -16,7 +16,7 @@
  */
 package org.apache.kafka.storage.diskless;
 
-import org.apache.kafka.storage.diskless.idempotent.ProducerStateSnapshot;
+import org.apache.kafka.storage.diskless.idempotent.ProducerStateSnapshotKeys;
 import org.apache.kafka.test.TestUtils;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -79,7 +79,7 @@ class UrsaPartitionedTopicsMetadataSyncTest {
         expectedKeys.add("/admin/partitioned-topics/public/default/persistent/" + topicName);
         for (int partition = 0; partition < partitions; partition++) {
             expectedKeys.add("/managed-ledgers/public/default/persistent/" + topicName + "-partition-" + partition);
-            expectedKeys.add(ProducerStateSnapshot.generateSnapshotKey(topicId, partition));
+            expectedKeys.add(ProducerStateSnapshotKeys.snapshotKey(topicId, partition));
         }
 
         TestUtils.waitForCondition(() -> store.deleteKeys.size() == expectedKeys.size()

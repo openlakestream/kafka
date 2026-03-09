@@ -19,8 +19,10 @@ package org.apache.kafka.storage.diskless.handlers;
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse;
 import org.apache.kafka.storage.diskless.handlers.RecordAnalyzer.RecordAnalysisResult;
+import org.apache.kafka.storage.diskless.idempotent.ProducerStateManager;
 
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
 import org.apache.bookkeeper.mledger.ManagedLedger;
@@ -29,6 +31,8 @@ import org.apache.bookkeeper.mledger.Position;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import io.netty.buffer.ByteBuf;
@@ -50,38 +54,146 @@ public class UrsaManagedLedgerWriter extends AbstractUrsaStorageWriter {
     }
 
     @Override
-    protected CompletableFuture<PartitionResponse> performIdempotentAppend(
+    protected SequencedWrite<PartitionResponse> performIdempotentAppend(
             TopicIdPartition tp,
             MemoryRecords records,
             RecordAnalysisResult analysisResult) {
 
-        return state.getOrCreateManagedLedger(tp)
-                .thenCompose(managedLedger -> {
-                    ByteBuf data = KafkaEntryFormatter.encode(records, analysisResult);
-                    int dataSize = data.readableBytes();
+        ProducerStateManager producerStateManager = state.getOrCreateProducerStateManager(tp);
+        CompletableFuture<Void> submissionFuture = new CompletableFuture<>();
+        List<ProducerStateManager.AppendBatch> appendBatches = buildAppendBatches(records);
+        if (appendBatches.isEmpty()) {
+            submissionFuture.complete(null);
+            return new SequencedWrite<>(submissionFuture,
+                CompletableFuture.completedFuture(new PartitionResponse(Errors.NONE)));
+        }
 
-                    log.debug("Appending {} records ({} bytes) to managed ledger {} for partition {}, analysisResult: {}",
-                            analysisResult.recordCount(), dataSize, managedLedger.getName(), tp, analysisResult);
+        CompletableFuture<PartitionResponse> resultFuture = producerStateManager.prepareAppend(appendBatches)
+            .thenCompose(prepareResult -> {
+                if (prepareResult instanceof ProducerStateManager.InvalidEpoch invalidEpoch) {
+                    submissionFuture.complete(null);
+                    return CompletableFuture.completedFuture(
+                        new PartitionResponse(Errors.INVALID_PRODUCER_EPOCH, invalidEpoch.message()));
+                }
+                if (prepareResult instanceof ProducerStateManager.OutOfOrderSequence outOfOrderSequence) {
+                    submissionFuture.complete(null);
+                    return CompletableFuture.completedFuture(
+                        new PartitionResponse(Errors.OUT_OF_ORDER_SEQUENCE_NUMBER, outOfOrderSequence.message()));
+                }
+                if (prepareResult instanceof ProducerStateManager.Duplicate duplicate) {
+                    submissionFuture.complete(null);
+                    return duplicate.appendResultFuture()
+                        .thenApply(appendResult ->
+                            new PartitionResponse(Errors.NONE, appendResult.baseOffset(), appendResult.timestamp(), 0L))
+                        .exceptionally(error -> {
+                            log.warn("Duplicate request future failed for partition {}", tp, error);
+                            return new PartitionResponse(Errors.KAFKA_STORAGE_ERROR);
+                        });
+                }
+                if (prepareResult instanceof ProducerStateManager.Ready ready) {
+                    return appendPreparedBatches(tp, records, analysisResult, producerStateManager, ready.pendingAppend(),
+                        submissionFuture);
+                }
+                submissionFuture.complete(null);
+                return CompletableFuture.failedFuture(
+                    new IllegalStateException("Unexpected prepare result: " + prepareResult));
+            })
+            .whenComplete((response, error) -> {
+                if (error != null) {
+                    submissionFuture.complete(null);
+                }
+            });
 
-                    CompletableFuture<Position> addFuture;
+        return new SequencedWrite<>(submissionFuture, resultFuture);
+    }
+
+    private CompletableFuture<PartitionResponse> appendPreparedBatches(
+            TopicIdPartition tp,
+            MemoryRecords records,
+            RecordAnalysisResult analysisResult,
+            ProducerStateManager producerStateManager,
+            ProducerStateManager.PendingAppend pendingAppend,
+            CompletableFuture<Void> submissionFuture) {
+        CompletableFuture<PartitionResponse> result = new CompletableFuture<>();
+
+        state.getOrCreateManagedLedger(tp).whenComplete((managedLedger, managedLedgerError) -> {
+            try {
+                if (managedLedgerError != null) {
+                    producerStateManager.abortAppend(pendingAppend, managedLedgerError);
+                    submissionFuture.complete(null);
+                    result.completeExceptionally(managedLedgerError);
+                    return;
+                }
+
+                ByteBuf data = KafkaEntryFormatter.encode(records, analysisResult);
+                int dataSize = data.readableBytes();
+
+                log.debug("Appending {} records ({} bytes) to managed ledger {} for partition {}, analysisResult: {}",
+                    analysisResult.recordCount(), dataSize, managedLedger.getName(), tp, analysisResult);
+
+                CompletableFuture<Position> addFuture;
+                try {
+                    addFuture = asyncAddEntry(managedLedger, data, analysisResult.recordCount());
+                } catch (Throwable appendInitError) {
+                    data.release();
+                    producerStateManager.abortAppend(pendingAppend, appendInitError);
+                    submissionFuture.complete(null);
+                    result.completeExceptionally(appendInitError);
+                    return;
+                }
+
+                submissionFuture.complete(null);
+
+                addFuture.whenComplete((position, appendError) -> {
                     try {
-                        addFuture = asyncAddEntry(managedLedger, data, analysisResult.recordCount());
-                    } catch (Throwable t) {
+                        if (appendError != null) {
+                            producerStateManager.abortAppend(pendingAppend, appendError);
+                            result.completeExceptionally(appendError);
+                            return;
+                        }
+
+                        long appendTimestamp = state.time().milliseconds();
+                        ProducerStateManager.AppendResult appendResult =
+                            producerStateManager.completeAppend(pendingAppend, position.getEntryId(), appendTimestamp);
+                        result.complete(new PartitionResponse(
+                            Errors.NONE,
+                            appendResult.baseOffset(),
+                            appendResult.timestamp(),
+                            0L));
+                    } catch (Throwable completeError) {
+                        producerStateManager.abortAppend(pendingAppend, completeError);
+                        result.completeExceptionally(completeError);
+                    } finally {
                         data.release();
-                        return CompletableFuture.failedFuture(t);
                     }
-
-                    return addFuture.whenComplete((ignored, error) -> data.release())
-                            .thenCompose(position -> {
-                                long baseOffset = position.getEntryId();
-                                long logAppendTime = state.time().milliseconds();
-
-                                log.debug("Append completed for partition {} with baseOffset {}", tp, baseOffset);
-
-                                return updateStateAfterWrite(tp, records, baseOffset, logAppendTime)
-                                        .thenApply(ignored -> new PartitionResponse(Errors.NONE, baseOffset, logAppendTime, 0L));
-                            });
                 });
+            } catch (Throwable callbackError) {
+                producerStateManager.abortAppend(pendingAppend, callbackError);
+                submissionFuture.complete(null);
+                result.completeExceptionally(callbackError);
+            }
+        });
+
+        return result;
+    }
+
+    private static List<ProducerStateManager.AppendBatch> buildAppendBatches(MemoryRecords records) {
+        List<ProducerStateManager.AppendBatch> appendBatches = new ArrayList<>();
+        for (RecordBatch batch : records.batches()) {
+            if (!batch.hasProducerId()) {
+                continue;
+            }
+            int recordCount = batch.countOrNull() != null ? batch.countOrNull() : 0;
+            appendBatches.add(new ProducerStateManager.AppendBatch(
+                batch.producerId(),
+                batch.producerEpoch(),
+                batch.baseSequence(),
+                batch.lastSequence(),
+                recordCount,
+                batch.maxTimestamp()
+            ));
+        }
+        return appendBatches;
     }
 
     private CompletableFuture<Position> asyncAddEntry(ManagedLedger managedLedger, ByteBuf data, int numberOfMessages) {
