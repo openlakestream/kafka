@@ -50,6 +50,7 @@ import io.streamnative.ursa.mledger.UrsaPosition;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -252,21 +253,69 @@ class ProducerStateManagerTest {
 
         ProducerStateManager manager = newManager(tp, () -> null, () -> CompletableFuture.completedFuture(managedLedger));
         try {
-            // First append bypasses sequence check once after recovery is skipped.
-            ProducerStateManager.PrepareResult first = manager.prepareAppend(List.of(
+            // Producer 1: first append bypasses sequence check once after recovery is skipped.
+            ProducerStateManager.PrepareResult firstProducerFirst = manager.prepareAppend(List.of(
                 batch(1L, (short) 0, 5, 5, 1, 3000L)
             )).get();
-            assertInstanceOf(ProducerStateManager.Ready.class, first);
-            manager.completeAppend(((ProducerStateManager.Ready) first).pendingAppend(), 0L, 3000L);
+            assertInstanceOf(ProducerStateManager.Ready.class, firstProducerFirst);
+            manager.completeAppend(((ProducerStateManager.Ready) firstProducerFirst).pendingAppend(), 0L, 3000L);
 
-            // After the first append, sequence checks should return to normal.
-            ProducerStateManager.PrepareResult second = manager.prepareAppend(List.of(
+            // Producer 2: also gets one bypass because recovery-skip bypass is tracked per producer.
+            ProducerStateManager.PrepareResult secondProducerFirst = manager.prepareAppend(List.of(
                 batch(2L, (short) 0, 7, 7, 1, 3001L)
             )).get();
-            assertInstanceOf(ProducerStateManager.OutOfOrderSequence.class, second);
+            assertInstanceOf(ProducerStateManager.Ready.class, secondProducerFirst);
+            manager.completeAppend(((ProducerStateManager.Ready) secondProducerFirst).pendingAppend(), 1L, 3001L);
+
+            // Producer 1: after its first bypass, validation should be strict again.
+            ProducerStateManager.PrepareResult firstProducerSecond = manager.prepareAppend(List.of(
+                batch(1L, (short) 0, 7, 7, 1, 3002L)
+            )).get();
+            assertInstanceOf(ProducerStateManager.OutOfOrderSequence.class, firstProducerSecond);
             verify(managedLedger, never()).newNonDurableCursor(any(), anyString());
         } finally {
             manager.close();
+        }
+    }
+
+    @Test
+    void testBypassedPrepareAbortDoesNotGrantSecondBypassForSameProducer() throws Exception {
+        TopicIdPartition tp = testTopicPartition();
+        ManagedLedger managedLedger = mock(ManagedLedger.class);
+        // No snapshot -> startOffset is 0. With default threshold 10_000, this should skip replay.
+        UrsaPosition lastConfirmed = new UrsaPosition(1L, 0L, 10_001L);
+        when(managedLedger.getLastConfirmedEntry()).thenReturn(lastConfirmed);
+
+        try (ProducerStateManager manager = newManager(
+                tp, () -> null, () -> CompletableFuture.completedFuture(managedLedger))) {
+            ProducerStateManager.PrepareResult first = manager.prepareAppend(List.of(
+                    batch(1L, (short) 0, 5, 5, 1, 3000L)
+            )).get();
+            assertInstanceOf(ProducerStateManager.Ready.class, first);
+
+            ProducerStateManager.PendingAppend pendingAppend = ((ProducerStateManager.Ready) first).pendingAppend();
+            // Simulate append failure and rollback to verify boundary behavior after a bypassed prepare.
+            manager.abortAppend(pendingAppend, new RuntimeException("abort first bypassed append"));
+
+            ProducerStateManager.PrepareResult second = manager.prepareAppend(List.of(
+                    batch(1L, (short) 0, 5, 5, 1, 3001L)
+            )).get();
+            assertInstanceOf(ProducerStateManager.OutOfOrderSequence.class, second);
+
+            ProducerStateManager.PrepareResult third = manager.prepareAppend(List.of(
+                    batch(1L, (short) 0, 0, 0, 1, 3002L)
+            )).get();
+            assertInstanceOf(ProducerStateManager.Ready.class, third);
+            manager.completeAppend(((ProducerStateManager.Ready) third).pendingAppend(), 42L, 3002L);
+
+            Optional<ProducerStateManager.ProducerState> producerState = manager.producerState(1L);
+            assertTrue(producerState.isPresent());
+            assertEquals((short) 0, producerState.get().producerEpoch());
+            assertEquals(0, producerState.get().lastSequence());
+            assertEquals(42L, producerState.get().lastOffset());
+            assertEquals(1, producerState.get().retainedBatchCount());
+
+            verify(managedLedger, never()).newNonDurableCursor(any(), anyString());
         }
     }
 
@@ -274,10 +323,7 @@ class ProducerStateManagerTest {
             TopicIdPartition tp,
             SupplierWithException<AsyncOxiaClient> oxiaClientSupplier,
             SupplierWithException<CompletableFuture<ManagedLedger>> managedLedgerSupplier) {
-        return new ProducerStateManager(
-            tp,
-            () -> oxiaClientSupplier.get(),
-            () -> managedLedgerSupplier.get());
+        return new ProducerStateManager(tp, oxiaClientSupplier::get, managedLedgerSupplier::get);
     }
 
     private static ProducerStateManager.AppendBatch batch(
