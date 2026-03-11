@@ -36,10 +36,12 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -73,11 +75,6 @@ public class ProducerStateManager implements Closeable {
         NOT_STARTED,
         IN_PROGRESS,
         DONE
-    }
-
-    private enum SequenceValidationMode {
-        NORMAL,
-        ALLOW_FIRST_BATCH_AFTER_SKIPPED_RECOVERY
     }
 
     public record AppendBatch(
@@ -193,7 +190,8 @@ public class ProducerStateManager implements Closeable {
     private final List<PendingPrepareRequest> pendingPrepareRequests = new ArrayList<>();
 
     private RecoveryState recoveryState = RecoveryState.NOT_STARTED;
-    private SequenceValidationMode sequenceValidationMode = SequenceValidationMode.NORMAL;
+    private boolean recoverySkippedDueToExcessiveReplay = false;
+    private final Set<Long> bypassedProducerIdsAfterSkippedRecovery = new HashSet<>();
     private long nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
     private long recordsSinceSnapshot = 0L;
 
@@ -361,7 +359,7 @@ public class ProducerStateManager implements Closeable {
             pendingPrepareRequests.clear();
             producers.clear();
             recoveryState = RecoveryState.NOT_STARTED;
-            sequenceValidationMode = SequenceValidationMode.NORMAL;
+            bypassedProducerIdsAfterSkippedRecovery.clear();
             nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
             recordsSinceSnapshot = 0L;
         }
@@ -452,7 +450,7 @@ public class ProducerStateManager implements Closeable {
     private CompletableFuture<Void> loadSnapshot() {
         synchronized (this) {
             producers.clear();
-            sequenceValidationMode = SequenceValidationMode.NORMAL;
+            bypassedProducerIdsAfterSkippedRecovery.clear();
             nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
         }
 
@@ -476,7 +474,7 @@ public class ProducerStateManager implements Closeable {
                     log.warn("[{}] Ignoring producer snapshot due to parse failure", topicIdPartition, parseError);
                     synchronized (this) {
                         producers.clear();
-                        sequenceValidationMode = SequenceValidationMode.NORMAL;
+                        bypassedProducerIdsAfterSkippedRecovery.clear();
                         nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
                     }
                 }
@@ -509,7 +507,8 @@ public class ProducerStateManager implements Closeable {
                 && snapshotRecordThreshold > 0
                 && messagesToRecover > snapshotRecordThreshold) {
             synchronized (this) {
-                sequenceValidationMode = SequenceValidationMode.ALLOW_FIRST_BATCH_AFTER_SKIPPED_RECOVERY;
+                recoverySkippedDueToExcessiveReplay = true;
+                bypassedProducerIdsAfterSkippedRecovery.clear();
             }
             log.warn("[{}] Skipping producer-state replay without snapshot because messages to recover {} "
                     + "exceed snapshot threshold {}", topicIdPartition, messagesToRecover, snapshotRecordThreshold);
@@ -725,6 +724,7 @@ public class ProducerStateManager implements Closeable {
         List<PendingBatch> pendingBatches,
         AtomicReference<BatchMetadata> firstDuplicateRef) {
         ProducerStateEntry producerStateEntry = producers.get(batch.producerId());
+        boolean hasExistingProducerState = producerStateEntry != null;
         if (producerStateEntry == null) {
             producerStateEntry = transientProducerStateEntries.computeIfAbsent(
                 batch.producerId(),
@@ -772,7 +772,8 @@ public class ProducerStateManager implements Closeable {
         }
 
         int expectedSequence = shadowState.expectedSequence();
-        if (batch.firstSequence() != expectedSequence && !consumeOneTimeSequenceValidationBypassIfEnabled()) {
+        if (batch.firstSequence() != expectedSequence
+                && !consumeOneTimeSequenceValidationBypassIfEnabled(batch.producerId(), hasExistingProducerState)) {
             rollbackPendingBatches(pendingBatches, new IllegalStateException("out of order sequence"));
             String message = "Out of order sequence for producer " + batch.producerId() + " on "
                 + topicIdPartition + ": expected " + expectedSequence + ", got " + batch.firstSequence();
@@ -796,12 +797,14 @@ public class ProducerStateManager implements Closeable {
         return null;
     }
 
-    private boolean consumeOneTimeSequenceValidationBypassIfEnabled() {
-        if (sequenceValidationMode == SequenceValidationMode.ALLOW_FIRST_BATCH_AFTER_SKIPPED_RECOVERY) {
-            sequenceValidationMode = SequenceValidationMode.NORMAL;
-            return true;
+    private boolean consumeOneTimeSequenceValidationBypassIfEnabled(long producerId, boolean hasExistingProducerState) {
+        if (!recoverySkippedDueToExcessiveReplay) {
+            return false;
         }
-        return false;
+        if (hasExistingProducerState) {
+            return false;
+        }
+        return bypassedProducerIdsAfterSkippedRecovery.add(producerId);
     }
 
     private PrepareResult handleDuplicateBatch(
@@ -860,6 +863,7 @@ public class ProducerStateManager implements Closeable {
 
     private void restoreFromSnapshotLocked(Map<Long, ProducerStateEntry> snapshotProducers) {
         producers.clear();
+        bypassedProducerIdsAfterSkippedRecovery.clear();
         nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
         producers.putAll(snapshotProducers);
         for (ProducerStateEntry stateEntry : snapshotProducers.values()) {
