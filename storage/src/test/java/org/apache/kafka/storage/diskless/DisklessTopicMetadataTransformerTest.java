@@ -43,19 +43,23 @@ class DisklessTopicMetadataTransformerTest {
 
     private static final ListenerName LISTENER = ListenerName.forSecurityProtocol(
             org.apache.kafka.common.security.auth.SecurityProtocol.PLAINTEXT);
+    private static final ListenerName OWNER_SELECTION_LISTENER = new ListenerName("INTERNAL");
 
     private DisklessStorageMetadataView metadataView;
+    private DisklessBrokerSelector brokerSelector;
     private DisklessTopicMetadataTransformer transformer;
 
     @BeforeEach
     void setUp() {
         metadataView = mock(DisklessStorageMetadataView.class);
-        transformer = new DisklessTopicMetadataTransformer(metadataView);
+        brokerSelector = new DisklessBrokerSelector(metadataView::getAliveBrokerNodes, OWNER_SELECTION_LISTENER);
+        transformer = new DisklessTopicMetadataTransformer(metadataView, brokerSelector);
     }
 
     @Test
     void testConstructorRejectsNullMetadataView() {
-        assertThrows(NullPointerException.class, () -> new DisklessTopicMetadataTransformer(null));
+        assertThrows(NullPointerException.class, () -> new DisklessTopicMetadataTransformer(null, brokerSelector));
+        assertThrows(NullPointerException.class, () -> new DisklessTopicMetadataTransformer(metadataView, null));
     }
 
     @Test
@@ -102,7 +106,7 @@ class DisklessTopicMetadataTransformerTest {
                 ));
 
         when(metadataView.isDisklessStorageTopic("diskless-topic")).thenReturn(true);
-        when(metadataView.getAliveBrokerNodes(LISTENER)).thenReturn(List.of(
+        when(metadataView.getAliveBrokerNodes(OWNER_SELECTION_LISTENER)).thenReturn(List.of(
                 new Node(0, "host0", 9092),
                 new Node(1, "host1", 9092),
                 new Node(2, "host2", 9092)
@@ -134,7 +138,7 @@ class DisklessTopicMetadataTransformerTest {
                 ));
 
         when(metadataView.isDisklessStorageTopic("diskless-topic")).thenReturn(true);
-        when(metadataView.getAliveBrokerNodes(LISTENER)).thenReturn(List.of(
+        when(metadataView.getAliveBrokerNodes(OWNER_SELECTION_LISTENER)).thenReturn(List.of(
                 new Node(0, "host0", 9092),
                 new Node(1, "host1", 9092),
                 new Node(2, "host2", 9092)
@@ -154,7 +158,7 @@ class DisklessTopicMetadataTransformerTest {
         Uuid topicId = Uuid.randomUuid();
 
         when(metadataView.isDisklessStorageTopic("diskless-topic")).thenReturn(true);
-        when(metadataView.getAliveBrokerNodes(LISTENER)).thenReturn(List.of(
+        when(metadataView.getAliveBrokerNodes(OWNER_SELECTION_LISTENER)).thenReturn(List.of(
                 new Node(0, "host0", 9092),
                 new Node(1, "host1", 9092),
                 new Node(2, "host2", 9092)
@@ -179,7 +183,7 @@ class DisklessTopicMetadataTransformerTest {
 
         when(metadataView.isDisklessStorageTopic("diskless-topic")).thenReturn(true);
 
-        when(metadataView.getAliveBrokerNodes(LISTENER)).thenReturn(List.of(
+        when(metadataView.getAliveBrokerNodes(OWNER_SELECTION_LISTENER)).thenReturn(List.of(
                 new Node(0, "host0", 9092),
                 new Node(1, "host1", 9092),
                 new Node(2, "host2", 9092)
@@ -187,7 +191,7 @@ class DisklessTopicMetadataTransformerTest {
         MetadataResponseTopic topicBefore = createTopic("diskless-topic", topicId, 6);
         transformer.transformClusterMetadata(LISTENER, List.of(topicBefore));
 
-        when(metadataView.getAliveBrokerNodes(LISTENER)).thenReturn(List.of(
+        when(metadataView.getAliveBrokerNodes(OWNER_SELECTION_LISTENER)).thenReturn(List.of(
                 new Node(1, "host1", 9092),
                 new Node(2, "host2", 9092)
         ));
@@ -205,10 +209,32 @@ class DisklessTopicMetadataTransformerTest {
         MetadataResponseTopic topic = createTopic("diskless-topic", topicId, 1);
 
         when(metadataView.isDisklessStorageTopic("diskless-topic")).thenReturn(true);
-        when(metadataView.getAliveBrokerNodes(LISTENER)).thenReturn(Collections.emptyList());
+        when(metadataView.getAliveBrokerNodes(OWNER_SELECTION_LISTENER)).thenReturn(Collections.emptyList());
 
         assertThrows(RuntimeException.class,
                 () -> transformer.transformClusterMetadata(LISTENER, List.of(topic)));
+    }
+
+    @Test
+    void testLeaderSelectionUsesOwnerSelectionListener() {
+        Uuid topicId = Uuid.randomUuid();
+        MetadataResponseTopic topic = createTopic("diskless-topic", topicId, 1);
+
+        when(metadataView.isDisklessStorageTopic("diskless-topic")).thenReturn(true);
+        when(metadataView.getAliveBrokerNodes(LISTENER)).thenReturn(List.of(
+                new Node(9, "request-listener-host", 9092)
+        ));
+        when(metadataView.getAliveBrokerNodes(OWNER_SELECTION_LISTENER)).thenReturn(List.of(
+                new Node(0, "host0", 9092),
+                new Node(1, "host1", 9092),
+                new Node(2, "host2", 9092)
+        ));
+
+        transformer.transformClusterMetadata(LISTENER, List.of(topic));
+
+        int leaderId = topic.partitions().get(0).leaderId();
+        assertTrue(leaderId >= 0 && leaderId <= 2);
+        assertNotEquals(9, leaderId);
     }
 
     private MetadataResponseTopic createTopic(String name, Uuid topicId, int numPartitions) {

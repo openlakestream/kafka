@@ -16,13 +16,16 @@
  */
 package org.apache.kafka.storage.diskless;
 
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
 import java.util.Map;
 import java.util.function.Function;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -110,5 +113,17 @@ class MetadataCacheDisklessStorageViewTest {
     void testDisabledViewAlwaysReturnsFalse() {
         assertFalse(DisklessStorageMetadataView.DISABLED.isDisklessStorageTopic("any-topic"));
         assertTrue(DisklessStorageMetadataView.DISABLED.getTopicConfig("any-topic").isEmpty());
+    }
+
+    @Test
+    void testGetTopicIdFallsBackToZeroUuidWhenSupplierReturnsNull() {
+        MetadataCacheDisklessStorageView view = new MetadataCacheDisklessStorageView(
+                topic -> Map.of(),
+                listener -> Collections.emptyList(),
+                topic -> null,
+                true
+        );
+
+        assertEquals(Uuid.ZERO_UUID, view.getTopicId("test-topic"));
     }
 }

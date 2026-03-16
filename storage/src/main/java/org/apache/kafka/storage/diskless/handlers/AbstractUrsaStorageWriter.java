@@ -32,8 +32,10 @@ import java.io.IOException;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
@@ -294,6 +296,13 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
                 log.warn("Failed to close non-idempotent pipeline for partition {}", tp, e);
             }
         }
+    }
+
+    @Override
+    public Set<TopicIdPartition> snapshotPartitionsWithLocalState() {
+        Set<TopicIdPartition> partitions = new LinkedHashSet<>(partitionWriteTails.keySet());
+        partitions.addAll(nonIdempotentPipelines.keySet());
+        return partitions;
     }
 
     private void completeTailAndMaybeCleanup(TopicIdPartition tp, CompletableFuture<Void> newTail) {

@@ -42,9 +42,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
@@ -297,6 +299,12 @@ public class UrsaStorageState implements Closeable {
         }
 
         return cleaned;
+    }
+
+    public Set<TopicIdPartition> snapshotPartitionsWithLocalState() {
+        Set<TopicIdPartition> partitions = new LinkedHashSet<>(managedLedgerCache.keySet());
+        partitions.addAll(producerStateManagers.keySet());
+        return partitions;
     }
 
     private ManagedLedger applyRetentionConfig(TopicIdPartition tp, ManagedLedger managedLedger) {

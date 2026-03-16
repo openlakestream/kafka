@@ -358,7 +358,10 @@ class BrokerServer(
           val result = new util.HashMap[String, String]()
           props.forEach((k, v) => result.put(k.toString, v.toString))
           result
-        }
+        },
+        (topic: String) => metadataCache.getTopicId(topic),
+        (listenerName: ListenerName) => metadataCache.getAliveBrokerNodes(listenerName),
+        config.interBrokerListenerName
       )
 
       this._replicaManager = new ReplicaManager(
@@ -560,6 +563,10 @@ class BrokerServer(
         if (e != null) brokerMetadataPublisher.firstPublishFuture.completeExceptionally(e)
       })
       metadataPublishers.add(brokerMetadataPublisher)
+      metadataPublishers.add(new DisklessStateReconcilerPublisher(
+        disklessStorageSupport,
+        (topic: String) => replicaManager.maybeRemoveTopicMetrics(topic)
+      ))
       brokerRegistrationTracker = new BrokerRegistrationTracker(config.brokerId,
         () => lifecycleManager.resendBrokerRegistration())
       metadataPublishers.add(brokerRegistrationTracker)

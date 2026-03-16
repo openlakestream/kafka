@@ -31,6 +31,7 @@ import org.apache.kafka.common.acl.AclOperation
 import org.apache.kafka.common.compress.Compression
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.config.ConfigResource.Type.{BROKER, BROKER_LOGGER}
+import org.apache.kafka.common.config.TopicConfig
 import org.apache.kafka.common.errors.{ClusterAuthorizationException, UnsupportedVersionException}
 import org.apache.kafka.common.internals.{Plugin, Topic}
 import org.apache.kafka.common.internals.Topic.SHARE_GROUP_STATE_TOPIC_NAME
@@ -102,7 +103,8 @@ import org.apache.kafka.server.share.acknowledge.ShareAcknowledgementBatch
 import org.apache.kafka.server.share.context.{FinalContext, ShareSessionContext}
 import org.apache.kafka.server.share.session.{ShareSession, ShareSessionKey}
 import org.apache.kafka.server.storage.log.{FetchParams, FetchPartitionData}
-import org.apache.kafka.server.util.MockTime
+import org.apache.kafka.server.util.{FutureUtils, MockTime}
+import org.apache.kafka.storage.diskless.DisklessBrokerSelector
 import org.apache.kafka.storage.internals.log.{AppendOrigin, LogConfig, RecordValidationStats, UnifiedLog}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 import org.junit.jupiter.api.Assertions._
@@ -3088,6 +3090,82 @@ class KafkaApisTest extends Logging {
   }
 
   @Test
+  def testDisklessProduceResponseUsesPseudoLeaderOnNotLeaderOrFollower(): Unit = {
+    val topic = "diskless-topic"
+    val topicId = Uuid.randomUuid()
+    val requestListener = ListenerName.forSecurityProtocol(SecurityProtocol.PLAINTEXT)
+    val aliveBrokers = util.List.of(
+      new Node(0, "broker0", 9092),
+      new Node(1, "broker1", 9092),
+      new Node(2, "broker2", 9092)
+    )
+    val expectedLeaderId = new DisklessBrokerSelector(_ => aliveBrokers, requestListener)
+      .selectBroker(topicId, 0)
+      .getAsInt
+
+    metadataCache = mock(classOf[KRaftMetadataCache])
+    val disklessTopicConfig = new Properties()
+    disklessTopicConfig.put(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true")
+
+    val responseCallback: ArgumentCaptor[Map[TopicIdPartition, PartitionResponse] => Unit] =
+      ArgumentCaptor.forClass(classOf[Map[TopicIdPartition, PartitionResponse] => Unit])
+    val tp = new TopicIdPartition(topicId, 0, topic)
+
+    when(metadataCache.topicConfig(topic)).thenReturn(disklessTopicConfig)
+    when(metadataCache.getTopicName(topicId)).thenReturn(Optional.of(topic))
+    when(metadataCache.contains(tp.topicPartition())).thenReturn(true)
+    when(metadataCache.getTopicId(topic)).thenReturn(topicId)
+    when(metadataCache.getAliveBrokerNodes(any[ListenerName])).thenReturn(aliveBrokers)
+    when(metadataCache.getAliveBrokerNode(anyInt(), any[ListenerName])).thenAnswer { invocation =>
+      Optional.of(aliveBrokers.asScala.find(_.id == invocation.getArgument[Int](0)).get)
+    }
+    when(replicaManager.handleProduceAppend(anyLong,
+      anyShort,
+      ArgumentMatchers.eq(false),
+      any(),
+      any(),
+      responseCallback.capture(),
+      any(),
+      any(),
+      any())
+    ).thenAnswer(_ => responseCallback.getValue.apply(Map(tp -> new PartitionResponse(Errors.NOT_LEADER_OR_FOLLOWER))))
+
+    when(clientRequestQuotaManager.maybeRecordAndGetThrottleTimeMs(any[RequestChannel.Request](),
+      any[Long])).thenReturn(0)
+    when(clientQuotaManager.maybeRecordAndGetThrottleTimeMs(
+      any[Session](), anyString, anyDouble, anyLong)).thenReturn(0)
+
+    val produceRequest = ProduceRequest.builder(new ProduceRequestData()
+      .setTopicData(new ProduceRequestData.TopicProduceDataCollection(
+        util.List.of(
+          new ProduceRequestData.TopicProduceData()
+            .setTopicId(topicId)
+            .setPartitionData(util.List.of(
+              new ProduceRequestData.PartitionProduceData()
+                .setIndex(0)
+                .setRecords(MemoryRecords.withRecords(Compression.NONE, new SimpleRecord("test".getBytes)))
+            ))
+        ).iterator()))
+      .setAcks(1.toShort)
+      .setTimeoutMs(5000))
+      .build(ApiKeys.PRODUCE.latestVersion())
+    val request = buildRequest(produceRequest)
+
+    kafkaApis = createKafkaApis(overrideProperties = Map(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG -> "true"))
+    kafkaApis.handleProduceRequest(request, RequestLocal.withThreadConfinedCaching)
+
+    val response = verifyNoThrottling[ProduceResponse](request)
+    val partitionProduceResponse = response.data.responses.asScala.head.partitionResponses.asScala.head
+    val leaderNode = response.data.nodeEndpoints.asScala.head
+
+    assertEquals(Errors.NOT_LEADER_OR_FOLLOWER, Errors.forCode(partitionProduceResponse.errorCode))
+    assertEquals(expectedLeaderId, partitionProduceResponse.currentLeader.leaderId())
+    assertEquals(0, partitionProduceResponse.currentLeader.leaderEpoch())
+    assertEquals(expectedLeaderId, leaderNode.nodeId)
+    verify(replicaManager, never()).getPartitionOrError(tp.topicPartition())
+  }
+
+  @Test
   def testTransactionalParametersSetCorrectly(): Unit = {
     val topic = "topic"
     val transactionalId = "txn1"
@@ -4870,6 +4948,81 @@ class KafkaApisTest extends Logging {
     val node = response.data.nodeEndpoints.asScala
     assertEquals(Seq(2), node.map(_.nodeId))
     assertEquals(Seq("broker2"), node.map(_.host))
+  }
+
+  @Test
+  def testDisklessFetchResponseUsesPseudoLeaderOnNotLeaderOrFollower(): Unit = {
+    val topic = "diskless-fetch-topic"
+    val topicId = Uuid.randomUuid()
+    val tidp = new TopicIdPartition(topicId, new TopicPartition(topic, 0))
+    val requestListener = ListenerName.forSecurityProtocol(SecurityProtocol.PLAINTEXT)
+    val aliveBrokers = util.List.of(
+      new Node(0, "broker0", 9092),
+      new Node(1, "broker1", 9092),
+      new Node(2, "broker2", 9092)
+    )
+    val expectedLeaderId = new DisklessBrokerSelector(_ => aliveBrokers, requestListener)
+      .selectBroker(topicId, 0)
+      .getAsInt
+
+    metadataCache = mock(classOf[KRaftMetadataCache])
+    val disklessTopicConfig = new Properties()
+    disklessTopicConfig.put(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true")
+
+    when(metadataCache.topicConfig(topic)).thenReturn(disklessTopicConfig)
+    when(metadataCache.getTopicId(topic)).thenReturn(topicId)
+    when(metadataCache.getTopicName(topicId)).thenReturn(Optional.of(topic))
+    when(metadataCache.topicIdsToNames()).thenReturn(Map(topicId -> topic).asJava)
+    when(metadataCache.contains(tidp.topicPartition())).thenReturn(true)
+    when(metadataCache.getAliveBrokerNodes(any[ListenerName])).thenReturn(aliveBrokers)
+    when(metadataCache.getAliveBrokerNode(anyInt(), any[ListenerName])).thenAnswer { invocation =>
+      Optional.of(aliveBrokers.asScala.find(_.id == invocation.getArgument[Int](0)).get)
+    }
+
+    when(replicaManager.fetchMessages(
+      any[FetchParams],
+      any[Seq[(TopicIdPartition, FetchRequest.PartitionData)]],
+      any[ReplicaQuota],
+      any[Seq[(TopicIdPartition, FetchPartitionData)] => Unit]()
+    )).thenAnswer(invocation => {
+      val callback = invocation.getArgument(3).asInstanceOf[Seq[(TopicIdPartition, FetchPartitionData)] => Unit]
+      callback(Seq(tidp -> new FetchPartitionData(Errors.NOT_LEADER_OR_FOLLOWER, UnifiedLog.UNKNOWN_OFFSET, UnifiedLog.UNKNOWN_OFFSET, MemoryRecords.EMPTY,
+        Optional.empty(), OptionalLong.empty(), Optional.empty(), OptionalInt.empty(), false)))
+    })
+
+    val fetchData = util.Map.of(tidp, new FetchRequest.PartitionData(topicId, 0, 0, 1000,
+      Optional.empty()))
+    val fetchDataBuilder = util.Map.of(tidp.topicPartition(), new FetchRequest.PartitionData(topicId, 0, 0, 1000,
+      Optional.empty()))
+    val fetchMetadata = new JFetchMetadata(0, 0)
+    val fetchContext = new FullFetchContext(time, new FetchSessionCacheShard(1000, 100),
+      fetchMetadata, fetchData, true, false)
+    when(fetchManager.newContext(
+      any[Short],
+      any[JFetchMetadata],
+      any[Boolean],
+      any[util.Map[TopicIdPartition, FetchRequest.PartitionData]],
+      any[util.List[TopicIdPartition]],
+      any[util.Map[Uuid, String]])).thenReturn(fetchContext)
+
+    when(clientQuotaManager.maybeRecordAndGetThrottleTimeMs(
+      any[Session](), anyString, anyDouble, anyLong)).thenReturn(0)
+
+    val fetchRequest = new FetchRequest.Builder(16, 16, -1, -1, 100, 0, fetchDataBuilder)
+      .build()
+    val request = buildRequest(fetchRequest)
+    kafkaApis = createKafkaApis(overrideProperties = Map(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG -> "true"))
+    kafkaApis.handleFetchRequest(request)
+
+    val response = verifyNoThrottling[FetchResponse](request)
+    val responseData = response.responseData(metadataCache.topicIdsToNames(), 16)
+
+    val partitionData = responseData.get(tidp.topicPartition())
+    assertEquals(Errors.NOT_LEADER_OR_FOLLOWER.code, partitionData.errorCode)
+    assertEquals(expectedLeaderId, partitionData.currentLeader.leaderId())
+    assertEquals(0, partitionData.currentLeader.leaderEpoch())
+    assertEquals(Seq(expectedLeaderId), response.data.nodeEndpoints.asScala.map(_.nodeId))
+    verify(replicaManager, never()).getPartitionOrError(tidp.topicPartition())
   }
 
   @Test

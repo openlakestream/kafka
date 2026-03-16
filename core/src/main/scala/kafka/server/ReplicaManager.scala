@@ -179,7 +179,6 @@ class ReplicaManager(val config: KafkaConfig,
   private val metricsPackage = "kafka.server"
   private val metricsClassName = "ReplicaManager"
   private val metricsGroup = new KafkaMetricsGroup(metricsPackage, metricsClassName)
-  private val disklessHostedPartitions = new ConcurrentHashMap[TopicPartition, TopicIdPartition]()
   private val addPartitionsToTxnConfig = new AddPartitionsToTxnConfig(config)
   private val shareFetchPurgatoryName = "ShareFetch"
   private val delayedShareFetchTimer = new SystemTimer(shareFetchPurgatoryName)
@@ -294,13 +293,13 @@ class ReplicaManager(val config: KafkaConfig,
     remoteLogManager.foreach(rlm => rlm.setDelayedOperationPurgatory(delayedRemoteListOffsetsPurgatory))
   }
 
-  private def maybeRemoveTopicMetrics(topic: String): Unit = {
+  private[server] def maybeRemoveTopicMetrics(topic: String): Unit = {
     val topicHasNonOfflinePartition = allPartitions.values.asScala.exists {
       case online: HostedPartition.Online[Partition] => topic == online.partition.topic
       case _: HostedPartition.Offline[Partition] => false
       case _: HostedPartition.None[Partition] => false
     }
-    val topicHasDisklessHostedPartition = disklessHostedPartitions.keySet().asScala.exists(_.topic == topic)
+    val topicHasDisklessHostedPartition = disklessStorageSupport.hasTrackedPartitionsForTopic(topic)
     if (!topicHasNonOfflinePartition && !topicHasDisklessHostedPartition) // nothing online or deferred
       brokerTopicStats.removeMetrics(topic)
   }
@@ -397,7 +396,6 @@ class ReplicaManager(val config: KafkaConfig,
     partitionsToStop.foreach { stopPartition =>
       val topicPartition = stopPartition.topicPartition
       var topicId: Option[Uuid] = None
-      val disklessTopicIdPartition = Option(disklessHostedPartitions.remove(topicPartition))
       if (stopPartition.deleteLocalLog) {
         getPartition(topicPartition) match {
           case hostedPartition: HostedPartition.Online[Partition] =>
@@ -413,26 +411,9 @@ class ReplicaManager(val config: KafkaConfig,
         }
         partitionsToDelete += topicPartition
       }
-
-      val cleanupTarget = if (stopPartition.deleteLocalLog) {
-        disklessTopicIdPartition.orElse(topicId.map(id => new TopicIdPartition(id, topicPartition)))
-      } else {
-        disklessTopicIdPartition
-      }
-      val deletePartition = stopPartition.deleteLocalLog && stopPartition.deleteRemoteLog
-
-      cleanupTarget.foreach { idPartition =>
-        disklessStorageSupport.cleanupPartition(idPartition, deletePartition)
-      }
-      if (stopPartition.deleteLocalLog || disklessTopicIdPartition.isDefined) {
-        maybeRemoveTopicMetrics(topicPartition.topic)
-      }
       // If we were the leader, we may have some operations still waiting for completion.
       // We force completion to prevent them from timing out.
-      completeDelayedOperationsWhenNotPartitionLeader(
-        topicPartition,
-        topicId.orElse(disklessTopicIdPartition.map(_.topicId()))
-      )
+      completeDelayedOperationsWhenNotPartitionLeader(topicPartition, topicId)
       // Clean up per-partition expiration metrics regardless of whether the local log
       // is deleted. This covers both partition deletion and reassignment (leader -> follower).
       DelayedProduce.removePartitionMetrics(topicPartition)
@@ -507,10 +488,12 @@ class ReplicaManager(val config: KafkaConfig,
   }
 
   private def preAppendErrorForHostedDisklessTransactionalPartition(topicPartition: TopicPartition): Option[Errors] = {
-    if (disklessHostedPartitions.containsKey(topicPartition))
+    if (!disklessStorageSupport.isDisklessStorageTopic(topicPartition.topic))
+      None
+    else if (disklessStorageSupport.isCurrentDisklessOwner(topicIdPartition(topicPartition)))
       Some(Errors.INVALID_REQUEST)
     else
-      None
+      Some(Errors.NOT_LEADER_OR_FOLLOWER)
   }
 
   def getPartitionOrException(topicPartition: TopicPartition): Partition = {
@@ -2574,7 +2557,6 @@ class ReplicaManager(val config: KafkaConfig,
   def shutdown(checkpointHW: Boolean = true): Unit = {
     info("Shutting down")
     removeMetrics()
-    disklessHostedPartitions.clear()
     if (logDirFailureHandler != null)
       logDirFailureHandler.shutdown()
     replicaFetcherManager.shutdown()
@@ -2600,6 +2582,10 @@ class ReplicaManager(val config: KafkaConfig,
       if (allTopics.add(partition.topic())) {
         brokerTopicStats.removeMetrics(partition.topic())
       })
+    Option(disklessStorageSupport.trackedTopicNames()).foreach(_.forEach(topic =>
+      if (allTopics.add(topic)) {
+        brokerTopicStats.removeMetrics(topic)
+      }))
   }
 
   protected def createReplicaFetcherManager(metrics: Metrics, time: Time, quotaManager: ReplicationQuotaManager) = {
@@ -2789,9 +2775,7 @@ class ReplicaManager(val config: KafkaConfig,
       "local leaders.")
     replicaFetcherManager.removeFetcherForPartitions(localLeaders.keySet)
     localLeaders.foreachEntry { (tp, info) =>
-      if (disklessStorageSupport.isDisklessStorageTopic(tp.topic)) {
-        disklessHostedPartitions.put(tp, new TopicIdPartition(info.topicId, tp))
-      } else {
+      if (!disklessStorageSupport.isDisklessStorageTopic(tp.topic)) {
         getOrCreatePartition(tp, delta, info.topicId).foreach { case (partition, isNew) =>
           try {
             val partitionAssignedDirectoryId = directoryIds.find(_._1.topicPartition() == tp).map(_._2)
@@ -2827,12 +2811,7 @@ class ReplicaManager(val config: KafkaConfig,
     val partitionsToStopFetching = new mutable.HashMap[TopicPartition, Boolean]
     val followerTopicSet = new mutable.HashSet[String]
     localFollowers.foreachEntry { (tp, info) =>
-      if (disklessStorageSupport.isDisklessStorageTopic(tp.topic)) {
-        disklessHostedPartitions.remove(tp)
-        maybeRemoveTopicMetrics(tp.topic)
-        stateChangeLogger.warn(s"Skipping diskless follower transition for $tp with topic ID ${info.topicId} " +
-          s"because diskless topics are expected to run with RF=1")
-      } else {
+      if (!disklessStorageSupport.isDisklessStorageTopic(tp.topic)) {
         getOrCreatePartition(tp, delta, info.topicId).foreach { case (partition, isNew) =>
           try {
             followerTopicSet.add(tp.topic)

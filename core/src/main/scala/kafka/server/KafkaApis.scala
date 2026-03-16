@@ -72,7 +72,7 @@ import org.apache.kafka.server.storage.log.{FetchIsolation, FetchParams, FetchPa
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
 import org.apache.kafka.storage.internals.log.{AppendOrigin, RecordValidationStats}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
-import org.apache.kafka.storage.diskless.{DisklessTopicMetadataTransformer, MetadataCacheDisklessStorageView}
+import org.apache.kafka.storage.diskless.{DisklessBrokerSelector, DisklessTopicMetadataTransformer, MetadataCacheDisklessStorageView}
 
 import java.util
 import java.util.concurrent.atomic.AtomicInteger
@@ -124,9 +124,9 @@ class KafkaApis(val requestChannel: RequestChannel,
     metadataCache, authHelper, config)
   val shareGroupConfigProvider = new ShareGroupConfigProvider(groupConfigManager)
 
-  private val disklessMetadataTransformer: Option[DisklessTopicMetadataTransformer] = {
+  private val disklessMetadataView: Option[MetadataCacheDisklessStorageView] = {
     if (config.ursaStorageEnable) {
-      val metadataView = new MetadataCacheDisklessStorageView(
+      Some(new MetadataCacheDisklessStorageView(
         (topic: String) => {
           val props = metadataCache.topicConfig(topic)
           props.stringPropertyNames().asScala.map(k => k -> props.getProperty(k)).toMap.asJava
@@ -134,12 +134,24 @@ class KafkaApis(val requestChannel: RequestChannel,
         (listenerName: ListenerName) => metadataCache.getAliveBrokerNodes(listenerName),
         (topic: String) => metadataCache.getTopicId(topic),
         true
-      )
-      Some(new DisklessTopicMetadataTransformer(metadataView))
+      ))
     } else {
-      None
+      Option.empty[MetadataCacheDisklessStorageView]
     }
   }
+
+  private val disklessBrokerSelector: Option[DisklessBrokerSelector] = disklessMetadataView.map { _ =>
+    new DisklessBrokerSelector(
+      (listenerName: ListenerName) => metadataCache.getAliveBrokerNodes(listenerName),
+      config.interBrokerListenerName
+    )
+  }
+
+  private val disklessMetadataTransformer: Option[DisklessTopicMetadataTransformer] =
+    for {
+      metadataView <- disklessMetadataView
+      brokerSelector <- disklessBrokerSelector
+    } yield new DisklessTopicMetadataTransformer(metadataView, brokerSelector)
 
   def close(): Unit = {
     aclApis.close()
@@ -394,6 +406,20 @@ class KafkaApis(val requestChannel: RequestChannel,
   case class LeaderNode(leaderId: Int, leaderEpoch: Int, node: Option[Node])
 
   private def getCurrentLeader(tp: TopicPartition, ln: ListenerName): LeaderNode = {
+    if (disklessMetadataView.exists(_.isDisklessStorageTopic(tp.topic))) {
+      val selectedLeaderId = disklessBrokerSelector.flatMap { selector =>
+        val selected = selector.selectBroker(metadataCache.getTopicId(tp.topic), tp.partition)
+        if (selected.isPresent) Some(selected.getAsInt) else None
+      }
+
+      return selectedLeaderId match {
+        case Some(leaderId) =>
+          LeaderNode(leaderId, 0, OptionConverters.toScala(metadataCache.getAliveBrokerNode(leaderId, ln)))
+        case None =>
+          LeaderNode(-1, -1, None)
+      }
+    }
+
     val partitionInfoOrError = replicaManager.getPartitionOrError(tp)
     val (leaderId, leaderEpoch) = partitionInfoOrError match {
       case Right(x) =>

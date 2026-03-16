@@ -16,30 +16,29 @@
  */
 package org.apache.kafka.storage.diskless;
 
-import org.apache.kafka.common.Node;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.message.DescribeTopicPartitionsResponseData;
 import org.apache.kafka.common.message.MetadataResponseData.MetadataResponseTopic;
 import org.apache.kafka.common.network.ListenerName;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.utils.Utils;
 
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
-import java.util.stream.StreamSupport;
 
 public class DisklessTopicMetadataTransformer {
 
     private static final int INITIAL_LEADER_EPOCH = 0;
 
     private final DisklessStorageMetadataView metadataView;
+    private final DisklessBrokerSelector brokerSelector;
 
-    public DisklessTopicMetadataTransformer(DisklessStorageMetadataView metadataView) {
+    public DisklessTopicMetadataTransformer(
+            DisklessStorageMetadataView metadataView,
+            DisklessBrokerSelector brokerSelector
+    ) {
         this.metadataView = Objects.requireNonNull(metadataView, "metadataView cannot be null");
+        this.brokerSelector = Objects.requireNonNull(brokerSelector, "brokerSelector cannot be null");
     }
 
     public void transformClusterMetadata(
@@ -53,8 +52,7 @@ public class DisklessTopicMetadataTransformer {
                 continue;
             }
             for (var partition : topic.partitions()) {
-                int leader = selectLeaderForDisklessPartition(
-                        listenerName, topic.topicId(), partition.partitionIndex());
+                int leader = selectLeaderForDisklessPartition(topic.topicId(), partition.partitionIndex());
                 partition.setLeaderId(leader);
                 List<Integer> replicas = List.of(leader);
                 partition.setErrorCode(Errors.NONE.code());
@@ -78,8 +76,7 @@ public class DisklessTopicMetadataTransformer {
             }
 
             for (var partition : topic.partitions()) {
-                int leader = selectLeaderForDisklessPartition(
-                        listenerName, topic.topicId(), partition.partitionIndex());
+                int leader = selectLeaderForDisklessPartition(topic.topicId(), partition.partitionIndex());
                 partition.setLeaderId(leader);
                 List<Integer> replicas = List.of(leader);
                 partition.setErrorCode(Errors.NONE.code());
@@ -93,29 +90,9 @@ public class DisklessTopicMetadataTransformer {
         }
     }
 
-    private int selectLeaderForDisklessPartition(
-            ListenerName listenerName,
-            Uuid topicId,
-            int partitionIndex
-    ) {
-        List<Node> brokers = allAliveBrokers(listenerName);
-
-        if (brokers.isEmpty()) {
-            throw new RuntimeException("No alive brokers found for diskless partition assignment");
-        }
-
-        byte[] input = String.format("%s-%s", topicId, partitionIndex).getBytes(StandardCharsets.UTF_8);
-        int hash = Utils.murmur2(input);
-        int idx = Math.abs(hash % brokers.size());
-
-        return brokers.get(idx).id();
-    }
-
-    private List<Node> allAliveBrokers(ListenerName listenerName) {
-        List<Node> result = new ArrayList<>();
-        StreamSupport.stream(metadataView.getAliveBrokerNodes(listenerName).spliterator(), false)
-                .sorted(Comparator.comparing(Node::id))
-                .forEach(result::add);
-        return result;
+    private int selectLeaderForDisklessPartition(Uuid topicId, int partitionIndex) {
+        return brokerSelector.selectBroker(topicId, partitionIndex)
+                .orElseThrow(() ->
+                        new RuntimeException("No alive brokers found for diskless partition assignment"));
     }
 }
