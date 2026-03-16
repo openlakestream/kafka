@@ -17,6 +17,8 @@
 package org.apache.kafka.server.ursa.integration;
 
 import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewPartitionReassignment;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.consumer.Consumer;
@@ -25,14 +27,19 @@ import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.TopicPartitionInfo;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.common.test.TestKitNodes;
+import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.metadata.BrokerState;
 import org.apache.kafka.server.config.ServerLogConfigs;
+import org.apache.kafka.server.metrics.KafkaYammerMetrics;
+import org.apache.kafka.storage.internals.log.LogMetricNames;
 import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.AfterAll;
@@ -55,12 +62,17 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
+
+import javax.management.ObjectName;
 
 import io.streamnative.oxia.testcontainers.OxiaContainer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -85,10 +97,30 @@ public class UrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETestBase {
     private static URI s3Endpoint;
     private static KafkaClusterTestKit cluster;
 
+    private static final class OwnerRemapCandidate {
+        private final int partition;
+        private final int oldOwnerBrokerId;
+        private final int newOwnerBrokerId;
+        private final int brokerToShutdown;
+        private final Uuid topicId;
+
+        private OwnerRemapCandidate(
+                int partition,
+                int oldOwnerBrokerId,
+                int newOwnerBrokerId,
+                int brokerToShutdown,
+                Uuid topicId
+        ) {
+            this.partition = partition;
+            this.oldOwnerBrokerId = oldOwnerBrokerId;
+            this.newOwnerBrokerId = newOwnerBrokerId;
+            this.brokerToShutdown = brokerToShutdown;
+            this.topicId = topicId;
+        }
+    }
+
     @BeforeAll
     static void startContainers() throws Exception {
-        assumeTrue(Boolean.parseBoolean(System.getProperty("runUrsaS3MultiBrokerE2E", "false")),
-                "Skipping multi-broker S3 Ursa E2E by default on 4.2 compatibility branch");
         oxiaContainer = new OxiaContainer(DockerImageName.parse("oxia/oxia:main"));
         oxiaContainer.start();
         log.info("Oxia container started at: {}", oxiaContainer.getServiceAddress());
@@ -223,6 +255,124 @@ public class UrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETestBase {
         return null;
     }
 
+    private boolean brokerHasManagedLedgerState(int brokerId, TopicIdPartition topicIdPartition) throws Exception {
+        Object ursaStorageState = cluster.brokers().get(brokerId)
+                .replicaManager()
+                .disklessStorageSupport()
+                .getUrsaState();
+        var snapshotMethod = ursaStorageState.getClass().getMethod("snapshotPartitionsWithLocalState");
+        Object snapshot = snapshotMethod.invoke(ursaStorageState);
+        if (snapshot instanceof Map<?, ?> managedLedgerMap) {
+            @SuppressWarnings("unchecked")
+            Map<TopicIdPartition, ?> managedLedgerCache = (Map<TopicIdPartition, ?>) managedLedgerMap;
+            return managedLedgerCache.containsKey(topicIdPartition);
+        } else if (snapshot instanceof java.util.Collection<?> partitions) {
+            return partitions.contains(topicIdPartition);
+        } else {
+            throw new IllegalStateException(
+                    "Unexpected snapshotPartitionsWithLocalState() return type: " + snapshot.getClass());
+        }
+    }
+
+    private void waitForBrokerManagedLedgerState(
+            int brokerId,
+            TopicIdPartition topicIdPartition,
+            boolean expected
+    ) throws InterruptedException {
+        String expectation = expected ? "create" : "cleanup";
+        TestUtils.waitForCondition(
+                () -> {
+                    try {
+                        return brokerHasManagedLedgerState(brokerId, topicIdPartition) == expected;
+                    } catch (Exception e) {
+                        return false;
+                    }
+                },
+                30_000L,
+                "Broker " + brokerId + " did not " + expectation + " managed ledger state for " + topicIdPartition);
+    }
+
+    private void waitForExclusiveManagedLedgerState(
+            List<Integer> brokerIds,
+            int expectedOwnerBrokerId,
+            TopicIdPartition topicIdPartition
+    ) throws InterruptedException {
+        TestUtils.waitForCondition(
+                () -> {
+                    try {
+                        for (int brokerId : brokerIds) {
+                            boolean expected = brokerId == expectedOwnerBrokerId;
+                            if (brokerHasManagedLedgerState(brokerId, topicIdPartition) != expected) {
+                                return false;
+                            }
+                        }
+                        return true;
+                    } catch (Exception e) {
+                        return false;
+                    }
+                },
+                30_000L,
+                "Expected only broker " + expectedOwnerBrokerId + " to retain managed ledger state for "
+                        + topicIdPartition + " across brokers " + brokerIds);
+    }
+
+    private void waitForDisklessLogMetrics(String topic, int partition, boolean expectedPresent) throws InterruptedException {
+        String expectation = expectedPresent ? "appear" : "be cleaned up";
+        TestUtils.waitForCondition(
+                () -> disklessLogMetricsPresent(topic, partition) == expectedPresent,
+                30_000L,
+                "Diskless log metrics for " + topic + "-" + partition + " did not " + expectation);
+    }
+
+    private boolean disklessLogMetricsPresent(String topic, int partition) {
+        return jmxGaugeLongValue(LogMetricNames.SIZE, topic, partition) != null
+                && jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, topic, partition) != null
+                && jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, topic, partition) != null;
+    }
+
+    private static Long jmxGaugeLongValue(String metricName, String topic, int partition) {
+        String partitionText = Integer.toString(partition);
+        for (var entry : KafkaYammerMetrics.defaultRegistry().allMetrics().entrySet()) {
+            var name = entry.getKey();
+            if (!"kafka.log".equals(name.getGroup()) || !"Log".equals(name.getType())) {
+                continue;
+            }
+
+            ObjectName objectName = parseObjectName(name.getMBeanName());
+            if (objectName == null || !isTargetMetric(objectName, metricName, topic, partitionText)) {
+                continue;
+            }
+
+            Object metric = entry.getValue();
+            if (metric instanceof com.yammer.metrics.core.Gauge<?> gauge) {
+                Object value = gauge.value();
+                if (value instanceof Number numberValue) {
+                    return numberValue.longValue();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static ObjectName parseObjectName(String mBeanName) {
+        try {
+            return new ObjectName(mBeanName);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static boolean isTargetMetric(
+            ObjectName objectName,
+            String metricName,
+            String topic,
+            String partitionText
+    ) {
+        return metricName.equals(objectName.getKeyProperty("name"))
+                && topic.equals(objectName.getKeyProperty("topic"))
+                && partitionText.equals(objectName.getKeyProperty("partition"));
+    }
+
     private String brokerBootstrap(int brokerId) {
         int port = cluster.brokers().get(brokerId)
                 .socketServer()
@@ -240,6 +390,50 @@ public class UrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETestBase {
         String result = String.join(",", brokerAddresses);
         log.info("Using surviving brokers: {}", result);
         return result;
+    }
+
+    private OwnerRemapCandidate findOwnerRemapCandidate(TopicDescription description) {
+        // Pick a partition and a non-owner broker to shut down such that the surviving-broker
+        // hash remaps ownership away from the still-alive old owner. This keeps the test focused
+        // on "liveness changed, old owner stayed up, and stale local state must be cleaned".
+        for (TopicPartitionInfo partitionInfo : description.partitions()) {
+            int oldOwnerBrokerId = partitionInfo.leader().id();
+            for (int brokerToShutdown = 0; brokerToShutdown < NUM_BROKERS; brokerToShutdown++) {
+                if (brokerToShutdown == oldOwnerBrokerId) {
+                    continue;
+                }
+
+                List<Node> survivingBrokers = new ArrayList<>();
+                for (int brokerId = 0; brokerId < NUM_BROKERS; brokerId++) {
+                    if (brokerId != brokerToShutdown) {
+                        survivingBrokers.add(new Node(brokerId, "host" + brokerId, 9092));
+                    }
+                }
+
+                int newOwnerBrokerId = selectOwnerBroker(description.topicId(), partitionInfo.partition(), survivingBrokers);
+                if (newOwnerBrokerId != oldOwnerBrokerId && newOwnerBrokerId != brokerToShutdown) {
+                    return new OwnerRemapCandidate(
+                            partitionInfo.partition(),
+                            oldOwnerBrokerId,
+                            newOwnerBrokerId,
+                            brokerToShutdown,
+                            description.topicId()
+                    );
+                }
+            }
+        }
+        return null;
+    }
+
+    private int selectOwnerBroker(Uuid topicId, int partition, List<Node> aliveBrokers) {
+        List<Integer> brokerIds = new ArrayList<>();
+        for (Node broker : aliveBrokers) {
+            brokerIds.add(broker.id());
+        }
+        Collections.sort(brokerIds);
+        byte[] input = (topicId + "-" + partition).getBytes(StandardCharsets.UTF_8);
+        int idx = Math.floorMod(Utils.murmur2(input), brokerIds.size());
+        return brokerIds.get(idx);
     }
 
     /**
@@ -417,14 +611,234 @@ public class UrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETestBase {
         }
 
         @Test
-        @DisplayName("Consume from any broker with diskless storage")
-        void testConsumeFromAnyBrokerWithDisklessStorage() throws Exception {
-            String topicName = uniqueTopicName("s3-multi-broker-cross-broker-consume-topic");
-            int numRecords = 30;
+        @DisplayName("Broker liveness owner remap cleans stale diskless state on the still-alive old owner")
+        void testBrokerLivenessOwnerRemapCleansOldOwnerState() throws Exception {
+            String topicName = uniqueTopicName("s3-owner-remap-cleanup-topic");
+            int numPartitions = 12;
+            int numRecords = 15;
+            OwnerRemapCandidate candidate;
+            TopicPartition topicPartition;
+            TopicIdPartition topicIdPartition;
+
+            try (Admin admin = Admin.create(cluster.clientProperties())) {
+                createDisklessTopicWithAdmin(admin, topicName, numPartitions, (short) 1);
+                for (int partition = 0; partition < numPartitions; partition++) {
+                    waitForPartitionLeadership(admin, topicName, partition, null);
+                }
+
+                TopicDescription description = admin.describeTopics(Collections.singleton(topicName))
+                        .allTopicNames()
+                        .get(60, TimeUnit.SECONDS)
+                        .get(topicName);
+                candidate = findOwnerRemapCandidate(description);
+                assertNotNull(candidate, "Expected a diskless partition whose owner remaps after a non-owner broker shutdown");
+                topicPartition = new TopicPartition(topicName, candidate.partition);
+                topicIdPartition = new TopicIdPartition(candidate.topicId, topicPartition);
+            }
+
+            produceRecords(cluster.bootstrapServers(), topicName, candidate.partition, numRecords);
+
+            waitForBrokerManagedLedgerState(candidate.oldOwnerBrokerId, topicIdPartition, true);
+            waitForBrokerManagedLedgerState(candidate.newOwnerBrokerId, topicIdPartition, false);
+
+            cluster.brokers().get(candidate.brokerToShutdown).shutdown();
+            cluster.brokers().get(candidate.brokerToShutdown).awaitShutdown();
+
+            try {
+                String survivingBootstrap = getSurvivingBrokersBootstrap(candidate.brokerToShutdown);
+                Properties adminProps = new Properties();
+                adminProps.putAll(cluster.clientProperties());
+                adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, survivingBootstrap);
+
+                try (Admin survivingAdmin = Admin.create(adminProps)) {
+                    waitForPartitionLeadership(
+                            survivingAdmin,
+                            topicName,
+                            candidate.partition,
+                            candidate.newOwnerBrokerId
+                    );
+                }
+
+                waitForBrokerManagedLedgerState(candidate.oldOwnerBrokerId, topicIdPartition, false);
+
+                consumeAndVerifyRecords(
+                        brokerBootstrap(candidate.newOwnerBrokerId),
+                        topicName,
+                        candidate.partition,
+                        numRecords
+                );
+                waitForBrokerManagedLedgerState(candidate.newOwnerBrokerId, topicIdPartition, true);
+            } finally {
+                cluster.brokers().get(candidate.brokerToShutdown).startup();
+                cluster.waitForReadyBrokers();
+                waitForAllBrokersRunning();
+            }
+        }
+
+        @Test
+        @DisplayName("Restarted former owner only regains diskless state after it becomes owner again")
+        void testRestartedFormerOwnerHasExclusiveStateOnlyWhenItBecomesOwnerAgain() throws Exception {
+            String topicName = uniqueTopicName("s3-owner-restart-exclusive-state-topic");
+            TopicPartition topicPartition = new TopicPartition(topicName, 0);
+            int numRecords = 15;
+            TopicIdPartition topicIdPartition;
+            int originalOwnerBrokerId;
+
+            List<Integer> allBrokerIds = new ArrayList<>();
+            for (int brokerId = 0; brokerId < NUM_BROKERS; brokerId++) {
+                allBrokerIds.add(brokerId);
+            }
 
             try (Admin admin = Admin.create(cluster.clientProperties())) {
                 createDisklessTopicWithAdmin(admin, topicName, 1, (short) 1);
                 waitForPartitionLeadership(admin, topicName, 0, null);
+
+                TopicDescription description = admin.describeTopics(Collections.singleton(topicName))
+                        .allTopicNames()
+                        .get(60, TimeUnit.SECONDS)
+                        .get(topicName);
+                topicIdPartition = new TopicIdPartition(description.topicId(), topicPartition);
+                originalOwnerBrokerId = leaderId(admin, topicName, 0);
+            }
+
+            produceRecords(cluster.bootstrapServers(), topicName, 0, numRecords);
+            waitForExclusiveManagedLedgerState(allBrokerIds, originalOwnerBrokerId, topicIdPartition);
+            waitForDisklessLogMetrics(topicName, 0, true);
+
+            cluster.brokers().get(originalOwnerBrokerId).shutdown();
+            cluster.brokers().get(originalOwnerBrokerId).awaitShutdown();
+
+            try {
+                List<Integer> survivingBrokerIds = new ArrayList<>(allBrokerIds);
+                survivingBrokerIds.remove(Integer.valueOf(originalOwnerBrokerId));
+
+                String survivingBootstrap = getSurvivingBrokersBootstrap(originalOwnerBrokerId);
+                int failoverOwnerBrokerId;
+                Properties adminProps = new Properties();
+                adminProps.putAll(cluster.clientProperties());
+                adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, survivingBootstrap);
+
+                try (Admin survivingAdmin = Admin.create(adminProps)) {
+                    waitForPartitionLeadership(survivingAdmin, topicName, 0, null);
+                    failoverOwnerBrokerId = leaderId(survivingAdmin, topicName, 0);
+                }
+
+                assertNotEquals(originalOwnerBrokerId, failoverOwnerBrokerId,
+                        "Ownership should move away from the shut down broker");
+
+                waitForDisklessLogMetrics(topicName, 0, false);
+                consumeAndVerifyRecords(brokerBootstrap(failoverOwnerBrokerId), topicName, 0, numRecords);
+                waitForExclusiveManagedLedgerState(survivingBrokerIds, failoverOwnerBrokerId, topicIdPartition);
+                waitForDisklessLogMetrics(topicName, 0, true);
+
+                cluster.brokers().get(originalOwnerBrokerId).startup();
+                cluster.waitForReadyBrokers();
+                waitForAllBrokersRunning();
+
+                try (Admin admin = Admin.create(cluster.clientProperties())) {
+                    waitForPartitionLeadership(admin, topicName, 0, originalOwnerBrokerId);
+                }
+
+                waitForDisklessLogMetrics(topicName, 0, false);
+                consumeAndVerifyRecords(brokerBootstrap(originalOwnerBrokerId), topicName, 0, numRecords);
+                waitForExclusiveManagedLedgerState(allBrokerIds, originalOwnerBrokerId, topicIdPartition);
+                waitForDisklessLogMetrics(topicName, 0, true);
+            } finally {
+                if (cluster.brokers().get(originalOwnerBrokerId).brokerState() != BrokerState.RUNNING) {
+                    cluster.brokers().get(originalOwnerBrokerId).startup();
+                    cluster.waitForReadyBrokers();
+                    waitForAllBrokersRunning();
+                }
+            }
+        }
+
+        @Test
+        @DisplayName("Partition reassignment follower transition cleans stale diskless managed ledger state on the added broker")
+        void testPartitionReassignmentFollowerTransitionDoesNotRetainUnexpectedDisklessState() throws Exception {
+            String topicName = uniqueTopicName("s3-reassignment-metrics-topic");
+            TopicPartition topicPartition = new TopicPartition(topicName, 0);
+            int recordsBeforeReassignment = 12;
+            int recordsAfterReassignment = 8;
+
+            int originalLeader;
+            int targetLeader;
+            TopicIdPartition topicIdPartition;
+            try (Admin admin = Admin.create(cluster.clientProperties())) {
+                createDisklessTopicWithAdmin(admin, topicName, 1, (short) 1);
+                waitForPartitionLeadership(admin, topicName, 0, null);
+
+                TopicDescription description = admin.describeTopics(Collections.singleton(topicName))
+                        .allTopicNames()
+                        .get(60, TimeUnit.SECONDS)
+                        .get(topicName);
+                topicIdPartition = new TopicIdPartition(description.topicId(), topicPartition);
+                originalLeader = leaderId(admin, topicName, 0);
+            }
+
+            produceRecords(cluster.bootstrapServers(), topicName, 0, recordsBeforeReassignment);
+
+            targetLeader = (originalLeader + 1) % NUM_BROKERS;
+            waitForBrokerManagedLedgerState(originalLeader, topicIdPartition, true);
+            waitForBrokerManagedLedgerState(targetLeader, topicIdPartition, false);
+
+            Object ursaStorageState = cluster.brokers().get(targetLeader)
+                    .replicaManager()
+                    .disklessStorageSupport()
+                    .getUrsaState();
+            Object managedLedgerFuture = ursaStorageState.getClass()
+                    .getMethod("getOrCreateManagedLedger", TopicIdPartition.class)
+                    .invoke(ursaStorageState, topicIdPartition);
+            ((java.util.concurrent.CompletableFuture<?>) managedLedgerFuture)
+                    .get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            waitForBrokerManagedLedgerState(targetLeader, topicIdPartition, true);
+
+            try (Admin admin = Admin.create(cluster.clientProperties())) {
+                admin.alterPartitionReassignments(Map.of(
+                        topicPartition,
+                        Optional.of(new NewPartitionReassignment(List.of(targetLeader)))
+                )).all().get(60, TimeUnit.SECONDS);
+            }
+
+            waitForBrokerManagedLedgerState(targetLeader, topicIdPartition, false);
+
+            produceRecords(cluster.bootstrapServers(), topicName, 0, recordsAfterReassignment);
+
+            long expectedLogEndOffset = recordsBeforeReassignment + recordsAfterReassignment;
+
+            try (Consumer<byte[], byte[]> consumer = createConsumer(cluster.bootstrapServers())) {
+                consumer.assign(Collections.singletonList(topicPartition));
+                consumer.seekToBeginning(Collections.singletonList(topicPartition));
+
+                List<ConsumerRecord<byte[], byte[]>> records = consumeRecords(
+                        consumer,
+                        (int) expectedLogEndOffset,
+                        Duration.ofSeconds(90));
+                assertEquals(expectedLogEndOffset, records.size(),
+                        "Should consume all records across the reassignment boundary");
+            }
+        }
+
+        @Test
+        @DisplayName("Bootstrapping diskless fetch through a non-owner broker does not retain local state on the non-owner")
+        void testDisklessFetchViaNonOwnerBootstrapDoesNotRetainStateOnNonOwner() throws Exception {
+            String topicName = uniqueTopicName("s3-multi-broker-non-owner-bootstrap-topic");
+            int numRecords = 30;
+            TopicPartition topicPartition = new TopicPartition(topicName, 0);
+            TopicIdPartition topicIdPartition;
+            int leaderId;
+            int nonOwnerBrokerId;
+
+            try (Admin admin = Admin.create(cluster.clientProperties())) {
+                createDisklessTopicWithAdmin(admin, topicName, 1, (short) 1);
+                waitForPartitionLeadership(admin, topicName, 0, null);
+
+                TopicDescription description = admin.describeTopics(Collections.singleton(topicName))
+                        .allTopicNames()
+                        .get(60, TimeUnit.SECONDS)
+                        .get(topicName);
+                topicIdPartition = new TopicIdPartition(description.topicId(), topicPartition);
+                leaderId = leaderId(admin, topicName, 0);
+                nonOwnerBrokerId = (leaderId + 1) % NUM_BROKERS;
             }
 
             try (Producer<byte[], byte[]> producer = createMultiBrokerProducer(cluster.bootstrapServers())) {
@@ -438,32 +852,27 @@ public class UrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETestBase {
                 producer.flush();
             }
 
-            int leaderId;
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
-                leaderId = leaderId(admin, topicName, 0);
-            }
+            waitForBrokerManagedLedgerState(leaderId, topicIdPartition, true);
+            assertFalse(brokerHasManagedLedgerState(nonOwnerBrokerId, topicIdPartition),
+                    "Non-owner broker should not retain managed ledger state before fetch");
 
-            for (int brokerId = 0; brokerId < NUM_BROKERS; brokerId++) {
-                String brokerBootstrapServer = brokerBootstrap(brokerId);
-                String brokerRole = (brokerId == leaderId) ? "leader" : "non-leader";
-                log.info("Testing consumption from {} broker {} using {}", brokerRole, brokerId, brokerBootstrapServer);
+            String nonOwnerBootstrapServer = brokerBootstrap(nonOwnerBrokerId);
+            try (Consumer<byte[], byte[]> consumer = createConsumer(nonOwnerBootstrapServer)) {
+                consumer.assign(Collections.singletonList(topicPartition));
+                consumer.seekToBeginning(Collections.singletonList(topicPartition));
 
-                try (Consumer<byte[], byte[]> consumer = createConsumer(brokerBootstrapServer)) {
-                    TopicPartition tp = new TopicPartition(topicName, 0);
-                    consumer.assign(Collections.singletonList(tp));
-                    consumer.seekToBeginning(Collections.singletonList(tp));
+                List<ConsumerRecord<byte[], byte[]>> records = consumeRecords(consumer, numRecords, Duration.ofSeconds(90));
+                assertEquals(numRecords, records.size(),
+                        "Should consume all records when bootstrapping through non-owner broker " + nonOwnerBrokerId);
 
-                    List<ConsumerRecord<byte[], byte[]>> records = consumeRecords(consumer, numRecords, Duration.ofSeconds(90));
-                    assertEquals(numRecords, records.size(),
-                            "Should consume all records from " + brokerRole + " broker " + brokerId);
-
-                    for (int i = 0; i < records.size(); i++) {
-                        assertEquals("key-" + i, new String(records.get(i).key(), StandardCharsets.UTF_8));
-                        assertEquals("value-" + i, new String(records.get(i).value(), StandardCharsets.UTF_8));
-                    }
-                    log.info("Successfully consumed {} records from {} broker {}", numRecords, brokerRole, brokerId);
+                for (int i = 0; i < records.size(); i++) {
+                    assertEquals("key-" + i, new String(records.get(i).key(), StandardCharsets.UTF_8));
+                    assertEquals("value-" + i, new String(records.get(i).value(), StandardCharsets.UTF_8));
                 }
             }
+
+            assertFalse(brokerHasManagedLedgerState(nonOwnerBrokerId, topicIdPartition),
+                    "Non-owner broker should still have no managed ledger state after fetch bootstrap redirect");
         }
     }
 

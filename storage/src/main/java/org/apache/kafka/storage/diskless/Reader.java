@@ -22,7 +22,9 @@ import org.apache.kafka.server.storage.log.FetchParams;
 import org.apache.kafka.server.storage.log.FetchPartitionData;
 
 import java.io.Closeable;
+import java.util.Collections;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 public interface Reader extends Closeable {
@@ -55,4 +57,11 @@ public interface Reader extends Closeable {
      * @param tp the topic partition to clean up
      */
     void cleanupPartition(TopicIdPartition tp);
+
+    /**
+     * Returns partitions for which this reader currently retains local state.
+     */
+    default Set<TopicIdPartition> snapshotPartitionsWithLocalState() {
+        return Collections.emptySet();
+    }
 }

@@ -16,7 +16,11 @@
  */
 package org.apache.kafka.storage.diskless;
 
+import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicIdPartition;
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.network.ListenerName;
+import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse;
@@ -27,6 +31,7 @@ import org.apache.kafka.storage.diskless.handlers.UrsaManagedLedgerReader;
 import org.apache.kafka.storage.diskless.handlers.UrsaManagedLedgerWriter;
 import org.apache.kafka.storage.diskless.handlers.UrsaStorageConfig;
 import org.apache.kafka.storage.diskless.handlers.UrsaStorageState;
+import org.apache.kafka.storage.internals.log.UnifiedLog;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
 import org.slf4j.Logger;
@@ -34,9 +39,19 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.OptionalLong;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -50,6 +65,8 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
 
     private final DisklessStorageMetadataView metadataView;
     private final boolean enabled;
+    private final int brokerId;
+    private final DisklessBrokerSelector brokerSelector;
 
     private final Writer writer;
     private final Reader reader;
@@ -60,6 +77,8 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
      */
     public DisklessStorageReplicaManagerSupport() {
         this.metadataView = DisklessStorageMetadataView.DISABLED;
+        this.brokerId = -1;
+        this.brokerSelector = new DisklessBrokerSelector(ln -> Collections.emptyList(), new ListenerName("DISABLED"));
         this.writer = null;
         this.reader = null;
         this.ursaState = null;
@@ -75,6 +94,9 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
      * @param brokerTopicStats   the broker topic stats
      * @param logConfigDefaults  default log configuration values
      * @param topicConfigSupplier function to get topic configuration
+     * @param topicIdSupplier function to get topic ID
+     * @param aliveBrokerNodesSupplier function to get alive brokers for a listener
+     * @param ownerSelectionListener listener used for canonical diskless owner selection
      */
     public DisklessStorageReplicaManagerSupport(
             Time time,
@@ -82,11 +104,16 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
             UrsaStorageConfig ursaConfig,
             BrokerTopicStats brokerTopicStats,
             Map<String, Object> logConfigDefaults,
-            Function<String, Map<String, String>> topicConfigSupplier) {
+            Function<String, Map<String, String>> topicConfigSupplier,
+            Function<String, Uuid> topicIdSupplier,
+            Function<ListenerName, Iterable<Node>> aliveBrokerNodesSupplier,
+            ListenerName ownerSelectionListener) {
 
         if (ursaConfig == null || !ursaConfig.isEnabled()) {
             log.info("Ursa storage is disabled. Diskless storage will not be used.");
             this.metadataView = DisklessStorageMetadataView.DISABLED;
+            this.brokerId = brokerId;
+            this.brokerSelector = new DisklessBrokerSelector(ln -> Collections.emptyList(), ownerSelectionListener);
             this.writer = null;
             this.reader = null;
             this.ursaState = null;
@@ -94,7 +121,14 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
             return;
         }
 
-        this.metadataView = new MetadataCacheDisklessStorageView(topicConfigSupplier, true);
+        this.metadataView = new MetadataCacheDisklessStorageView(
+                topicConfigSupplier,
+                aliveBrokerNodesSupplier,
+                topicIdSupplier,
+                true
+        );
+        this.brokerId = brokerId;
+        this.brokerSelector = new DisklessBrokerSelector(aliveBrokerNodesSupplier, ownerSelectionListener);
         this.enabled = true;
 
         this.ursaState = new UrsaStorageState(
@@ -112,6 +146,23 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
                 ursaConfig.getPulsarOxiaServiceUrl(), ursaConfig.getUrsaOxiaServiceUrl());
     }
 
+    // Visible for testing.
+    DisklessStorageReplicaManagerSupport(
+            DisklessStorageMetadataView metadataView,
+            int brokerId,
+            DisklessBrokerSelector brokerSelector,
+            Writer writer,
+            Reader reader,
+            UrsaStorageState ursaState) {
+        this.metadataView = Objects.requireNonNull(metadataView, "metadataView cannot be null");
+        this.brokerId = brokerId;
+        this.brokerSelector = Objects.requireNonNull(brokerSelector, "brokerSelector cannot be null");
+        this.writer = writer;
+        this.reader = reader;
+        this.ursaState = ursaState;
+        this.enabled = true;
+    }
+
     /**
      * Returns whether diskless storage is enabled.
      */
@@ -124,6 +175,57 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
      */
     public boolean isDisklessStorageTopic(String topic) {
         return metadataView.isDisklessStorageTopic(topic);
+    }
+
+    public boolean isCurrentDisklessOwner(TopicIdPartition topicIdPartition) {
+        if (!enabled || topicIdPartition == null) {
+            return false;
+        }
+
+        OptionalInt selected = brokerSelector.selectBroker(topicIdPartition.topicId(), topicIdPartition.partition());
+        return selected.isPresent() && selected.getAsInt() == brokerId;
+    }
+
+    public boolean hasTrackedPartitionsForTopic(String topic) {
+        for (TopicIdPartition trackedPartition : partitionsNeedingReconcile()) {
+            if (trackedPartition.topic().equals(topic)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public Set<String> trackedTopicNames() {
+        Set<String> topics = new LinkedHashSet<>();
+        for (TopicIdPartition trackedPartition : partitionsNeedingReconcile()) {
+            topics.add(trackedPartition.topic());
+        }
+        return topics;
+    }
+
+    public Set<TopicIdPartition> snapshotTrackedPartitions() {
+        return Set.copyOf(partitionsNeedingReconcile());
+    }
+
+    public void reconcileTrackedPartitions(Set<Uuid> deletedTopicIds, Consumer<String> onTopicMaybeEmptied) {
+        Set<TopicIdPartition> partitionsToCheck = partitionsNeedingReconcile();
+        if (!enabled || partitionsToCheck.isEmpty()) {
+            return;
+        }
+
+        Set<Uuid> deletedTopics = deletedTopicIds != null ? deletedTopicIds : Collections.emptySet();
+        Consumer<String> topicMaybeEmptied = onTopicMaybeEmptied != null ? onTopicMaybeEmptied : ignored -> { };
+
+        for (TopicIdPartition trackedPartition : partitionsToCheck) {
+            boolean deletePartition = deletedTopics.contains(trackedPartition.topicId());
+            if (!shouldCleanupTrackedPartition(trackedPartition, deletePartition)) {
+                continue;
+            }
+
+            if (cleanupPartitionInternal(trackedPartition, deletePartition)) {
+                topicMaybeEmptied.accept(trackedPartition.topic());
+            }
+        }
     }
 
     /**
@@ -173,6 +275,49 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
      */
     public CompletableFuture<Map<TopicIdPartition, PartitionResponse>> handleAppend(
             Map<TopicIdPartition, MemoryRecords> entries) {
+        return handleWithOwnership(
+                entries,
+                "append",
+                this::handleOwnedAppend,
+                (ignored, response) -> response,
+                tp -> new PartitionResponse(Errors.NOT_LEADER_OR_FOLLOWER),
+                tp -> new PartitionResponse(Errors.UNKNOWN_SERVER_ERROR)
+        );
+    }
+
+    /**
+     * Handles fetch requests for diskless storage topics.
+     */
+    public CompletableFuture<Map<TopicIdPartition, FetchPartitionData>> handleFetch(
+            FetchParams params,
+            Map<TopicIdPartition, FetchRequest.PartitionData> fetchInfos) {
+        return handleWithOwnership(
+                fetchInfos,
+                "fetch",
+                ownedFetchInfos -> handleOwnedFetch(params, ownedFetchInfos),
+                (ignored, response) -> response,
+                ignored -> notLeaderFetchPartitionData(),
+                ignored -> unknownErrorFetchPartitionData()
+        );
+    }
+
+    /**
+     * Handles listOffsets requests for diskless storage topics.
+     */
+    public CompletableFuture<Map<TopicIdPartition, ListOffsetsPartitionResponse>> handleListOffsets(
+            Map<TopicIdPartition, ListOffsetsPartitionRequest> requests) {
+        return handleWithOwnership(
+                requests,
+                "listOffsets",
+                this::handleOwnedListOffsets,
+                (ignored, response) -> response,
+                tp -> ListOffsetsPartitionResponse.error(tp, Errors.NOT_LEADER_OR_FOLLOWER),
+                tp -> ListOffsetsPartitionResponse.error(tp, Errors.UNKNOWN_SERVER_ERROR)
+        );
+    }
+
+    private CompletableFuture<Map<TopicIdPartition, PartitionResponse>> handleOwnedAppend(
+            Map<TopicIdPartition, MemoryRecords> entries) {
 
         if (!enabled || writer == null) {
             return CompletableFuture.completedFuture(Map.of());
@@ -181,10 +326,7 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         return writer.write(entries);
     }
 
-    /**
-     * Handles fetch requests for diskless storage topics.
-     */
-    public CompletableFuture<Map<TopicIdPartition, FetchPartitionData>> handleFetch(
+    private CompletableFuture<Map<TopicIdPartition, FetchPartitionData>> handleOwnedFetch(
             FetchParams params,
             Map<TopicIdPartition, FetchRequest.PartitionData> fetchInfos) {
 
@@ -195,10 +337,7 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         return reader.fetch(params, fetchInfos);
     }
 
-    /**
-     * Handles listOffsets requests for diskless storage topics.
-     */
-    public CompletableFuture<Map<TopicIdPartition, ListOffsetsPartitionResponse>> handleListOffsets(
+    private CompletableFuture<Map<TopicIdPartition, ListOffsetsPartitionResponse>> handleOwnedListOffsets(
             Map<TopicIdPartition, ListOffsetsPartitionRequest> requests) {
 
         if (!enabled || reader == null) {
@@ -208,39 +347,129 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         return reader.listOffsets(requests);
     }
 
-    /**
-     * Best-effort cleanup for a topic-partition which is being deleted or removed from this broker.
-     *
-     * <p>This is used to prevent unbounded growth of in-memory caches such as managed ledger handles,
-     * cursor pools, and producer state.
-     */
-    public void cleanupPartition(TopicIdPartition tp) {
-        cleanupPartition(tp, false);
-    }
-
-    /**
-     * Best-effort cleanup for a topic-partition which is being deleted or removed from this broker.
-     *
-     * @param deletePartition whether the partition is permanently deleted (for example, topic deletion). When true,
-     *                        this will also attempt to delete any persisted producer-state snapshot.
-     */
-    public void cleanupPartition(TopicIdPartition tp, boolean deletePartition) {
+    private boolean cleanupPartitionInternal(TopicIdPartition tp, boolean deletePartition) {
         if (!enabled || tp == null) {
-            return;
+            return true;
         }
 
-        try {
+        boolean cleanupSucceeded = cleanupStep("writer", tp, () -> {
             if (writer != null) {
                 writer.cleanupPartition(tp);
             }
+        });
+        cleanupSucceeded = cleanupStep("reader", tp, () -> {
             if (reader != null) {
                 reader.cleanupPartition(tp);
             }
+        }) && cleanupSucceeded;
+        cleanupSucceeded = cleanupStep("storage", tp, () -> {
             if (ursaState != null) {
                 ursaState.cleanupPartition(tp, deletePartition);
             }
+        }) && cleanupSucceeded;
+        return cleanupSucceeded;
+    }
+
+    private <V, O, R> CompletableFuture<Map<TopicIdPartition, R>> handleWithOwnership(
+            Map<TopicIdPartition, V> entries,
+            String operationName,
+            Function<Map<TopicIdPartition, V>, CompletableFuture<Map<TopicIdPartition, O>>> ownedHandler,
+            BiFunction<TopicIdPartition, O, R> successResponseFactory,
+            Function<TopicIdPartition, R> redirectedResponseFactory,
+            Function<TopicIdPartition, R> errorResponseFactory) {
+        if (!enabled || entries == null || entries.isEmpty()) {
+            return CompletableFuture.completedFuture(Map.of());
+        }
+
+        OwnershipRouting<V, R> routing = routeByOwnership(entries, redirectedResponseFactory);
+        if (routing.ownedEntries.isEmpty()) {
+            return CompletableFuture.completedFuture(routing.redirectedResponses);
+        }
+
+        try {
+            CompletableFuture<Map<TopicIdPartition, O>> ownedFuture = ownedHandler.apply(routing.ownedEntries);
+            if (ownedFuture == null) {
+                return CompletableFuture.completedFuture(buildOrderedResponses(
+                        entries.keySet(),
+                        Map.of(),
+                        successResponseFactory,
+                        routing.redirectedResponses,
+                        errorResponseFactory
+                ));
+            }
+
+            return ownedFuture.handle((ownedResponses, error) -> {
+                if (error != null) {
+                    log.error("Diskless storage {} future failed", operationName, error);
+                }
+                Map<TopicIdPartition, O> safeOwnedResponses =
+                        error == null && ownedResponses != null ? ownedResponses : Map.of();
+                return buildOrderedResponses(
+                        entries.keySet(),
+                        safeOwnedResponses,
+                        successResponseFactory,
+                        routing.redirectedResponses,
+                        errorResponseFactory
+                );
+            });
         } catch (Throwable t) {
-            log.warn("Failed to cleanup diskless storage state for partition {}", tp, t);
+            log.error("Diskless storage {} setup failed", operationName, t);
+            return CompletableFuture.completedFuture(buildOrderedResponses(
+                    entries.keySet(),
+                    Map.of(),
+                    successResponseFactory,
+                    routing.redirectedResponses,
+                    errorResponseFactory
+            ));
+        }
+    }
+
+    private <V, R> OwnershipRouting<V, R> routeByOwnership(
+            Map<TopicIdPartition, V> entries,
+            Function<TopicIdPartition, R> redirectedResponseFactory) {
+        Map<TopicIdPartition, V> ownedEntries = new LinkedHashMap<>();
+        Map<TopicIdPartition, R> redirectedResponses = new LinkedHashMap<>();
+
+        for (Map.Entry<TopicIdPartition, V> entry : entries.entrySet()) {
+            if (isCurrentDisklessOwner(entry.getKey())) {
+                ownedEntries.put(entry.getKey(), entry.getValue());
+            } else {
+                redirectedResponses.put(entry.getKey(), redirectedResponseFactory.apply(entry.getKey()));
+            }
+        }
+
+        return new OwnershipRouting<>(ownedEntries, redirectedResponses);
+    }
+
+    private <O, R> Map<TopicIdPartition, R> buildOrderedResponses(
+            Collection<TopicIdPartition> requestOrder,
+            Map<TopicIdPartition, O> ownedResponses,
+            BiFunction<TopicIdPartition, O, R> successResponseFactory,
+            Map<TopicIdPartition, R> redirectedResponses,
+            Function<TopicIdPartition, R> errorResponseFactory) {
+        Map<TopicIdPartition, R> orderedResponses = new LinkedHashMap<>();
+        for (TopicIdPartition topicIdPartition : requestOrder) {
+            if (redirectedResponses.containsKey(topicIdPartition)) {
+                orderedResponses.put(topicIdPartition, redirectedResponses.get(topicIdPartition));
+            } else {
+                O ownedResponse = ownedResponses.get(topicIdPartition);
+                if (ownedResponse != null) {
+                    orderedResponses.put(topicIdPartition, successResponseFactory.apply(topicIdPartition, ownedResponse));
+                } else {
+                    orderedResponses.put(topicIdPartition, errorResponseFactory.apply(topicIdPartition));
+                }
+            }
+        }
+        return orderedResponses;
+    }
+
+    private boolean cleanupStep(String component, TopicIdPartition tp, Runnable action) {
+        try {
+            action.run();
+            return true;
+        } catch (Throwable t) {
+            log.warn("Failed to cleanup diskless {} state for partition {}", component, tp, t);
+            return false;
         }
     }
 
@@ -262,6 +491,73 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         }
     }
 
+    private Set<TopicIdPartition> partitionsNeedingReconcile() {
+        Set<TopicIdPartition> partitions = new LinkedHashSet<>();
+        if (writer != null) {
+            Set<TopicIdPartition> writerPartitions = writer.snapshotPartitionsWithLocalState();
+            if (writerPartitions != null) {
+                partitions.addAll(writerPartitions);
+            }
+        }
+        if (reader != null) {
+            Set<TopicIdPartition> readerPartitions = reader.snapshotPartitionsWithLocalState();
+            if (readerPartitions != null) {
+                partitions.addAll(readerPartitions);
+            }
+        }
+        if (ursaState != null) {
+            partitions.addAll(ursaState.snapshotPartitionsWithLocalState());
+        }
+        return partitions;
+    }
+
+    private boolean shouldCleanupTrackedPartition(TopicIdPartition trackedPartition, boolean deletePartition) {
+        if (deletePartition) {
+            return true;
+        }
+
+        // Compare against the current metadata topic ID instead of the tracked one so we
+        // can cleanup stale local state after topic deletion or same-name topic recreation.
+        Uuid currentTopicId = metadataView.getTopicId(trackedPartition.topic());
+        if (currentTopicId == null || Uuid.ZERO_UUID.equals(currentTopicId) || !currentTopicId.equals(trackedPartition.topicId())) {
+            return true;
+        }
+
+        if (!metadataView.isDisklessStorageTopic(trackedPartition.topic())) {
+            return true;
+        }
+
+        return !isCurrentDisklessOwner(trackedPartition);
+    }
+
+    private FetchPartitionData notLeaderFetchPartitionData() {
+        return new FetchPartitionData(
+                Errors.NOT_LEADER_OR_FOLLOWER,
+                UnifiedLog.UNKNOWN_OFFSET,
+                UnifiedLog.UNKNOWN_OFFSET,
+                MemoryRecords.EMPTY,
+                Optional.empty(),
+                OptionalLong.empty(),
+                Optional.empty(),
+                OptionalInt.empty(),
+                false
+        );
+    }
+
+    private FetchPartitionData unknownErrorFetchPartitionData() {
+        return new FetchPartitionData(
+                Errors.UNKNOWN_SERVER_ERROR,
+                0,
+                0,
+                MemoryRecords.EMPTY,
+                Optional.empty(),
+                OptionalLong.empty(),
+                Optional.empty(),
+                OptionalInt.empty(),
+                false
+        );
+    }
+
     /**
      * Holder for partitioned entries.
      */
@@ -280,6 +576,19 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
 
         public Map<K, V> classic() {
             return classic;
+        }
+    }
+
+    private static class OwnershipRouting<V, R> {
+        private final Map<TopicIdPartition, V> ownedEntries;
+        private final Map<TopicIdPartition, R> redirectedResponses;
+
+        private OwnershipRouting(
+                Map<TopicIdPartition, V> ownedEntries,
+                Map<TopicIdPartition, R> redirectedResponses
+        ) {
+            this.ownedEntries = ownedEntries;
+            this.redirectedResponses = redirectedResponses;
         }
     }
 }

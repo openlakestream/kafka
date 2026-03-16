@@ -45,11 +45,13 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.AbstractMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -715,6 +717,11 @@ public class UrsaManagedLedgerReader implements Reader {
                 log.warn("Failed to close fetch cursor pool for partition {}", tp, e);
             }
         }
+    }
+
+    @Override
+    public Set<TopicIdPartition> snapshotPartitionsWithLocalState() {
+        return new LinkedHashSet<>(fetchCursorPools.keySet());
     }
 
     private static String fetchCursorNamePrefix(TopicIdPartition tp) {

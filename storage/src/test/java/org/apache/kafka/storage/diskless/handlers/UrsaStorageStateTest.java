@@ -40,6 +40,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -208,6 +209,73 @@ class UrsaStorageStateTest {
             assertNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
             assertNull(jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
             assertNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
+        }
+    }
+
+    @Test
+    void testCleanupPartitionSuppressesMetricRegistrationForInFlightManagedLedgerOpen() throws Exception {
+        TopicIdPartition tp = new TopicIdPartition(
+                Uuid.randomUuid(),
+                new TopicPartition("metric-cleanup-race-topic-" + Uuid.randomUuid(), 0)
+        );
+
+        ProducerStateManager producerStateManager = mock(ProducerStateManager.class);
+        when(producerStateManager.cleanup(false)).thenReturn(CompletableFuture.completedFuture(null));
+
+        ManagedLedgerFactory managedLedgerFactory = mock(ManagedLedgerFactory.class);
+        ManagedLedger firstLedger = mock(ManagedLedger.class);
+        ManagedLedger secondLedger = mock(ManagedLedger.class);
+        CountDownLatch firstCloseLatch = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            firstCloseLatch.countDown();
+            return null;
+        }).when(firstLedger).close();
+        when(secondLedger.getTotalSize()).thenReturn(222L);
+
+        AtomicInteger openCount = new AtomicInteger(0);
+        AtomicReference<AsyncCallbacks.OpenLedgerCallback> firstOpenCallback = new AtomicReference<>();
+        doAnswer(invocation -> {
+            AsyncCallbacks.OpenLedgerCallback callback = invocation.getArgument(2);
+            if (openCount.getAndIncrement() == 0) {
+                firstOpenCallback.set(callback);
+            } else {
+                callback.openLedgerComplete(secondLedger, invocation.getArgument(3));
+            }
+            return null;
+        }).when(managedLedgerFactory).asyncOpen(
+                anyString(),
+                any(ManagedLedgerConfig.class),
+                any(AsyncCallbacks.OpenLedgerCallback.class),
+                any(),
+                any()
+        );
+
+        try (UrsaStorageState state = new UrsaStorageState(
+                Time.SYSTEM,
+                1,
+                mock(UrsaStorageConfig.class),
+                mock(BrokerTopicStats.class),
+                managedLedgerFactory,
+                ignored -> producerStateManager)) {
+            CompletableFuture<ManagedLedger> firstOpenFuture = state.getOrCreateManagedLedger(tp);
+
+            assertTrue(state.cleanupPartition(tp, false));
+            assertNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
+            assertNull(jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
+            assertNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
+
+            firstOpenCallback.get().openLedgerComplete(firstLedger, null);
+            firstOpenFuture.get(5, TimeUnit.SECONDS);
+
+            assertTrue(firstCloseLatch.await(5, TimeUnit.SECONDS));
+            assertNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
+            assertNull(jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
+            assertNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
+
+            state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
+
+            verify(managedLedgerFactory, times(2)).asyncOpen(anyString(), any(), any(), any(), any());
+            assertEquals(222L, jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
         }
     }
 

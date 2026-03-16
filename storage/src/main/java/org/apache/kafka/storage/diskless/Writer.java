@@ -21,7 +21,9 @@ import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.requests.ProduceResponse;
 
 import java.io.Closeable;
+import java.util.Collections;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 public interface Writer extends Closeable {
@@ -40,4 +42,11 @@ public interface Writer extends Closeable {
      * @param tp the topic partition to clean up
      */
     void cleanupPartition(TopicIdPartition tp);
+
+    /**
+     * Returns partitions for which this writer currently retains local state.
+     */
+    default Set<TopicIdPartition> snapshotPartitionsWithLocalState() {
+        return Collections.emptySet();
+    }
 }
