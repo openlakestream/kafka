@@ -45,7 +45,7 @@ This model tightly couples brokers to their local storage, making failover expen
 Ursa is StreamNative's distributed storage engine designed for streaming workloads:
 - **Stream-based API**: Data is organized as streams with append-only semantics
 - **Built-in Replication**: Ursa handles durability internally, eliminating the need for Kafka-level ISR
-- **Backend Flexibility**: Supports LOCAL, S3, and Azure Blob storage backends
+- **Backend Flexibility**: Supports LOCAL, S3, GCS, and Azure Blob storage backends
 - **High Throughput**: Optimized for streaming append and sequential read patterns
 
 ### Oxia
@@ -88,7 +88,7 @@ Apache Kafka's KIP-405 introduced tiered storage, where older log segments are m
 
 3. **Idempotent Producer Support**: Maintain exactly-once semantics by persisting producer state in Oxia instead of local files.
 
-4. **Multiple Backend Support**: Support LOCAL, S3, and Azure Blob storage backends for Ursa.
+4. **Multiple Backend Support**: Support LOCAL, S3, GCS, and Azure Blob storage backends for Ursa.
 
 5. **Async I/O Model**: Implement fully asynchronous storage operations to avoid blocking request handler threads.
 
@@ -151,7 +151,7 @@ In this SNIP, diskless topics are handled by the ManagedLedger-based implementat
                    ▼                    ▼
           ┌─────────────────────────────────────┐
           │          Storage Backend            │
-          │   (LOCAL / S3 / Azure Blob)         │
+          │ (LOCAL / S3 / GCS / Azure Blob)     │
           └─────────────────────────────────────┘
                             │
                             ▼
@@ -435,9 +435,9 @@ No protocol changes required.
 | `ursa.storage.oxia.service.url` | string | `localhost:6648` | Oxia service URL for metadata |
 | `pulsar.oxia.service.url` | string | `oxia://localhost:6648/default` | Oxia metadata store URL for Pulsar-managed ledger metadata (format: `oxia://host:port/[namespace]`) |
 | `ursa.oxia.service.url` | string | `oxia://localhost:6648/default` | Oxia metadata store URL for Ursa storage metadata (format: `oxia://host:port/[namespace]`) |
-| `ursa.storage.backend.type` | string | `LOCAL` | Storage backend: `LOCAL`, `S3`, `AZURE_BLOB` |
-| `ursa.storage.path` | string | `/tmp/ursa-data` | Local storage path (for LOCAL backend) |
-| `ursa.storage.compaction.prefix` | string | `/tmp/compaction-data` | Compaction output prefix (for S3 backend) |
+| `ursa.storage.backend.type` | string | `LOCAL` | Storage backend: `LOCAL`, `S3`, `GCS`, `AZURE_BLOB` (`AZUREBLOB` is also accepted for compatibility) |
+| `ursa.storage.path` | string | `/tmp/ursa-data` | Local storage path for `LOCAL`, or the remote object prefix for `S3`/`GCS`/Azure Blob |
+| `ursa.storage.compaction.prefix` | string | `/tmp/compaction-data` | Compaction output prefix for remote object storage backends |
 | `ursa.storage.namespace` | string | `default` | Namespace for Ursa streams |
 | `ursa.storage.wal.directory` | string | `/tmp/ursa-wal` | Write-ahead log directory |
 | `ursa.storage.write.buffer.flush.interval.ms` | long | `250` | Write buffer flush interval |
@@ -447,10 +447,10 @@ No protocol changes required.
 | `ursa.storage.producer.state.snapshot.record.threshold` | int | `10000` | Number of appended records that triggers producer-state snapshot. Set `<= 0` to disable threshold-based snapshot. |
 | `ursa.storage.non.idempotent.max.in.flight.appends.per.partition` | int | `16` | Maximum in-flight non-idempotent appends per partition |
 | `ursa.storage.non.idempotent.max.in.flight.bytes.per.partition` | long | `-1` | Maximum bytes of in-flight non-idempotent appends per partition (-1 disables) |
-| `ursa.storage.s3.endpoint` | string | `""` | S3 endpoint URL |
-| `ursa.storage.s3.bucket` | string | `kafka-ursa-storage` | S3 bucket name |
-| `ursa.storage.compaction.bucket` | string | `kafka-ursa-storage` | S3 bucket name for compaction output |
-| `ursa.storage.s3.region` | string | `us-east-1` | S3 region |
+| `ursa.storage.s3.endpoint` | string | `""` | Remote object storage endpoint URL. Reused as an endpoint override for GCS/Azure-compatible deployments |
+| `ursa.storage.s3.bucket` | string | `kafka-ursa-storage` | Remote object storage bucket or container name. Reused for GCS/Azure backends |
+| `ursa.storage.compaction.bucket` | string | `kafka-ursa-storage` | Remote object storage bucket or container name for compaction output |
+| `ursa.storage.s3.region` | string | `us-east-1` | Remote object storage region when the selected backend uses one |
 | `ursa.storage.s3.access.key` | string | `""` | S3 access key |
 | `ursa.storage.s3.secret.key` | string | `""` | S3 secret key |
 | `socket.server.enable.request.pipelining` | boolean | `false` | Allow multiple in-flight requests per connection; preserves response order but reduces latency amplification for diskless produces |

@@ -217,19 +217,22 @@ public class ServerLogConfigs {
     public static final String URSA_STORAGE_BACKEND_TYPE_CONFIG = "ursa.storage.backend.type";
     public static final String URSA_STORAGE_BACKEND_TYPE_DEFAULT = "LOCAL";
     public static final String URSA_STORAGE_BACKEND_TYPE_DOC = "The backend storage type for Ursa storage. " +
-            "Supported values: LOCAL, S3, AZURE_BLOB.";
+            "Supported values: LOCAL, S3, GCS, AZURE_BLOB. AZUREBLOB is also accepted as a compatibility alias.";
 
     public static final String URSA_STORAGE_PATH_CONFIG = "ursa.storage.path";
     public static final String URSA_STORAGE_PATH_DEFAULT = "/tmp/ursa-data";
-    public static final String URSA_STORAGE_PATH_DOC = "The path for Ursa storage data files.";
+    public static final String URSA_STORAGE_PATH_DOC =
+            "The local path for LOCAL backend data files, or the object prefix for remote Ursa backends.";
 
     public static final String URSA_STORAGE_COMPACTION_PREFIX_CONFIG = "ursa.storage.compaction.prefix";
     public static final String URSA_STORAGE_COMPACTION_PREFIX_DEFAULT = "/tmp/compaction-data";
-    public static final String URSA_STORAGE_COMPACTION_PREFIX_DOC = "The prefix for Ursa storage compaction output.";
+    public static final String URSA_STORAGE_COMPACTION_PREFIX_DOC =
+            "The object prefix for Ursa storage compaction output.";
 
     public static final String URSA_STORAGE_COMPACTION_BUCKET_CONFIG = "ursa.storage.compaction.bucket";
     public static final String URSA_STORAGE_COMPACTION_BUCKET_DEFAULT = "kafka-ursa-storage";
-    public static final String URSA_STORAGE_COMPACTION_BUCKET_DOC = "The S3 bucket name for Ursa compaction output.";
+    public static final String URSA_STORAGE_COMPACTION_BUCKET_DOC =
+            "The object storage bucket or container name for Ursa compaction output.";
 
     public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_CONFIG = "ursa.storage.write.buffer.flush.interval.ms";
     public static final long URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DEFAULT = 250L;
@@ -272,11 +275,12 @@ public class ServerLogConfigs {
             "Number of appended records that triggers a producer-state snapshot for idempotent diskless topics. "
                     + "Set to 0 or a negative value to disable threshold-based snapshots.";
 
-    // S3 Storage Configuration
+    // Remote object storage configuration (legacy s3.* config names retained for compatibility)
     public static final String URSA_STORAGE_S3_ENDPOINT_CONFIG = "ursa.storage.s3.endpoint";
     public static final String URSA_STORAGE_S3_ENDPOINT_DEFAULT = "";
-    public static final String URSA_STORAGE_S3_ENDPOINT_DOC = "The S3 endpoint URL for Ursa storage. " +
-            "Used when backend type is S3.";
+    public static final String URSA_STORAGE_S3_ENDPOINT_DOC =
+            "The remote object storage endpoint URL for Ursa storage. Used for S3 and as an endpoint override for "
+                    + "other remote backends.";
 
     public static final String URSA_STORAGE_S3_ACCESS_KEY_CONFIG = "ursa.storage.s3.access.key";
     public static final String URSA_STORAGE_S3_ACCESS_KEY_DEFAULT = "";
@@ -288,9 +292,11 @@ public class ServerLogConfigs {
 
     public static final String URSA_STORAGE_S3_BUCKET_CONFIG = "ursa.storage.s3.bucket";
     public static final String URSA_STORAGE_S3_BUCKET_DEFAULT = "kafka-ursa-storage";
-    public static final String URSA_STORAGE_S3_BUCKET_DOC = "The S3 bucket name for Ursa storage.";
+    public static final String URSA_STORAGE_S3_BUCKET_DOC =
+            "The remote object storage bucket or container name for Ursa storage.";
 
     public static final String URSA_STORAGE_S3_REGION_CONFIG = "ursa.storage.s3.region";
     public static final String URSA_STORAGE_S3_REGION_DEFAULT = "us-east-1";
-    public static final String URSA_STORAGE_S3_REGION_DOC = "The S3 region for Ursa storage.";
+    public static final String URSA_STORAGE_S3_REGION_DOC =
+            "The remote object storage region for Ursa storage when the selected backend uses one.";
 }

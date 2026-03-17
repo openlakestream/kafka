@@ -21,6 +21,7 @@ import org.apache.pulsar.broker.ServiceConfiguration;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.Locale;
 import java.util.Properties;
 
 import io.opentelemetry.api.OpenTelemetry;
@@ -103,20 +104,24 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
 
     static Properties buildManagedLedgerProperties(UrsaStorageConfig config) {
         Properties properties = new Properties();
-        properties.setProperty("backendStorageType", config.getBackendType());
+        String normalizedBackendType = normalizeBackendType(config.getBackendType());
+        properties.setProperty("backendStorageType", normalizedBackendType);
         properties.setProperty("storagePath", config.getStoragePath());
         properties.setProperty("oxiaPulsarStorageUrl", config.getUrsaOxiaServiceUrl().toString());
         properties.setProperty("writeBufferFlushIntervalMs", String.valueOf(config.getWriteBufferFlushIntervalMs()));
         properties.setProperty("writeBufferSize", String.valueOf(config.getWriteBufferSize()));
         properties.setProperty("writeBufferFlushSize", String.valueOf(config.getWriteBufferFlushSize()));
 
-        if ("S3".equalsIgnoreCase(config.getBackendType())) {
+        if (isRemoteBackend(normalizedBackendType)) {
             setIfNotEmpty(config.getS3Endpoint(), v -> properties.setProperty("cloudStorageEndpoint", v));
-            setIfNotEmpty(config.getS3AccessKey(), v -> properties.setProperty("s3AccessKeyId", v));
-            setIfNotEmpty(config.getS3SecretKey(), v -> properties.setProperty("s3SecretAccessKey", v));
             setIfNotEmpty(config.getS3Bucket(), v -> properties.setProperty("bucket", v));
             setIfNotEmpty(config.getStoragePath(), v -> properties.setProperty("prefix", v));
             setIfNotEmpty(config.getS3Region(), v -> properties.setProperty("region", v));
+        }
+
+        if (isS3Backend(normalizedBackendType)) {
+            setIfNotEmpty(config.getS3AccessKey(), v -> properties.setProperty("s3AccessKeyId", v));
+            setIfNotEmpty(config.getS3SecretKey(), v -> properties.setProperty("s3SecretAccessKey", v));
             // Deprecated fields, keep for compatibility with older configs.
             setIfNotEmpty(config.getS3Bucket(), v -> properties.setProperty("s3Bucket", v));
             setIfNotEmpty(config.getStoragePath(), v -> properties.setProperty("s3Prefix", v));
@@ -151,16 +156,31 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
                 }
             }
 
-            // Required by LakehouseConfiguration for s3a:// path resolution (compaction output).
-            if ("S3".equalsIgnoreCase(config.getBackendType())) {
-                properties.setProperty("compactionBackendStorageType", "S3");
+            if (isRemoteBackend(normalizedBackendType)) {
+                properties.setProperty("compactionBackendStorageType", normalizedBackendType);
                 properties.setProperty("compactionBucket", config.getCompactionBucket());
                 properties.setProperty("compactionPrefix", config.getCompactionPrefix());
                 properties.setProperty("compactionBucketRegion", config.getS3Region());
-                properties.setProperty("cloudStorageEndpoint", config.getS3Endpoint());
+                setIfNotEmpty(config.getS3Endpoint(), v -> properties.setProperty("cloudStorageEndpoint", v));
             }
         }
         return properties;
+    }
+
+    private static boolean isRemoteBackend(String normalizedBackendType) {
+        return !"LOCAL".equals(normalizedBackendType);
+    }
+
+    private static boolean isS3Backend(String normalizedBackendType) {
+        return "S3".equals(normalizedBackendType);
+    }
+
+    private static String normalizeBackendType(String backendType) {
+        String normalizedBackendType = backendType.toUpperCase(Locale.ROOT);
+        if ("AZURE_BLOB".equals(normalizedBackendType) || "AZUREBLOB".equals(normalizedBackendType)) {
+            return "AZUREBLOB";
+        }
+        return normalizedBackendType;
     }
 
     private static void setIfNotEmpty(String value, java.util.function.Consumer<String> setter) {

@@ -27,6 +27,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class UrsaStorageConfigTest {
 
     @Test
+    void testBackendTypeOverrides() throws Exception {
+        assertEquals("GCS", backendType("GCS"));
+        assertEquals("AZURE_BLOB", backendType("AZURE_BLOB"));
+        assertEquals("AZUREBLOB", backendType("AZUREBLOB"));
+    }
+
+    @Test
     void testSnapshotConfigDefaults() throws Exception {
         UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of());
 
@@ -45,5 +52,12 @@ class UrsaStorageConfigTest {
 
         assertEquals(1234L, config.getProducerStateSnapshotIntervalMs());
         assertEquals(5678, config.getProducerStateSnapshotRecordThreshold());
+    }
+
+    private static String backendType(String backendType) throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of(
+            ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG, backendType
+        ));
+        return config.getBackendType();
     }
 }

@@ -207,7 +207,7 @@ public class LogConfig extends AbstractConfig {
             .define(ServerLogConfigs.URSA_STORAGE_NAMESPACE_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_NAMESPACE_DEFAULT,
                     new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_NAMESPACE_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_DEFAULT,
-                    ConfigDef.ValidString.in("LOCAL", "S3", "AZURE_BLOB"),
+                    ConfigDef.ValidString.in("LOCAL", "S3", "GCS", "AZURE_BLOB", "AZUREBLOB"),
                     LOW, ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_PATH_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_PATH_DEFAULT,
                     new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_PATH_DOC)
