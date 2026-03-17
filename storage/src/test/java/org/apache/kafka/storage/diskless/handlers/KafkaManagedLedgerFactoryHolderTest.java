@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.diskless.handlers;
 
 import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.server.config.ServerLogConfigs;
 import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.AfterEach;
@@ -129,6 +130,55 @@ class KafkaManagedLedgerFactoryHolderTest {
         assertFalse(properties.containsKey(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP));
     }
 
+    @Test
+    void testGcsBackendUsesGenericObjectStorageProperties() throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of(
+                ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG, "GCS",
+                ServerLogConfigs.URSA_STORAGE_PATH_CONFIG, "gcs-prefix",
+                ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_CONFIG, "http://fake-gcs:4443",
+                ServerLogConfigs.URSA_STORAGE_S3_BUCKET_CONFIG, "gcs-bucket",
+                ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG, "us-central1"
+        ));
+
+        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
+
+        assertEquals("GCS", properties.getProperty("backendStorageType"));
+        assertEquals("gcs-bucket", properties.getProperty("bucket"));
+        assertEquals("gcs-prefix", properties.getProperty("prefix"));
+        assertEquals("us-central1", properties.getProperty("region"));
+        assertEquals("http://fake-gcs:4443", properties.getProperty("cloudStorageEndpoint"));
+        assertFalse(properties.containsKey("s3AccessKeyId"));
+        assertFalse(properties.containsKey("s3SecretAccessKey"));
+    }
+
+    @Test
+    void testAzureBackendAliasesNormalizeToUrsaValue() throws Exception {
+        verifyAzureBackendAlias("AZURE_BLOB");
+        verifyAzureBackendAlias("AZUREBLOB");
+    }
+
+    @Test
+    void testS3BackendStillIncludesS3SpecificCredentials() throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of(
+                ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG, "S3",
+                ServerLogConfigs.URSA_STORAGE_PATH_CONFIG, "s3-prefix",
+                ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_CONFIG, "http://localstack:4566",
+                ServerLogConfigs.URSA_STORAGE_S3_BUCKET_CONFIG, "s3-bucket",
+                ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG, "us-east-1",
+                ServerLogConfigs.URSA_STORAGE_S3_ACCESS_KEY_CONFIG, "access",
+                ServerLogConfigs.URSA_STORAGE_S3_SECRET_KEY_CONFIG, "secret"
+        ));
+
+        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
+
+        assertEquals("S3", properties.getProperty("backendStorageType"));
+        assertEquals("access", properties.getProperty("s3AccessKeyId"));
+        assertEquals("secret", properties.getProperty("s3SecretAccessKey"));
+        assertEquals("s3-bucket", properties.getProperty("s3Bucket"));
+        assertEquals("s3-prefix", properties.getProperty("s3Prefix"));
+        assertEquals("us-east-1", properties.getProperty("s3Region"));
+    }
+
     // Verify "pulsar.storage.oxia.service.url" and "ursa.storage.oxia.service.url" are correctly parsed
     @Test
     void testOxiaServiceUrls() throws Exception {
@@ -173,5 +223,32 @@ class KafkaManagedLedgerFactoryHolderTest {
         } finally {
             Files.deleteIfExists(tempFile.toPath());
         }
+    }
+
+    private static void verifyAzureBackendAlias(String backendType) throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of(
+                ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG, backendType,
+                ServerLogConfigs.URSA_STORAGE_PATH_CONFIG, "azure-prefix",
+                ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_CONFIG, "https://account.blob.core.windows.net",
+                ServerLogConfigs.URSA_STORAGE_S3_BUCKET_CONFIG, "account@container",
+                ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG, "unused-region"
+        ));
+
+        System.setProperty(SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP,
+                "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory");
+
+        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
+
+        assertEquals("AZUREBLOB", properties.getProperty("backendStorageType"));
+        assertEquals("account@container", properties.getProperty("bucket"));
+        assertEquals("azure-prefix", properties.getProperty("prefix"));
+        assertEquals("unused-region", properties.getProperty("region"));
+        assertEquals("https://account.blob.core.windows.net", properties.getProperty("cloudStorageEndpoint"));
+        assertEquals("AZUREBLOB", properties.getProperty("compactionBackendStorageType"));
+        assertEquals("account@container", properties.getProperty("compactionBucket"));
+        assertEquals("/tmp/compaction-data", properties.getProperty("compactionPrefix"));
+        assertEquals("unused-region", properties.getProperty("compactionBucketRegion"));
+        assertFalse(properties.containsKey("s3AccessKeyId"));
+        assertFalse(properties.containsKey("s3SecretAccessKey"));
     }
 }

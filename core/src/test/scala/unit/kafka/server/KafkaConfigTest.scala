@@ -774,6 +774,15 @@ class KafkaConfigTest {
   }
 
   @Test
+  def testValidUrsaBackendTypes(): Unit = {
+    Seq("GCS", "AZURE_BLOB", "AZUREBLOB").foreach { backendType =>
+      val props = TestUtils.createBrokerConfig(0, port = 8181)
+      props.setProperty(ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG, backendType)
+      assertDoesNotThrow(() => KafkaConfig.fromProps(props))
+    }
+  }
+
+  @Test
   def testInvalidCompressionType(): Unit = {
     val props = TestUtils.createBrokerConfig(0, port = 8181)
     props.setProperty(ServerConfigs.COMPRESSION_TYPE_CONFIG, "abc")
