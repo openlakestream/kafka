@@ -507,6 +507,10 @@ public abstract class AbstractKafkaConfig extends AbstractConfig {
         return getBoolean(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG);
     }
 
+    public int socketServerRequestPipeliningMaxInFlightRequestsPerConnection() {
+        return getInt(SocketServerConfigs.SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_CONFIG);
+    }
+
     public long connectionSetupTimeoutMs() {
         return getLong(ServerConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG);
     }

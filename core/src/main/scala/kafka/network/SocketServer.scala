@@ -32,7 +32,7 @@ import org.apache.kafka.common.config.ConfigException
 import org.apache.kafka.common.memory.{MemoryPool, SimpleMemoryPool}
 import org.apache.kafka.common.metrics._
 import org.apache.kafka.common.metrics.stats.{Avg, CumulativeSum, Meter, Rate}
-import org.apache.kafka.common.network.KafkaChannel.ChannelMuteEvent
+import org.apache.kafka.common.network.KafkaChannel.{ChannelMuteEvent, ChannelMuteState}
 import org.apache.kafka.common.network.{ChannelBuilder, ChannelBuilders, ClientInformation, KafkaChannel, ListenerName, ListenerReconfigurable, NetworkSend, Selectable, Send, ServerConnectionId, Selector => KSelector}
 import org.apache.kafka.common.protocol.ApiKeys
 import org.apache.kafka.common.requests.{ApiVersionsRequest, RequestContext, RequestHeader}
@@ -810,10 +810,14 @@ private[kafka] class Processor(
   private val inflightResponses = mutable.Map[String, Response]()
   private val responseQueue = new LinkedBlockingDeque[Response]()
   private val requestPipeliningEnabled = config.socketServerEnableRequestPipelining
+  private val requestPipeliningMaxInFlightRequestsPerConnection =
+    config.socketServerRequestPipeliningMaxInFlightRequestsPerConnection
   // Track the order of pending requests per connection for pipelining (connectionId -> queue of correlationIds)
   private val pendingResponseOrder = new mutable.HashMap[String, mutable.ArrayDeque[Integer]]()
   // Store pending responses waiting to be sent in order (connectionId -> (correlationId -> response))
   private val pendingResponses = new mutable.HashMap[String, mutable.HashMap[Integer, Response]]()
+  private val pipelinedProduceInFlightRequestCounts = new mutable.HashMap[String, Int]()
+  private val pipelinedProduceThrottleCounts = new mutable.HashMap[String, Int]()
 
   private[kafka] val metricTags = mutable.LinkedHashMap(
     JProcessor.LISTENER_METRIC_TAG -> listenerName.value,
@@ -963,11 +967,19 @@ private[kafka] class Processor(
   private def processPipelinedResponse(channelId: String, response: Response): Unit = {
     response match {
       case _: StartThrottlingResponse =>
-        handleChannelMuteEvent(channelId, ChannelMuteEvent.THROTTLE_STARTED)
-        selector.mute(channelId)
+        if (shouldPipelineResponse(response))
+          startPipelinedProduceThrottle(channelId)
+        else {
+          handleChannelMuteEvent(channelId, ChannelMuteEvent.THROTTLE_STARTED)
+          selector.mute(channelId)
+        }
       case _: EndThrottlingResponse =>
-        handleChannelMuteEvent(channelId, ChannelMuteEvent.THROTTLE_ENDED)
-        tryUnmuteChannel(channelId)
+        if (shouldPipelineResponse(response))
+          endPipelinedProduceThrottle(channelId)
+        else {
+          handleChannelMuteEvent(channelId, ChannelMuteEvent.THROTTLE_ENDED)
+          tryUnmuteChannel(channelId)
+        }
       case _ =>
         // NoOp, Send, Close all go through ordered response queue
         enqueueOrderedResponse(response)
@@ -1054,6 +1066,8 @@ private[kafka] class Processor(
                 if (requestPipeliningEnabled) {
                   recordRequestOrder(connectionId, header.correlationId)
                 }
+                if (shouldPipelineProduceRequest)
+                  incrementPipelinedProduceInFlightRequestCount(connectionId)
 
                 // KIP-511: ApiVersionsRequest is intercepted here to catch the client software name
                 // and version. It is done here to avoid wiring things up to the api layer.
@@ -1096,6 +1110,7 @@ private[kafka] class Processor(
           throw new IllegalStateException(s"Send for ${send.destinationId} completed, but not in `inflightResponses`")
         }
         updateRequestMetrics(response)
+        completePipelinedProduceRequest(response)
 
         // Drain next ordered response for pipelining
         if (requestPipeliningEnabled) trySendOrderedResponses(send.destinationId)
@@ -1174,6 +1189,8 @@ private[kafka] class Processor(
 
   private def cleanupPipelinedState(connectionId: String): Unit = {
     if (requestPipeliningEnabled) {
+      pipelinedProduceInFlightRequestCounts.remove(connectionId)
+      pipelinedProduceThrottleCounts.remove(connectionId)
       pendingResponseOrder.remove(connectionId)
       pendingResponses.remove(connectionId).foreach { pending =>
         pending.values.foreach(updateRequestMetrics)
@@ -1191,6 +1208,7 @@ private[kafka] class Processor(
     if (!pendingResponseOrder.contains(connectionId)) {
       // Connection has already been disconnected/closed. Drop the response and update metrics to avoid leaks.
       updateRequestMetrics(response)
+      completePipelinedProduceRequest(response)
       return
     }
     val correlationId = Integer.valueOf(response.request.headerForLoggingOrThrottling().correlationId)
@@ -1225,6 +1243,7 @@ private[kafka] class Processor(
               nextResponse match {
                 case response: NoOpResponse =>
                   updateRequestMetrics(response)
+                  completePipelinedProduceRequest(response)
                   if (!shouldPipelineResponse(response)) {
                     // Non-produce requests are muted when received, so no-op completion should still trigger unmute.
                     handleChannelMuteEvent(connectionId, ChannelMuteEvent.RESPONSE_SENT)
@@ -1232,6 +1251,7 @@ private[kafka] class Processor(
                   }
                 case response: CloseConnectionResponse =>
                   updateRequestMetrics(response)
+                  completePipelinedProduceRequest(response)
                   trace("Closing socket connection actively according to the response code.")
                   close(connectionId)
                   shouldContinue = false
@@ -1242,6 +1262,76 @@ private[kafka] class Processor(
                   throw new IllegalArgumentException(s"Unknown response type: ${nextResponse.getClass}")
               }
           }
+      }
+    }
+  }
+
+  private def incrementPipelinedProduceInFlightRequestCount(connectionId: String): Unit = {
+    val nextCount = pipelinedProduceInFlightRequestCounts.getOrElse(connectionId, 0) + 1
+    pipelinedProduceInFlightRequestCounts.put(connectionId, nextCount)
+
+    if (nextCount == requestPipeliningMaxInFlightRequestsPerConnection) {
+      selector.mute(connectionId)
+      handleChannelMuteEvent(connectionId, ChannelMuteEvent.REQUEST_RECEIVED)
+    } else if (nextCount > requestPipeliningMaxInFlightRequestsPerConnection) {
+      throw new IllegalStateException(
+        s"Received more than $requestPipeliningMaxInFlightRequestsPerConnection pipelined produce requests " +
+          s"for $connectionId")
+    }
+  }
+
+  private def completePipelinedProduceRequest(response: Response): Unit = {
+    if (!shouldPipelineResponse(response)) return
+
+    val connectionId = response.request.context.connectionId
+    pipelinedProduceInFlightRequestCounts.get(connectionId).foreach { currentCount =>
+      if (currentCount <= 1)
+        pipelinedProduceInFlightRequestCounts.remove(connectionId)
+      else
+        pipelinedProduceInFlightRequestCounts.put(connectionId, currentCount - 1)
+
+      if (currentCount == requestPipeliningMaxInFlightRequestsPerConnection) {
+        handleChannelMuteEvent(connectionId, ChannelMuteEvent.RESPONSE_SENT)
+        tryUnmuteChannel(connectionId)
+      }
+    }
+  }
+
+  private def isPipelinedProduceConnectionAtMuteLimit(connectionId: String): Boolean = {
+    pipelinedProduceInFlightRequestCounts.get(connectionId).contains(requestPipeliningMaxInFlightRequestsPerConnection)
+  }
+
+  private def startPipelinedProduceThrottle(connectionId: String): Unit = {
+    val channelOpt = openOrClosingChannel(connectionId)
+    if (channelOpt.isEmpty) return
+
+    val nextCount = pipelinedProduceThrottleCounts.getOrElse(connectionId, 0) + 1
+    pipelinedProduceThrottleCounts.put(connectionId, nextCount)
+
+    if (nextCount == 1 && channelOpt.exists(_.muteState() == ChannelMuteState.MUTED_AND_RESPONSE_PENDING))
+      handleChannelMuteEvent(connectionId, ChannelMuteEvent.THROTTLE_STARTED)
+
+    selector.mute(connectionId)
+  }
+
+  private def endPipelinedProduceThrottle(connectionId: String): Unit = {
+    pipelinedProduceThrottleCounts.get(connectionId).foreach { currentCount =>
+      if (currentCount <= 1)
+        pipelinedProduceThrottleCounts.remove(connectionId)
+      else
+        pipelinedProduceThrottleCounts.put(connectionId, currentCount - 1)
+
+      if (currentCount == 1) {
+        openOrClosingChannel(connectionId).foreach { channel =>
+          channel.muteState() match {
+            case ChannelMuteState.MUTED_AND_THROTTLED |
+                 ChannelMuteState.MUTED_AND_THROTTLED_AND_RESPONSE_PENDING =>
+              handleChannelMuteEvent(connectionId, ChannelMuteEvent.THROTTLE_ENDED)
+            case _ =>
+          }
+        }
+        if (!isPipelinedProduceConnectionAtMuteLimit(connectionId))
+          tryUnmuteChannel(connectionId)
       }
     }
   }
