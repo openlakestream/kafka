@@ -171,7 +171,7 @@ public class UrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETestBase {
                 .setNumControllerNodes(1)
                 .build();
 
-        return new KafkaClusterTestKit.Builder(nodes)
+        return enableBrokerRequestPipelining(new KafkaClusterTestKit.Builder(nodes))
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG, "true")
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG, oxiaServiceAddress)
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG, "S3")
@@ -205,6 +205,7 @@ public class UrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETestBase {
         props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "120000");
         props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "120000");
         props.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, String.valueOf(MAX_REQUEST_SIZE));
+        configureProducerRequestPipelining(props);
         return new org.apache.kafka.clients.producer.KafkaProducer<>(props);
     }
 

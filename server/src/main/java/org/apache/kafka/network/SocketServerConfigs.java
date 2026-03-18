@@ -158,6 +158,13 @@ public class SocketServerConfigs {
     public static final String SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_DOC = "Enable produce request pipelining on a single TCP connection. When enabled, the broker can "
             + "read and process multiple produce requests from the same connection concurrently while still sending responses in request order. "
             + "This can reduce latency amplification for storage backends that have periodic commit/flush cycles.";
+    public static final String SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_CONFIG =
+            "socket.server.request.pipelining.max.in.flight.requests.per.connection";
+    public static final int SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_DEFAULT = 5;
+    public static final String SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_DOC =
+            "The maximum number of broker-side in-flight pipelined produce requests allowed per connection before the "
+                    + "connection is explicitly muted. This limit is only enforced when "
+                    + SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG + " is enabled.";
 
     public static final ConfigDef CONFIG_DEF = new ConfigDef()
             .define(LISTENERS_CONFIG, LIST, LISTENERS_DEFAULT, ConfigDef.ValidList.anyNonDuplicateValues(false, false), HIGH, LISTENERS_DOC)
@@ -176,7 +183,10 @@ public class SocketServerConfigs {
             .define(QUEUED_MAX_REQUESTS_CONFIG, INT, QUEUED_MAX_REQUESTS_DEFAULT, atLeast(1), HIGH, QUEUED_MAX_REQUESTS_DOC)
             .define(QUEUED_MAX_BYTES_CONFIG, LONG, QUEUED_MAX_REQUEST_BYTES_DEFAULT, MEDIUM, QUEUED_MAX_REQUEST_BYTES_DOC)
             .define(NUM_NETWORK_THREADS_CONFIG, INT, NUM_NETWORK_THREADS_DEFAULT, atLeast(1), HIGH, NUM_NETWORK_THREADS_DOC)
-            .define(SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, BOOLEAN, SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_DEFAULT, MEDIUM, SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_DOC);
+            .define(SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, BOOLEAN, SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_DEFAULT, MEDIUM, SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_DOC)
+            .define(SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_CONFIG, INT,
+                    SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_DEFAULT, atLeast(1), MEDIUM,
+                    SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_DOC);
 
     private static final Pattern URI_PARSE_REGEXP = Pattern.compile(
         "^(.*)://\\[?([0-9a-zA-Z\\-%._:]*)\\]?:(-?[0-9]+)");

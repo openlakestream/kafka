@@ -302,6 +302,8 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _], enforceProv
   val queuedMaxBytes = getLong(SocketServerConfigs.QUEUED_MAX_BYTES_CONFIG)
   def numNetworkThreads = getInt(SocketServerConfigs.NUM_NETWORK_THREADS_CONFIG)
   val socketServerEnableRequestPipelining = getBoolean(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG)
+  val socketServerRequestPipeliningMaxInFlightRequestsPerConnection =
+    getInt(SocketServerConfigs.SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_CONFIG)
 
   /***************** rack configuration **************/
   val replicaSelectorClassName = Option(getString(ReplicationConfigs.REPLICA_SELECTOR_CLASS_CONFIG))

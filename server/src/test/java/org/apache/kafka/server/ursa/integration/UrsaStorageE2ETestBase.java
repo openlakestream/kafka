@@ -33,6 +33,7 @@ import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
+import org.apache.kafka.network.SocketServerConfigs;
 import org.apache.kafka.test.TestUtils;
 
 import org.slf4j.Logger;
@@ -69,6 +70,8 @@ public abstract class UrsaStorageE2ETestBase {
 
     // Common configuration constants
     protected static final int MAX_REQUEST_SIZE = 10485760; // 10MB
+    protected static final int REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION =
+            SocketServerConfigs.SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_DEFAULT;
 
     /**
      * Creates a standard Kafka producer with byte array serializers.
@@ -80,6 +83,7 @@ public abstract class UrsaStorageE2ETestBase {
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
         props.put(ProducerConfig.ACKS_CONFIG, "all");
         props.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, String.valueOf(MAX_REQUEST_SIZE));
+        configureProducerRequestPipelining(props);
         return new KafkaProducer<>(props);
     }
 
@@ -95,6 +99,7 @@ public abstract class UrsaStorageE2ETestBase {
         props.put(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, String.valueOf(MAX_REQUEST_SIZE));
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
         props.put(ProducerConfig.RETRIES_CONFIG, "3");
+        configureProducerRequestPipelining(props);
         return new KafkaProducer<>(props);
     }
 
@@ -111,7 +116,22 @@ public abstract class UrsaStorageE2ETestBase {
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
         props.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "test-tx-" + System.currentTimeMillis());
         props.put(ProducerConfig.TRANSACTION_TIMEOUT_CONFIG, "10000");
+        configureProducerRequestPipelining(props);
         return new KafkaProducer<>(props);
+    }
+
+    protected void configureProducerRequestPipelining(Properties props) {
+        props.put(
+                ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
+                String.valueOf(REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION));
+    }
+
+    protected static KafkaClusterTestKit.Builder enableBrokerRequestPipelining(KafkaClusterTestKit.Builder builder) {
+        return builder
+                .setConfigProp(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, "true")
+                .setConfigProp(
+                        SocketServerConfigs.SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_CONFIG,
+                        String.valueOf(REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION));
     }
 
     /**

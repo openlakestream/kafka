@@ -291,6 +291,17 @@ class SocketServerTest {
     Utils.toArray(request.serializeWithHeader(header))
   }
 
+  private def requestPipeliningConfig(maxInFlightRequestsPerConnection: Int =
+    SocketServerConfigs.SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_DEFAULT): KafkaConfig = {
+    val testProps = new Properties()
+    testProps.putAll(props)
+    testProps.put(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, "true")
+    testProps.put(
+      SocketServerConfigs.SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_CONFIG,
+      maxInFlightRequestsPerConnection.toString)
+    KafkaConfig.fromProps(testProps)
+  }
+
   @Test
   def simpleRequest(): Unit = {
     val plainSocket = connect()
@@ -305,12 +316,7 @@ class SocketServerTest {
 
   @Test
   def testRequestPipeliningReadsMultipleRequestsAndPreservesResponseOrder(): Unit = {
-    val testProps = new Properties()
-    testProps.putAll(props)
-    testProps.put(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, "true")
-    val pipeliningConfig = KafkaConfig.fromProps(testProps)
-
-    withTestableServer(config = pipeliningConfig, testWithServer = { testableServer =>
+    withTestableServer(config = requestPipeliningConfig(), testWithServer = { testableServer =>
       val socket = connect(testableServer)
       socket.setSoTimeout(10000)
 
@@ -340,12 +346,7 @@ class SocketServerTest {
 
   @Test
   def testRequestPipeliningUsesEnvelopeCorrelationForForwardedResponses(): Unit = {
-    val testProps = new Properties()
-    testProps.putAll(props)
-    testProps.put(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, "true")
-    val pipeliningConfig = KafkaConfig.fromProps(testProps)
-
-    withTestableServer(config = pipeliningConfig, testWithServer = { testableServer =>
+    withTestableServer(config = requestPipeliningConfig(), testWithServer = { testableServer =>
       val socket = connect(testableServer)
       socket.setSoTimeout(5000)
 
@@ -371,12 +372,7 @@ class SocketServerTest {
 
   @Test
   def testRequestPipeliningPreservesOrderForMixedRequestTypes(): Unit = {
-    val testProps = new Properties()
-    testProps.putAll(props)
-    testProps.put(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, "true")
-    val pipeliningConfig = KafkaConfig.fromProps(testProps)
-
-    withTestableServer(config = pipeliningConfig, testWithServer = { testableServer =>
+    withTestableServer(config = requestPipeliningConfig(), testWithServer = { testableServer =>
       val socket = connect(testableServer)
       socket.setSoTimeout(10000)
 
@@ -402,12 +398,7 @@ class SocketServerTest {
 
   @Test
   def testRequestPipeliningOnlyAppliesToProduceRequests(): Unit = {
-    val testProps = new Properties()
-    testProps.putAll(props)
-    testProps.put(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, "true")
-    val pipeliningConfig = KafkaConfig.fromProps(testProps)
-
-    withTestableServer(config = pipeliningConfig, testWithServer = { testableServer =>
+    withTestableServer(config = requestPipeliningConfig(), testWithServer = { testableServer =>
       val socket = connect(testableServer)
       socket.setSoTimeout(10000)
 
@@ -433,6 +424,242 @@ class SocketServerTest {
 
       val selector = testableServer.testableSelector
       assertTrue(selector.operationCounts.getOrElse(SelectorOperation.Mute, 0) >= 2)
+      socket.close()
+    })
+  }
+
+  @Test
+  def testRequestPipeliningMutesConnectionAtConfiguredInflightLimit(): Unit = {
+    withTestableServer(config = requestPipeliningConfig(maxInFlightRequestsPerConnection = 2), testWithServer = { testableServer =>
+      val socket = connect(testableServer)
+      socket.setSoTimeout(10000)
+
+      val request1 = producerRequestBytes(ack = 1, correlationId = 1)
+      val request2 = producerRequestBytes(ack = 1, correlationId = 2)
+      val request3 = producerRequestBytes(ack = 1, correlationId = 3)
+
+      sendRequest(socket, request1)
+      sendRequest(socket, request2)
+      sendRequest(socket, request3)
+
+      val received1 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      val received2 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      assertEquals(1, received1.header.correlationId)
+      assertEquals(2, received2.header.correlationId)
+      assertNull(
+        testableServer.dataPlaneRequestChannel.receiveRequest(200),
+        "Third produce request should wait until one pipelined response completes")
+
+      processRequest(testableServer.dataPlaneRequestChannel, received2)
+      processRequest(testableServer.dataPlaneRequestChannel, received1)
+
+      assertArrayEquals(request1, receiveResponse(socket))
+
+      val received3 = receiveRequest(testableServer.dataPlaneRequestChannel, timeout = 5000)
+      assertEquals(3, received3.header.correlationId)
+      processRequest(testableServer.dataPlaneRequestChannel, received3)
+
+      assertArrayEquals(request2, receiveResponse(socket))
+      assertArrayEquals(request3, receiveResponse(socket))
+
+      val selector = testableServer.testableSelector
+      assertTrue(selector.operationCounts.getOrElse(SelectorOperation.Mute, 0) >= 2)
+      assertTrue(selector.operationCounts.getOrElse(SelectorOperation.Unmute, 0) >= 2)
+      socket.close()
+    })
+  }
+
+  @Test
+  def testRequestPipeliningNoOpResponseReleasesInflightSlot(): Unit = {
+    withTestableServer(config = requestPipeliningConfig(maxInFlightRequestsPerConnection = 1), testWithServer = { testableServer =>
+      val socket = connect(testableServer)
+      socket.setSoTimeout(5000)
+
+      sendRequest(socket, producerRequestBytes(correlationId = 1))
+      sendRequest(socket, producerRequestBytes(correlationId = 2))
+
+      val received1 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      assertEquals(1, received1.header.correlationId)
+      assertNull(
+        testableServer.dataPlaneRequestChannel.receiveRequest(200),
+        "Second produce request should stay blocked until the first no-op completes")
+
+      processRequestNoOpResponse(testableServer.dataPlaneRequestChannel, received1)
+
+      val received2 = receiveRequest(testableServer.dataPlaneRequestChannel, timeout = 5000)
+      assertEquals(2, received2.header.correlationId)
+      processRequestNoOpResponse(testableServer.dataPlaneRequestChannel, received2)
+
+      val selector = testableServer.testableSelector
+      assertTrue(selector.operationCounts.getOrElse(SelectorOperation.Mute, 0) >= 2)
+      assertTrue(selector.operationCounts.getOrElse(SelectorOperation.Unmute, 0) >= 2)
+      socket.close()
+    })
+  }
+
+  @Test
+  def testRequestPipeliningCleanupDropsProduceResponsesAfterClose(): Unit = {
+    withTestableServer(config = requestPipeliningConfig(maxInFlightRequestsPerConnection = 2), testWithServer = { testableServer =>
+      val socket = connect(testableServer)
+      socket.setSoTimeout(5000)
+
+      sendRequest(socket, producerRequestBytes(ack = 1, correlationId = 1))
+      sendRequest(socket, producerRequestBytes(ack = 1, correlationId = 2))
+
+      val received1 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      val received2 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      assertEquals(1, received1.header.correlationId)
+      assertEquals(2, received2.header.correlationId)
+
+      testableServer.dataPlaneRequestChannel.sendResponse(new RequestChannel.CloseConnectionResponse(received1))
+      TestUtils.waitUntilTrue(() => openOrClosingChannel(received1, testableServer).isEmpty, "Channel not closed")
+
+      processRequest(testableServer.dataPlaneRequestChannel, received2)
+
+      val recoverySocket = connect(testableServer)
+      recoverySocket.setSoTimeout(5000)
+      val recoveryRequestBytes = producerRequestBytes(ack = 1, correlationId = 3)
+      sendRequest(recoverySocket, recoveryRequestBytes)
+      val recoveryRequest = receiveRequest(testableServer.dataPlaneRequestChannel, timeout = 5000)
+      assertEquals(3, recoveryRequest.header.correlationId)
+      processRequest(testableServer.dataPlaneRequestChannel, recoveryRequest)
+      assertArrayEquals(recoveryRequestBytes, receiveResponse(recoverySocket))
+
+      recoverySocket.close()
+      socket.close()
+    })
+  }
+
+  @Test
+  def testRequestPipeliningInflightLimitHonorsThrottleState(): Unit = {
+    withTestableServer(config = requestPipeliningConfig(maxInFlightRequestsPerConnection = 1), testWithServer = { testableServer =>
+      val socket = connect(testableServer)
+      socket.setSoTimeout(5000)
+
+      sendRequest(socket, producerRequestBytes(ack = 1, correlationId = 1))
+      val request = receiveRequest(testableServer.dataPlaneRequestChannel)
+      assertEquals(1, request.header.correlationId)
+
+      TestUtils.waitUntilTrue(
+        () => openOrClosingChannel(request, testableServer).exists(_.muteState() == ChannelMuteState.MUTED_AND_RESPONSE_PENDING),
+        "Channel should be muted once the pipelined produce limit is reached")
+
+      testableServer.dataPlaneRequestChannel.startThrottling(request)
+      TestUtils.waitUntilTrue(
+        () => openOrClosingChannel(request, testableServer).exists(_.muteState() == ChannelMuteState.MUTED_AND_THROTTLED_AND_RESPONSE_PENDING),
+        "Channel should remain throttled while the capped produce response is pending")
+
+      processRequest(testableServer.dataPlaneRequestChannel, request)
+      assertArrayEquals(producerRequestBytes(ack = 1, correlationId = 1), receiveResponse(socket))
+
+      TestUtils.waitUntilTrue(
+        () => openOrClosingChannel(request, testableServer).exists(_.muteState() == ChannelMuteState.MUTED_AND_THROTTLED),
+        "Response completion should release the pipeline slot without bypassing throttle")
+
+      testableServer.dataPlaneRequestChannel.endThrottling(request)
+      TestUtils.waitUntilTrue(
+        () => openOrClosingChannel(request, testableServer).exists(_.muteState() == ChannelMuteState.NOT_MUTED),
+        "Channel should unmute only after throttling ends")
+
+      sendRequest(socket, producerRequestBytes(ack = 1, correlationId = 2))
+      val nextRequest = receiveRequest(testableServer.dataPlaneRequestChannel, timeout = 5000)
+      assertEquals(2, nextRequest.header.correlationId)
+      processRequest(testableServer.dataPlaneRequestChannel, nextRequest)
+      assertArrayEquals(producerRequestBytes(ack = 1, correlationId = 2), receiveResponse(socket))
+      socket.close()
+    })
+  }
+
+  @Test
+  def testRequestPipeliningAllowsMultipleConcurrentThrottlesOnSameConnection(): Unit = {
+    withTestableServer(config = requestPipeliningConfig(maxInFlightRequestsPerConnection = 2), testWithServer = { testableServer =>
+      val socket = connect(testableServer)
+      socket.setSoTimeout(5000)
+
+      sendRequest(socket, producerRequestBytes(ack = 1, correlationId = 1))
+      sendRequest(socket, producerRequestBytes(ack = 1, correlationId = 2))
+
+      val request1 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      val request2 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      assertEquals(1, request1.header.correlationId)
+      assertEquals(2, request2.header.correlationId)
+
+      TestUtils.waitUntilTrue(
+        () => openOrClosingChannel(request1, testableServer).exists(_.muteState() == ChannelMuteState.MUTED_AND_RESPONSE_PENDING),
+        "Channel should be cap-muted while two pipelined produce requests are in flight")
+
+      testableServer.dataPlaneRequestChannel.startThrottling(request1)
+      TestUtils.waitUntilTrue(
+        () => openOrClosingChannel(request1, testableServer).exists(_.muteState() == ChannelMuteState.MUTED_AND_THROTTLED_AND_RESPONSE_PENDING),
+        "First throttled produce should move the channel into throttled+response-pending state")
+
+      testableServer.dataPlaneRequestChannel.startThrottling(request2)
+      TestUtils.waitUntilTrue(
+        () => testableServer.testableProcessor.responseQueueSize == 0,
+        "Throttle control responses were not drained from the processor queue")
+
+      assertTrue(openChannel(request1, testableServer).isDefined,
+        "A second throttled pipelined produce should not close the connection")
+      assertTrue(testableServer.testableSelector.allLocallyClosedChannels.isEmpty,
+        "The processor should not close the channel when another throttled response starts")
+      assertEquals(ChannelMuteState.MUTED_AND_THROTTLED_AND_RESPONSE_PENDING,
+        openOrClosingChannel(request1, testableServer).get.muteState())
+
+      socket.close()
+    })
+  }
+
+  @Test
+  def testRequestPipeliningKeepsConnectionMutedUntilAllConcurrentThrottlesEnd(): Unit = {
+    withTestableServer(config = requestPipeliningConfig(maxInFlightRequestsPerConnection = 2), testWithServer = { testableServer =>
+      val socket = connect(testableServer)
+      socket.setSoTimeout(5000)
+
+      sendRequest(socket, producerRequestBytes(ack = 1, correlationId = 1))
+      sendRequest(socket, producerRequestBytes(ack = 1, correlationId = 2))
+
+      val request1 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      val request2 = receiveRequest(testableServer.dataPlaneRequestChannel)
+      assertEquals(1, request1.header.correlationId)
+      assertEquals(2, request2.header.correlationId)
+
+      testableServer.dataPlaneRequestChannel.startThrottling(request1)
+      testableServer.dataPlaneRequestChannel.startThrottling(request2)
+      TestUtils.waitUntilTrue(
+        () => testableServer.testableProcessor.responseQueueSize == 0,
+        "Throttle control responses were not drained from the processor queue")
+      TestUtils.waitUntilTrue(
+        () => openOrClosingChannel(request1, testableServer).exists(_.muteState() == ChannelMuteState.MUTED_AND_THROTTLED_AND_RESPONSE_PENDING),
+        "Concurrent throttled produces should keep the channel in throttled+response-pending state")
+
+      processRequest(testableServer.dataPlaneRequestChannel, request1)
+      processRequest(testableServer.dataPlaneRequestChannel, request2)
+
+      assertArrayEquals(producerRequestBytes(ack = 1, correlationId = 1), receiveResponse(socket))
+      assertArrayEquals(producerRequestBytes(ack = 1, correlationId = 2), receiveResponse(socket))
+
+      TestUtils.waitUntilTrue(
+        () => openOrClosingChannel(request1, testableServer).exists(_.muteState() == ChannelMuteState.MUTED_AND_THROTTLED),
+        "Responses completing under throttle should keep the channel throttled")
+
+      testableServer.dataPlaneRequestChannel.endThrottling(request1)
+      TestUtils.waitUntilTrue(
+        () => testableServer.testableProcessor.responseQueueSize == 0,
+        "Throttle end control response was not drained from the processor queue")
+      assertEquals(ChannelMuteState.MUTED_AND_THROTTLED, openOrClosingChannel(request1, testableServer).get.muteState(),
+        "Ending one throttle should not clear throttling while another pipelined request is still throttled")
+
+      sendRequest(socket, producerRequestBytes(ack = 1, correlationId = 3))
+      assertNull(
+        testableServer.dataPlaneRequestChannel.receiveRequest(200),
+        "A new request should stay blocked until all throttled pipelined requests on the connection are released")
+
+      testableServer.dataPlaneRequestChannel.endThrottling(request2)
+      val request3 = receiveRequest(testableServer.dataPlaneRequestChannel, timeout = 5000)
+      assertEquals(3, request3.header.correlationId)
+      processRequest(testableServer.dataPlaneRequestChannel, request3)
+      assertArrayEquals(producerRequestBytes(ack = 1, correlationId = 3), receiveResponse(socket))
+
       socket.close()
     })
   }

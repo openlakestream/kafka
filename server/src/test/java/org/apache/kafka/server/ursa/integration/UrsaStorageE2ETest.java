@@ -126,11 +126,11 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
         log.info("Creating cluster with Ursa storage, Oxia at: {}, storage path: {}",
                 oxiaServiceAddress, storagePath);
 
-        return new KafkaClusterTestKit.Builder(
+        return enableBrokerRequestPipelining(new KafkaClusterTestKit.Builder(
                 new TestKitNodes.Builder()
                         .setNumBrokerNodes(1)
                         .setNumControllerNodes(1)
-                        .build())
+                        .build()))
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG, "true")
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG, oxiaServiceAddress)
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG, "LOCAL")

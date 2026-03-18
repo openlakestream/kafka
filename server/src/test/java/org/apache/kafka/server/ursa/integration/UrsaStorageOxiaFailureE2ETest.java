@@ -70,11 +70,11 @@ public class UrsaStorageOxiaFailureE2ETest extends UrsaStorageE2ETestBase {
         oxiaContainer = new OxiaContainer(DockerImageName.parse("oxia/oxia:main"));
         oxiaContainer.start();
 
-        cluster = new KafkaClusterTestKit.Builder(
+        cluster = enableBrokerRequestPipelining(new KafkaClusterTestKit.Builder(
                 new TestKitNodes.Builder()
                         .setNumBrokerNodes(1)
                         .setNumControllerNodes(1)
-                        .build())
+                        .build()))
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG, "true")
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG,
                         oxiaContainer.getServiceAddress())
