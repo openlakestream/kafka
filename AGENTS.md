@@ -85,7 +85,6 @@ KafkaApis → ReplicaManager → DisklessStorageReplicaManagerSupport
 - `handlers/UrsaManagedLedgerReader.java` — Read path (Fetch + ListOffsets)
 - `handlers/UrsaStorageState.java` — Stream IDs, offset tracking, shared state
 - `handlers/UrsaStorageConfig.java` — Configuration holder
-- `handlers/NonIdempotentPartitionAppendPipeline.java` — Per-partition append pipelining
 - `idempotent/UrsaProducerStateStore.java` — Producer state persistence to Oxia
 
 **Broker integration** (`core/src/main/scala/kafka/server/`):
