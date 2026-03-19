@@ -30,7 +30,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.AbstractMap;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -56,8 +55,6 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
     protected final UrsaStorageState state;
     private final ConcurrentHashMap<TopicIdPartition, CompletableFuture<Void>> partitionWriteTails =
             new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<TopicIdPartition, NonIdempotentPartitionAppendPipeline> nonIdempotentPipelines =
-            new ConcurrentHashMap<>();
 
     protected AbstractUrsaStorageWriter(UrsaStorageState state) {
         this.state = state;
@@ -78,6 +75,20 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
      * @return a handle containing submission and completion futures
      */
     protected abstract SequencedWrite<PartitionResponse> performIdempotentAppend(
+            TopicIdPartition tp,
+            MemoryRecords records,
+            RecordAnalysisResult analysisResult);
+
+    /**
+     * Performs the actual append for non-idempotent writes.
+     * Implementations should encode records and append to storage after validation has completed.
+     *
+     * @param tp the partition to append to
+     * @param records the records to append
+     * @param analysisResult the analysis result for the records
+     * @return a handle containing submission and completion futures
+     */
+    protected abstract SequencedWrite<PartitionResponse> performNonIdempotentAppend(
             TopicIdPartition tp,
             MemoryRecords records,
             RecordAnalysisResult analysisResult);
@@ -157,7 +168,7 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
                     new AbstractMap.SimpleEntry<>(tp, new PartitionResponse(Errors.NONE)));
         }
 
-        return appendToNonIdempotentPipeline(tp, records, analysisResult)
+        return enqueuePartitionWrite(tp, () -> writeNonIdempotent(tp, records, analysisResult))
                 .thenApply(response -> new AbstractMap.SimpleEntry<>(tp, response));
     }
 
@@ -216,20 +227,6 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
         return result;
     }
 
-    private CompletableFuture<PartitionResponse> appendToNonIdempotentPipeline(
-            TopicIdPartition tp,
-            MemoryRecords records,
-            RecordAnalysisResult analysisResult) {
-        while (true) {
-            NonIdempotentPartitionAppendPipeline pipeline = getOrCreateNonIdempotentPipeline(tp);
-            var result = pipeline.tryAppend(records, analysisResult);
-            if (result.isPresent()) {
-                return result.get();
-            }
-            nonIdempotentPipelines.remove(tp, pipeline);
-        }
-    }
-
     private SequencedWrite<PartitionResponse> writeIdempotent(TopicIdPartition tp, MemoryRecords records) {
         RecordAnalysisResult analysisResult;
         try {
@@ -260,24 +257,22 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
         return new SequencedWrite<>(write.submittedFuture(), mappedResult);
     }
 
-    private NonIdempotentPartitionAppendPipeline getOrCreateNonIdempotentPipeline(TopicIdPartition tp) {
-        return nonIdempotentPipelines.computeIfAbsent(tp, key -> new NonIdempotentPartitionAppendPipeline(
-                key,
-                state,
-                state.config().getNonIdempotentMaxInFlightAppendsPerPartition(),
-                state.config().getNonIdempotentMaxInFlightBytesPerPartition(),
-                pipeline -> nonIdempotentPipelines.remove(key, pipeline)
-        ));
+    private SequencedWrite<PartitionResponse> writeNonIdempotent(
+            TopicIdPartition tp,
+            MemoryRecords records,
+            RecordAnalysisResult analysisResult) {
+        SequencedWrite<PartitionResponse> write = performNonIdempotentAppend(tp, records, analysisResult);
+        CompletableFuture<PartitionResponse> mappedResult = write.resultFuture()
+            .exceptionally(e -> {
+                log.error("Failed to write to partition {}", tp, e);
+                return new PartitionResponse(Errors.KAFKA_STORAGE_ERROR);
+            });
+        return new SequencedWrite<>(write.submittedFuture(), mappedResult);
     }
 
     @Override
     public void close() throws IOException {
         partitionWriteTails.clear();
-        List<NonIdempotentPartitionAppendPipeline> pipelinesToClose = new ArrayList<>(nonIdempotentPipelines.values());
-        for (NonIdempotentPartitionAppendPipeline pipeline : pipelinesToClose) {
-            pipeline.close();
-        }
-        nonIdempotentPipelines.clear();
     }
 
     @Override
@@ -287,22 +282,11 @@ public abstract class AbstractUrsaStorageWriter implements Writer {
         }
 
         partitionWriteTails.remove(tp);
-
-        NonIdempotentPartitionAppendPipeline pipeline = nonIdempotentPipelines.remove(tp);
-        if (pipeline != null) {
-            try {
-                pipeline.close();
-            } catch (Exception e) {
-                log.warn("Failed to close non-idempotent pipeline for partition {}", tp, e);
-            }
-        }
     }
 
     @Override
     public Set<TopicIdPartition> snapshotPartitionsWithLocalState() {
-        Set<TopicIdPartition> partitions = new LinkedHashSet<>(partitionWriteTails.keySet());
-        partitions.addAll(nonIdempotentPipelines.keySet());
-        return partitions;
+        return new LinkedHashSet<>(partitionWriteTails.keySet());
     }
 
     private void completeTailAndMaybeCleanup(TopicIdPartition tp, CompletableFuture<Void> newTail) {

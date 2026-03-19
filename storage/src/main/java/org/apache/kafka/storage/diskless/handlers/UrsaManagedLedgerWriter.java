@@ -107,6 +107,17 @@ public class UrsaManagedLedgerWriter extends AbstractUrsaStorageWriter {
         return new SequencedWrite<>(submissionFuture, resultFuture);
     }
 
+    @Override
+    protected SequencedWrite<PartitionResponse> performNonIdempotentAppend(
+            TopicIdPartition tp,
+            MemoryRecords records,
+            RecordAnalysisResult analysisResult) {
+        CompletableFuture<Void> submissionFuture = new CompletableFuture<>();
+        CompletableFuture<PartitionResponse> resultFuture =
+            appendNonIdempotentRecords(tp, records, analysisResult, submissionFuture);
+        return new SequencedWrite<>(submissionFuture, resultFuture);
+    }
+
     private CompletableFuture<PartitionResponse> appendPreparedBatches(
             TopicIdPartition tp,
             MemoryRecords records,
@@ -169,6 +180,65 @@ public class UrsaManagedLedgerWriter extends AbstractUrsaStorageWriter {
                 });
             } catch (Throwable callbackError) {
                 producerStateManager.abortAppend(pendingAppend, callbackError);
+                submissionFuture.complete(null);
+                result.completeExceptionally(callbackError);
+            }
+        });
+
+        return result;
+    }
+
+    private CompletableFuture<PartitionResponse> appendNonIdempotentRecords(
+            TopicIdPartition tp,
+            MemoryRecords records,
+            RecordAnalysisResult analysisResult,
+            CompletableFuture<Void> submissionFuture) {
+        CompletableFuture<PartitionResponse> result = new CompletableFuture<>();
+
+        state.getOrCreateManagedLedger(tp).whenComplete((managedLedger, managedLedgerError) -> {
+            try {
+                if (managedLedgerError != null) {
+                    submissionFuture.complete(null);
+                    result.completeExceptionally(managedLedgerError);
+                    return;
+                }
+
+                ByteBuf data = KafkaEntryFormatter.encode(records, analysisResult);
+                int dataSize = data.readableBytes();
+
+                log.debug("Appending {} records ({} bytes) to managed ledger {} for partition {}, analysisResult: {}",
+                    analysisResult.recordCount(), dataSize, managedLedger.getName(), tp, analysisResult);
+
+                CompletableFuture<Position> addFuture;
+                try {
+                    addFuture = asyncAddEntry(managedLedger, data, analysisResult.recordCount());
+                } catch (Throwable appendInitError) {
+                    data.release();
+                    submissionFuture.complete(null);
+                    result.completeExceptionally(appendInitError);
+                    return;
+                }
+
+                submissionFuture.complete(null);
+
+                addFuture.whenComplete((position, appendError) -> {
+                    try {
+                        if (appendError != null) {
+                            result.completeExceptionally(appendError);
+                            return;
+                        }
+
+                        long appendTimestamp = state.time().milliseconds();
+                        result.complete(new PartitionResponse(
+                            Errors.NONE,
+                            position.getEntryId(),
+                            appendTimestamp,
+                            0L));
+                    } finally {
+                        data.release();
+                    }
+                });
+            } catch (Throwable callbackError) {
                 submissionFuture.complete(null);
                 result.completeExceptionally(callbackError);
             }

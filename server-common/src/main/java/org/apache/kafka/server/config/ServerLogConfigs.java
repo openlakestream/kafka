@@ -247,20 +247,6 @@ public class ServerLogConfigs {
     public static final long URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DEFAULT = 256 * 1024 * 1024L;
     public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DOC = "The size in bytes for triggering a write buffer flush.";
 
-    public static final String URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_APPENDS_PER_PARTITION_CONFIG =
-            "ursa.storage.non.idempotent.max.in.flight.appends.per.partition";
-    public static final int URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_APPENDS_PER_PARTITION_DEFAULT = 16;
-    public static final String URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_APPENDS_PER_PARTITION_DOC =
-            "Maximum number of in-flight non-idempotent appends per partition (stream). Higher values can improve throughput and latency "
-                    + "when the storage backend flushes periodically, but increase memory retained by in-flight produce requests.";
-
-    public static final String URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_BYTES_PER_PARTITION_CONFIG =
-            "ursa.storage.non.idempotent.max.in.flight.bytes.per.partition";
-    public static final long URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_BYTES_PER_PARTITION_DEFAULT = -1L;
-    public static final String URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_BYTES_PER_PARTITION_DOC =
-            "Maximum total bytes of in-flight non-idempotent appends per partition (stream). Set to a positive value to bound memory; "
-                    + "non-positive disables the byte limit.";
-
     public static final String URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_CONFIG =
             "ursa.storage.producer.state.snapshot.interval.ms";
     public static final long URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_DEFAULT = 30_000L;

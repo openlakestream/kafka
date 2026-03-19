@@ -43,8 +43,6 @@ public class UrsaStorageConfig {
     private final long writeBufferFlushIntervalMs;
     private final int writeBufferSize;
     private final long writeBufferFlushSize;
-    private final int nonIdempotentMaxInFlightAppendsPerPartition;
-    private final long nonIdempotentMaxInFlightBytesPerPartition;
     private final String s3Endpoint;
     private final String s3AccessKey;
     private final String s3SecretKey;
@@ -71,9 +69,7 @@ public class UrsaStorageConfig {
                               String compactionBucket,
                               String s3Region,
                               long producerStateSnapshotIntervalMs,
-                              int producerStateSnapshotRecordThreshold,
-                              int nonIdempotentMaxInFlightAppendsPerPartition,
-                              long nonIdempotentMaxInFlightBytesPerPartition) {
+                              int producerStateSnapshotRecordThreshold) {
 
         this.enabled = enabled;
         this.pulsarOxiaServiceUrl = pulsarOxiaServiceUrl;
@@ -84,8 +80,6 @@ public class UrsaStorageConfig {
         this.writeBufferFlushIntervalMs = writeBufferFlushIntervalMs;
         this.writeBufferSize = writeBufferSize;
         this.writeBufferFlushSize = writeBufferFlushSize;
-        this.nonIdempotentMaxInFlightAppendsPerPartition = nonIdempotentMaxInFlightAppendsPerPartition;
-        this.nonIdempotentMaxInFlightBytesPerPartition = nonIdempotentMaxInFlightBytesPerPartition;
         this.s3Endpoint = s3Endpoint;
         this.s3AccessKey = s3AccessKey;
         this.s3SecretKey = s3SecretKey;
@@ -138,14 +132,6 @@ public class UrsaStorageConfig {
                 ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DEFAULT);
 
-        int nonIdempotentMaxInFlightAppendsPerPartition = getIntConfig(configs,
-                ServerLogConfigs.URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_APPENDS_PER_PARTITION_CONFIG,
-                ServerLogConfigs.URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_APPENDS_PER_PARTITION_DEFAULT);
-
-        long nonIdempotentMaxInFlightBytesPerPartition = getLongConfig(configs,
-                ServerLogConfigs.URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_BYTES_PER_PARTITION_CONFIG,
-                ServerLogConfigs.URSA_STORAGE_NON_IDEMPOTENT_MAX_IN_FLIGHT_BYTES_PER_PARTITION_DEFAULT);
-
         String s3Endpoint = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_DEFAULT);
 
@@ -176,8 +162,7 @@ public class UrsaStorageConfig {
                 backendType, storagePath, compactionPrefix,
                 writeBufferFlushIntervalMs, writeBufferSize, writeBufferFlushSize,
                 s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket, compactionBucket, s3Region,
-                producerStateSnapshotIntervalMs, producerStateSnapshotRecordThreshold,
-                nonIdempotentMaxInFlightAppendsPerPartition, nonIdempotentMaxInFlightBytesPerPartition
+                producerStateSnapshotIntervalMs, producerStateSnapshotRecordThreshold
         );
     }
 
@@ -236,14 +221,6 @@ public class UrsaStorageConfig {
 
     public long getWriteBufferFlushSize() {
         return writeBufferFlushSize;
-    }
-
-    public int getNonIdempotentMaxInFlightAppendsPerPartition() {
-        return nonIdempotentMaxInFlightAppendsPerPartition;
-    }
-
-    public long getNonIdempotentMaxInFlightBytesPerPartition() {
-        return nonIdempotentMaxInFlightBytesPerPartition;
     }
 
     public String getS3Endpoint() {

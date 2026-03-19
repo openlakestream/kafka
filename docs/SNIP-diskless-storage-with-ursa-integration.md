@@ -184,7 +184,6 @@ In this SNIP, diskless topics are handled by the ManagedLedger-based implementat
 | `UrsaManagedLedgerReader` | Read path for diskless topics; handles Fetch and ListOffsets via ManagedLedger |
 | `UrsaStorageState` | Manages stream IDs, offset tracking, and shared state |
 | `UrsaProducerStateStore` | Persists producer state to Oxia for idempotent semantics |
-| `NonIdempotentPartitionAppendPipeline` | Per-partition append pipelining for non-idempotent writes (bounded concurrency, preserves order) |
 | `UrsaStorageConfig` | Configuration holder for Ursa settings |
 | `MetadataCacheDisklessStorageView` | Determines if a topic is diskless based on topic config |
 | `ListOffsetsPartitionRequest` | Request DTO for diskless ListOffsets operations |
@@ -259,10 +258,10 @@ We make two complementary changes:
    - Preserve correctness by enforcing **in-order responses per connection** (buffer completed responses until earlier responses are sent).
    - Keep throttling semantics: throttled requests still apply backpressure via mute/unmute during the throttle window.
 
-2. **Per-partition Non-idempotent Append Pipelining (NonIdempotentPartitionAppendPipeline)**:
-   - For non-idempotent producers, allow multiple `ManagedLedger.asyncAddEntry()` calls in-flight per partition (bounded concurrency).
-   - Rely on ManagedLedger's guarantee: append responses complete **in invocation order**, which preserves Kafka partition ordering.
-   - For idempotent producers, keep per-partition serialization around sequence validation/state updates.
+2. **Per-partition Sequenced Writes for Non-idempotent Appends**:
+   - Non-idempotent producers reuse the broker's per-partition sequenced write queue instead of a dedicated pipeline object.
+   - Each write is validated before append submission, then handed off to `ManagedLedger.asyncAddEntry()`.
+   - Once the append is submitted to ManagedLedger, the next queued write for that partition may be submitted, which preserves submission order without a separate configurable pipeline.
 
 #### Threading Model (What Runs Where)
 
@@ -445,8 +444,6 @@ No protocol changes required.
 | `ursa.storage.write.buffer.flush.size` | long | `268435456` (256MB) | Write buffer flush size threshold |
 | `ursa.storage.producer.state.snapshot.interval.ms` | long | `30000` | Periodic interval (ms) for producer-state snapshot. Set `<= 0` to disable time-based snapshot. |
 | `ursa.storage.producer.state.snapshot.record.threshold` | int | `10000` | Number of appended records that triggers producer-state snapshot. Set `<= 0` to disable threshold-based snapshot. |
-| `ursa.storage.non.idempotent.max.in.flight.appends.per.partition` | int | `16` | Maximum in-flight non-idempotent appends per partition |
-| `ursa.storage.non.idempotent.max.in.flight.bytes.per.partition` | long | `-1` | Maximum bytes of in-flight non-idempotent appends per partition (-1 disables) |
 | `ursa.storage.s3.endpoint` | string | `""` | Remote object storage endpoint URL. Reused as an endpoint override for GCS/Azure-compatible deployments |
 | `ursa.storage.s3.bucket` | string | `kafka-ursa-storage` | Remote object storage bucket or container name. Reused for GCS/Azure backends |
 | `ursa.storage.compaction.bucket` | string | `kafka-ursa-storage` | Remote object storage bucket or container name for compaction output |
