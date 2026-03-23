@@ -21,10 +21,13 @@ import org.apache.pulsar.broker.ServiceConfiguration;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
 
-import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.autoconfigure.AutoConfiguredOpenTelemetrySdk;
 import io.oxia.client.api.AsyncOxiaClient;
 import io.streamnative.ursa.mledger.PersistentStorageWalManagedLedgerStorage;
 
@@ -43,17 +46,22 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
     private static final String SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP =
             "kopSchemaRegistryHttpHeaderAuthorizationFile";
 
+    private static final String SERVICE_NAME = "kafka-diskless-storage";
+
     private final ManagedLedgerFactory managedLedgerFactory;
     private final PersistentStorageWalManagedLedgerStorage managedLedgerStorage;
     private final AsyncOxiaClient oxiaClient;
+    private final OpenTelemetrySdk openTelemetrySdk;
 
     private KafkaManagedLedgerFactoryHolder(
             ManagedLedgerFactory managedLedgerFactory,
             PersistentStorageWalManagedLedgerStorage managedLedgerStorage,
-            AsyncOxiaClient oxiaClient) {
+            AsyncOxiaClient oxiaClient,
+            OpenTelemetrySdk openTelemetrySdk) {
         this.managedLedgerFactory = managedLedgerFactory;
         this.managedLedgerStorage = managedLedgerStorage;
         this.oxiaClient = oxiaClient;
+        this.openTelemetrySdk = openTelemetrySdk;
     }
 
     ManagedLedgerFactory factory() {
@@ -76,10 +84,12 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
 
     static KafkaManagedLedgerFactoryHolder create(UrsaStorageConfig config) throws Exception {
         PersistentStorageWalManagedLedgerStorage managedLedgerStorage = null;
+        OpenTelemetrySdk openTelemetrySdk = null;
 
         try {
+            openTelemetrySdk = createOpenTelemetrySdk();
             managedLedgerStorage = new PersistentStorageWalManagedLedgerStorage();
-            managedLedgerStorage.initialize(createServiceConfiguration(config), null, null, null, OpenTelemetry.noop());
+            managedLedgerStorage.initialize(createServiceConfiguration(config), null, null, null, openTelemetrySdk);
             ManagedLedgerFactory managedLedgerFactory =
                     managedLedgerStorage.getDefaultStorageClass().getManagedLedgerFactory();
 
@@ -90,7 +100,8 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
                 throw new IllegalStateException("UrsaStorage oxia client is not initialized");
             }
 
-            return new KafkaManagedLedgerFactoryHolder(managedLedgerFactory, managedLedgerStorage, oxiaClient);
+            return new KafkaManagedLedgerFactoryHolder(
+                    managedLedgerFactory, managedLedgerStorage, oxiaClient, openTelemetrySdk);
         } catch (Exception e) {
             try {
                 if (managedLedgerStorage != null) {
@@ -98,8 +109,33 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
                 }
             } catch (Exception ignored) {
             }
+            if (openTelemetrySdk != null) {
+                openTelemetrySdk.close();
+            }
             throw e;
         }
+    }
+
+    static OpenTelemetrySdk createOpenTelemetrySdk() {
+        return AutoConfiguredOpenTelemetrySdk.builder()
+                .addPropertiesSupplier(KafkaManagedLedgerFactoryHolder::buildOpenTelemetryProperties)
+                .build()
+                .getOpenTelemetrySdk();
+    }
+
+    static Map<String, String> buildOpenTelemetryProperties() {
+        Map<String, String> props = new HashMap<>();
+        props.put("otel.service.name", SERVICE_NAME);
+        props.put("otel.metrics.exporter", "none");
+        props.put("otel.traces.exporter", "none");
+        props.put("otel.logs.exporter", "none");
+        // System properties override defaults
+        for (String name : System.getProperties().stringPropertyNames()) {
+            if (name.startsWith("otel.")) {
+                props.put(name, System.getProperty(name));
+            }
+        }
+        return props;
     }
 
     static Properties buildManagedLedgerProperties(UrsaStorageConfig config) {
@@ -197,6 +233,10 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
             }
         } catch (Exception e) {
             throw new IOException(e);
+        } finally {
+            if (openTelemetrySdk != null) {
+                openTelemetrySdk.close();
+            }
         }
     }
 }
