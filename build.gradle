@@ -270,6 +270,13 @@ allprojects {
           'io.opentelemetry:opentelemetry-api:1.56.0',
           'io.opentelemetry:opentelemetry-common:1.56.0',
           'io.opentelemetry:opentelemetry-context:1.56.0',
+          'io.opentelemetry:opentelemetry-sdk:1.56.0',
+          'io.opentelemetry:opentelemetry-sdk-common:1.56.0',
+          'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:1.56.0',
+          'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.56.0',
+          'io.opentelemetry:opentelemetry-sdk-logs:1.56.0',
+          'io.opentelemetry:opentelemetry-sdk-metrics:1.56.0',
+          'io.opentelemetry:opentelemetry-sdk-trace:1.56.0',
 
           // Avoid multiple versions of the same jar being bundled in ./libs.
           'com.google.errorprone:error_prone_annotations:2.45.0'
@@ -2509,6 +2516,8 @@ project(':storage') {
     }
     implementation 'io.github.oxia-db:oxia-client-api:0.7.0'
     implementation 'io.netty:netty-buffer:4.1.115.Final'
+    implementation 'io.opentelemetry:opentelemetry-sdk:1.56.0'
+    implementation 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:1.56.0'
 
     testImplementation project(':clients')
     testImplementation project(':clients').sourceSets.test.output

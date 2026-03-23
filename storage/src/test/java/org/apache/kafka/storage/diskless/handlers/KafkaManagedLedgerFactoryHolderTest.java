@@ -58,6 +58,14 @@ class KafkaManagedLedgerFactoryHolderTest {
         System.clearProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP);
         System.clearProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP);
         System.clearProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP);
+        System.clearProperty("otel.service.name");
+        System.clearProperty("otel.metrics.exporter");
+        System.clearProperty("otel.traces.exporter");
+        System.clearProperty("otel.logs.exporter");
+        System.clearProperty("otel.exporter.otlp.endpoint");
+        System.clearProperty("otel.sdk.disabled");
+        System.clearProperty("otel.java.disabled.resource.providers");
+        System.clearProperty("otel.exporter.prometheus.port");
     }
 
     @Test
@@ -250,5 +258,59 @@ class KafkaManagedLedgerFactoryHolderTest {
         assertEquals("unused-region", properties.getProperty("compactionBucketRegion"));
         assertFalse(properties.containsKey("s3AccessKeyId"));
         assertFalse(properties.containsKey("s3SecretAccessKey"));
+    }
+
+    @Test
+    void testOpenTelemetryPropertiesDefaults() {
+        Map<String, String> props = KafkaManagedLedgerFactoryHolder.buildOpenTelemetryProperties();
+        assertEquals("kafka-diskless-storage", props.get("otel.service.name"));
+        assertEquals("none", props.get("otel.metrics.exporter"));
+        assertEquals("none", props.get("otel.traces.exporter"));
+        assertEquals("none", props.get("otel.logs.exporter"));
+    }
+
+    @Test
+    void testOpenTelemetryPropertiesSystemPropertyOverridesDefaults() {
+        System.setProperty("otel.service.name", "custom-service");
+        System.setProperty("otel.metrics.exporter", "otlp");
+        System.setProperty("otel.traces.exporter", "otlp");
+        System.setProperty("otel.logs.exporter", "otlp");
+
+        Map<String, String> props = KafkaManagedLedgerFactoryHolder.buildOpenTelemetryProperties();
+        assertEquals("custom-service", props.get("otel.service.name"));
+        assertEquals("otlp", props.get("otel.metrics.exporter"));
+        assertEquals("otlp", props.get("otel.traces.exporter"));
+        assertEquals("otlp", props.get("otel.logs.exporter"));
+    }
+
+    @Test
+    void testOpenTelemetryPropertiesIncludesAdditionalSystemProperties() {
+        System.setProperty("otel.exporter.otlp.endpoint", "http://collector:4317");
+
+        Map<String, String> props = KafkaManagedLedgerFactoryHolder.buildOpenTelemetryProperties();
+        assertEquals("http://collector:4317", props.get("otel.exporter.otlp.endpoint"));
+        // Defaults are still present
+        assertEquals("kafka-diskless-storage", props.get("otel.service.name"));
+        assertEquals("none", props.get("otel.metrics.exporter"));
+    }
+
+    @Test
+    void testOpenTelemetryPropertiesPrometheusExporterViaSystemProperties() {
+        System.setProperty("otel.sdk.disabled", "false");
+        System.setProperty("otel.java.disabled.resource.providers",
+                "io.opentelemetry.instrumentation.resources.ProcessResourceProvider");
+        System.setProperty("otel.metrics.exporter", "prometheus");
+        System.setProperty("otel.exporter.prometheus.port", "9464");
+
+        Map<String, String> props = KafkaManagedLedgerFactoryHolder.buildOpenTelemetryProperties();
+        assertEquals("false", props.get("otel.sdk.disabled"));
+        assertEquals("io.opentelemetry.instrumentation.resources.ProcessResourceProvider",
+                props.get("otel.java.disabled.resource.providers"));
+        assertEquals("prometheus", props.get("otel.metrics.exporter"));
+        assertEquals("9464", props.get("otel.exporter.prometheus.port"));
+        // Other defaults remain
+        assertEquals("kafka-diskless-storage", props.get("otel.service.name"));
+        assertEquals("none", props.get("otel.traces.exporter"));
+        assertEquals("none", props.get("otel.logs.exporter"));
     }
 }
