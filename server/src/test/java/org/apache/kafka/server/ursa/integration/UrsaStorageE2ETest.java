@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 package org.apache.kafka.server.ursa.integration;
-
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.ConfigEntry;
@@ -55,9 +54,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -66,7 +68,10 @@ import java.util.regex.Pattern;
 import io.oxia.client.api.AsyncOxiaClient;
 import io.oxia.client.api.GetResult;
 import io.oxia.client.api.OxiaClientBuilder;
+import io.oxia.client.api.options.GetOption;
 import io.streamnative.oxia.testcontainers.OxiaContainer;
+import io.streamnative.ursa.storage.Key;
+import io.streamnative.ursa.storage.impl.StorageFormat;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -87,7 +92,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Timeout(value = 180, unit = TimeUnit.SECONDS)
 @Tag("integration")
 public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
-
     @TempDir
     static Path baseDir;
 
@@ -679,9 +683,15 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
             createDisklessTopic(cluster, topicName, numPartitions);
             assertPartitionedTopicMetadataExistsInOxia(topicName, numPartitions);
 
+            Map<Integer, Long> streamIds = new HashMap<>();
             for (int partition = 0; partition < numPartitions; partition++) {
                 produceRecords(cluster.bootstrapServers(), topicName, partition, 1);
                 assertManagedLedgerMetadataExistsInOxia(topicName, partition);
+            }
+            try (AsyncOxiaClient oxiaClient = createOxiaClient()) {
+                for (int partition = 0; partition < numPartitions; partition++) {
+                    streamIds.put(partition, managedLedgerStreamId(oxiaClient, topicName, partition));
+                }
             }
 
             Uuid topicId;
@@ -703,7 +713,41 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
             assertPartitionedTopicMetadataDeletedFromOxia(topicName);
             assertManagedLedgerMetadataDeletedFromOxia(topicName, numPartitions);
             assertProducerStateSnapshotsDeletedFromOxia(topicId, numPartitions);
+            try (AsyncOxiaClient oxiaClient = createOxiaClient()) {
+                for (int partition = 0; partition < numPartitions; partition++) {
+                    assertManagedLedgerStreamDeletedFromOxia(
+                            oxiaClient,
+                            topicName,
+                            partition,
+                            streamIds.get(partition)
+                    );
+                }
+            }
             log.info("Partitioned topics metadata test passed for topic {}", topicName);
+        }
+
+        @Test
+        @Timeout(value = 600, unit = TimeUnit.SECONDS)
+        @DisplayName("Bulk diskless topic deletion cleans managed-ledger metadata and stream data")
+        void testBulkTopicDeletionCleansManagedLedgerStreams() throws Exception {
+            int topicCount = 100;
+            int partitionsPerTopic = 10;
+            List<String> topicNames = createBulkDisklessTopics(topicCount, partitionsPerTopic);
+
+            produceOneRecordPerPartition(cluster.bootstrapServers(), topicNames, partitionsPerTopic);
+
+            Map<TopicPartition, Long> streamIds;
+            try (AsyncOxiaClient oxiaClient = createOxiaClient()) {
+                streamIds = captureManagedLedgerStreamIds(oxiaClient, topicNames, partitionsPerTopic);
+            }
+
+            try (Admin admin = Admin.create(cluster.clientProperties())) {
+                admin.deleteTopics(topicNames).all().get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            }
+
+            try (AsyncOxiaClient oxiaClient = createOxiaClient()) {
+                assertBulkTopicDeletionCleanedUp(oxiaClient, topicNames, partitionsPerTopic, streamIds, topicCount);
+            }
         }
 
         private void assertManagedLedgerMetadataExistsInOxia(String topicName) throws Exception {
@@ -711,8 +755,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
         }
 
         private void assertManagedLedgerMetadataExistsInOxia(String topicName, int partition) throws Exception {
-            String managedLedgerPath = "/managed-ledgers/public/default/persistent/" + topicName + "-partition-" + partition;
-            assertOxiaKeyExists(managedLedgerPath, "ManagedLedgerMetadata");
+            assertOxiaKeyExists(managedLedgerMetadataPath(topicName, partition), "ManagedLedgerMetadata");
         }
 
         private void assertPartitionedTopicMetadataExistsInOxia(String topicName, int expectedPartitions)
@@ -745,14 +788,14 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
         }
 
         private void assertPartitionedTopicMetadataDeletedFromOxia(String topicName) throws Exception {
-            String key = "/admin/partitioned-topics/public/default/persistent/" + topicName;
-            assertOxiaKeyDeleted(key, "PartitionedTopicMetadata");
+            try (AsyncOxiaClient client = createOxiaClient()) {
+                assertPartitionedTopicMetadataDeletedFromOxia(client, topicName);
+            }
         }
 
         private void assertManagedLedgerMetadataDeletedFromOxia(String topicName, int partitions) throws Exception {
-            for (int partition = 0; partition < partitions; partition++) {
-                String key = "/managed-ledgers/public/default/persistent/" + topicName + "-partition-" + partition;
-                assertOxiaKeyDeleted(key, "ManagedLedgerMetadata");
+            try (AsyncOxiaClient client = createOxiaClient()) {
+                assertManagedLedgerMetadataDeletedFromOxia(client, topicName, partitions);
             }
         }
 
@@ -779,40 +822,219 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
         }
 
         private void assertProducerStateSnapshotsDeletedFromOxia(Uuid topicId, int partitions) throws Exception {
-            for (int partition = 0; partition < partitions; partition++) {
-                String key = "producer-state-snapshot/" + topicId + "-" + partition;
-                assertOxiaKeyDeleted(key, "ProducerStateSnapshot");
+            try (AsyncOxiaClient client = createOxiaClient()) {
+                for (int partition = 0; partition < partitions; partition++) {
+                    String key = "producer-state-snapshot/" + topicId + "-" + partition;
+                    assertOxiaKeyDeleted(client, key, "ProducerStateSnapshot");
+                }
             }
         }
 
         private void assertOxiaKeyExists(String key, String description) throws Exception {
-            String oxiaServiceAddress = oxiaContainer.getServiceAddress();
-            String namespace = ServerLogConfigs.URSA_STORAGE_NAMESPACE_DEFAULT;
-
-            try (AsyncOxiaClient client = OxiaClientBuilder.create(oxiaServiceAddress)
-                    .namespace(namespace)
-                    .asyncClient()
-                    .get()) {
-                TestUtils.waitForCondition(() -> {
-                    GetResult result = client.get(key).get(10, TimeUnit.SECONDS);
-                    return result != null && result.value() != null && result.value().length > 0;
-                }, 30_000, 100, () -> "Timed out waiting for " + description + " to exist in Oxia: " + key);
+            try (AsyncOxiaClient client = createOxiaClient()) {
+                assertOxiaKeyExists(client, key, description);
             }
         }
 
         private void assertOxiaKeyDeleted(String key, String description) throws Exception {
-            String oxiaServiceAddress = oxiaContainer.getServiceAddress();
-            String namespace = ServerLogConfigs.URSA_STORAGE_NAMESPACE_DEFAULT;
-
-            try (AsyncOxiaClient client = OxiaClientBuilder.create(oxiaServiceAddress)
-                    .namespace(namespace)
-                    .asyncClient()
-                    .get()) {
-                TestUtils.waitForCondition(() -> {
-                    GetResult result = client.get(key).get(10, TimeUnit.SECONDS);
-                    return result == null || result.value() == null;
-                }, 30_000, 100, () -> "Timed out waiting for " + description + " to be deleted from Oxia: " + key);
+            try (AsyncOxiaClient client = createOxiaClient()) {
+                assertOxiaKeyDeleted(client, key, description);
             }
+        }
+
+        private AsyncOxiaClient createOxiaClient() throws Exception {
+            return OxiaClientBuilder.create(oxiaContainer.getServiceAddress())
+                    .namespace(ServerLogConfigs.URSA_STORAGE_NAMESPACE_DEFAULT)
+                    .asyncClient()
+                    .get();
+        }
+
+        private void produceOneRecordPerPartition(String bootstrapServers, List<String> topicNames, int partitions)
+                throws Exception {
+            try (Producer<byte[], byte[]> producer = createProducer(bootstrapServers)) {
+                for (String topicName : topicNames) {
+                    for (int partition = 0; partition < partitions; partition++) {
+                        producer.send(new ProducerRecord<>(
+                                topicName,
+                                partition,
+                                ("bulk-key-" + topicName + "-" + partition).getBytes(StandardCharsets.UTF_8),
+                                ("bulk-value-" + topicName + "-" + partition).getBytes(StandardCharsets.UTF_8)
+                        )).get(PRODUCE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    }
+                }
+                producer.flush();
+            }
+        }
+
+        private List<String> createBulkDisklessTopics(int topicCount, int partitionsPerTopic) throws Exception {
+            List<String> topicNames = new ArrayList<>(topicCount);
+            List<NewTopic> topicsToCreate = new ArrayList<>(topicCount);
+            for (int topicIndex = 0; topicIndex < topicCount; topicIndex++) {
+                String topicName = uniqueTopicName("bulk-delete-topic-" + topicIndex);
+                topicNames.add(topicName);
+                topicsToCreate.add(new NewTopic(topicName, partitionsPerTopic, (short) 1)
+                        .configs(Map.of(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true")));
+            }
+
+            try (Admin admin = Admin.create(cluster.clientProperties())) {
+                admin.createTopics(topicsToCreate).all().get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                for (String topicName : topicNames) {
+                    waitForTopicReady(admin, topicName, partitionsPerTopic);
+                }
+            }
+            return topicNames;
+        }
+
+        private Map<TopicPartition, Long> captureManagedLedgerStreamIds(
+                AsyncOxiaClient client,
+                List<String> topicNames,
+                int partitions
+        ) throws Exception {
+            Map<TopicPartition, Long> streamIds = new HashMap<>();
+            for (String topicName : topicNames) {
+                for (int partition = 0; partition < partitions; partition++) {
+                    TopicPartition topicPartition = new TopicPartition(topicName, partition);
+                    streamIds.put(topicPartition, managedLedgerStreamId(client, topicName, partition));
+                }
+            }
+            return streamIds;
+        }
+
+        private void assertBulkTopicDeletionCleanedUp(
+                AsyncOxiaClient client,
+                List<String> topicNames,
+                int partitionsPerTopic,
+                Map<TopicPartition, Long> streamIds,
+                int topicCount
+        ) throws Exception {
+            TestUtils.waitForCondition(() -> {
+                try {
+                    return areBulkTopicsDeleted(client, topicNames, partitionsPerTopic, streamIds);
+                } catch (Exception e) {
+                    return false;
+                }
+            }, 120_000, 500, () -> "Timed out waiting for bulk managed-ledger cleanup for " + topicCount + " topics");
+        }
+
+        private boolean areBulkTopicsDeleted(
+                AsyncOxiaClient client,
+                List<String> topicNames,
+                int partitionsPerTopic,
+                Map<TopicPartition, Long> streamIds
+        ) throws Exception {
+            for (String topicName : topicNames) {
+                if (!isOxiaKeyDeleted(client, "/admin/partitioned-topics/public/default/persistent/" + topicName)) {
+                    return false;
+                }
+                for (int partition = 0; partition < partitionsPerTopic; partition++) {
+                    TopicPartition topicPartition = new TopicPartition(topicName, partition);
+                    if (!isOxiaKeyDeleted(client, managedLedgerMetadataPath(topicName, partition))) {
+                        return false;
+                    }
+                    if (!isManagedLedgerStreamDeletedFromOxia(
+                            client,
+                            topicName,
+                            partition,
+                            streamIds.get(topicPartition))) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        private long managedLedgerStreamId(AsyncOxiaClient client, String topicName, int partition) throws Exception {
+            GetResult result = client.get(
+                    StorageFormat.STREAM_ID_GENERATOR_PATH + "/" + managedLedgerName(topicName, partition),
+                    Set.of(GetOption.PartitionKey(StorageFormat.STREAM_ID_GENERATOR_PATH))
+            ).get(10, TimeUnit.SECONDS);
+            assertNotNull(result, "Stream id should exist for " + topicName + "-" + partition);
+            return Long.parseLong(new String(result.value(), StandardCharsets.UTF_8));
+        }
+
+        private void assertPartitionedTopicMetadataDeletedFromOxia(AsyncOxiaClient client, String topicName) throws Exception {
+            String key = "/admin/partitioned-topics/public/default/persistent/" + topicName;
+            assertOxiaKeyDeleted(client, key, "PartitionedTopicMetadata");
+        }
+
+        private void assertManagedLedgerMetadataDeletedFromOxia(
+                AsyncOxiaClient client,
+                String topicName,
+                int partitions
+        ) throws Exception {
+            for (int partition = 0; partition < partitions; partition++) {
+                assertOxiaKeyDeleted(client, managedLedgerMetadataPath(topicName, partition), "ManagedLedgerMetadata");
+            }
+        }
+
+        private void assertManagedLedgerStreamDeletedFromOxia(
+                AsyncOxiaClient client,
+                String topicName,
+                int partition,
+                long streamId
+        ) throws Exception {
+            TestUtils.waitForCondition(() -> {
+                try {
+                    return isManagedLedgerStreamDeletedFromOxia(client, topicName, partition, streamId);
+                } catch (Exception e) {
+                    return false;
+                }
+            }, 30_000, 100, () -> "Timed out waiting for stream cleanup for " + topicName + "-" + partition);
+        }
+
+        private boolean isManagedLedgerStreamDeletedFromOxia(
+                AsyncOxiaClient client,
+                String topicName,
+                int partition,
+                long streamId
+        ) throws Exception {
+            List<String> streamIndexes = client.list(
+                    Key.smallestKey(streamId).toString(),
+                    Key.largestKey(streamId).toString()
+            ).get(10, TimeUnit.SECONDS);
+            if (!streamIndexes.isEmpty()) {
+                return false;
+            }
+
+            GetResult streamIdResult = client.get(
+                    StorageFormat.STREAM_ID_GENERATOR_PATH + "/" + managedLedgerName(topicName, partition),
+                    Set.of(GetOption.PartitionKey(StorageFormat.STREAM_ID_GENERATOR_PATH))
+            ).get(10, TimeUnit.SECONDS);
+            return streamIdResult == null || streamIdResult.value() == null;
+        }
+
+        private void assertOxiaKeyExists(AsyncOxiaClient client, String key, String description) throws Exception {
+            TestUtils.waitForCondition(() -> {
+                try {
+                    GetResult result = client.get(key).get(10, TimeUnit.SECONDS);
+                    return result != null && result.value() != null && result.value().length > 0;
+                } catch (Exception e) {
+                    return false;
+                }
+            }, 30_000, 100, () -> "Timed out waiting for " + description + " to exist in Oxia: " + key);
+        }
+
+        private void assertOxiaKeyDeleted(AsyncOxiaClient client, String key, String description) throws Exception {
+            TestUtils.waitForCondition(() -> {
+                try {
+                    return isOxiaKeyDeleted(client, key);
+                } catch (Exception e) {
+                    return false;
+                }
+            }, 30_000, 100, () -> "Timed out waiting for " + description + " to be deleted from Oxia: " + key);
+        }
+
+        private boolean isOxiaKeyDeleted(AsyncOxiaClient client, String key) throws Exception {
+            GetResult result = client.get(key).get(10, TimeUnit.SECONDS);
+            return result == null || result.value() == null;
+        }
+
+        private String managedLedgerMetadataPath(String topicName, int partition) {
+            return "/managed-ledgers/" + managedLedgerName(topicName, partition);
+        }
+
+        private String managedLedgerName(String topicName, int partition) {
+            return "public/default/persistent/" + topicName + "-partition-" + partition;
         }
     }
 

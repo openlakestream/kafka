@@ -61,7 +61,7 @@ class UrsaPartitionedTopicsMetadataSyncTest {
     }
 
     @Test
-    void deleteTopicMetadataDeletesPartitionedManagedLedgersAndProducerSnapshots() throws Exception {
+    void deleteTopicMetadataDeletesPartitionedTopicAndProducerSnapshots() throws Exception {
         RecordingStore store = new RecordingStore();
         List<String> faults = new CopyOnWriteArrayList<>();
         UrsaPartitionedTopicsMetadataSync sync = new UrsaPartitionedTopicsMetadataSync(
@@ -78,7 +78,6 @@ class UrsaPartitionedTopicsMetadataSyncTest {
         Set<String> expectedKeys = new HashSet<>();
         expectedKeys.add("/admin/partitioned-topics/public/default/persistent/" + topicName);
         for (int partition = 0; partition < partitions; partition++) {
-            expectedKeys.add("/managed-ledgers/public/default/persistent/" + topicName + "-partition-" + partition);
             expectedKeys.add(ProducerStateSnapshotKeys.snapshotKey(topicId, partition));
         }
 
@@ -103,7 +102,7 @@ class UrsaPartitionedTopicsMetadataSyncTest {
         int partitions = 2;
         sync.deleteTopicMetadata(topicName, null, partitions, "test");
 
-        TestUtils.waitForCondition(() -> store.deleteKeys.size() == 1 + partitions,
+        TestUtils.waitForCondition(() -> store.deleteKeys.size() == 1,
                 5_000,
                 "Timed out waiting for delete operations. actual=" + store.deleteKeys);
         assertFalse(store.deleteKeys.stream().anyMatch(k -> k.startsWith("producer-state-snapshot/")),

@@ -301,6 +301,30 @@ public class UrsaStorageState implements Closeable {
         return cleaned;
     }
 
+    /**
+     * Permanently delete the managed ledger and underlying Ursa stream for a partition.
+     *
+     * <p>This path is idempotent: missing metadata is treated as success because the desired end state is already
+     * reached.
+     */
+    public void deletePartitionData(TopicIdPartition tp) {
+        if (tp == null) {
+            return;
+        }
+
+        String managedLedgerName = KafkaManagedLedgerNaming.managedLedgerName(tp);
+        try {
+            managedLedgerFactory.delete(managedLedgerName, CompletableFuture.completedFuture(null));
+        } catch (ManagedLedgerException.MetadataNotFoundException e) {
+            log.debug("ManagedLedger metadata already deleted for partition {}", tp, e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted deleting partition data for " + tp, e);
+        } catch (ManagedLedgerException e) {
+            throw new RuntimeException("Failed to delete partition data for " + tp, e);
+        }
+    }
+
     public Set<TopicIdPartition> snapshotPartitionsWithLocalState() {
         Set<TopicIdPartition> partitions = new LinkedHashSet<>(managedLedgerCache.keySet());
         partitions.addAll(producerStateManagers.keySet());

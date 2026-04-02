@@ -16,9 +16,14 @@
  */
 package kafka.server.metadata;
 
+import org.apache.kafka.common.TopicIdPartition;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.config.ConfigResource;
+import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
+import org.apache.kafka.image.TopicImage;
 import org.apache.kafka.image.TopicsDelta;
 import org.apache.kafka.image.loader.LoaderManifest;
 import org.apache.kafka.image.publisher.MetadataPublisher;
@@ -26,6 +31,7 @@ import org.apache.kafka.storage.diskless.DisklessStorageReplicaManagerSupport;
 
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -56,15 +62,37 @@ public class DisklessStateReconcilerPublisher implements MetadataPublisher {
             MetadataImage newImage,
             LoaderManifest manifest
     ) {
-        disklessStorageSupport.reconcileTrackedPartitions(deletedTopicIds(delta), onTopicMaybeEmptied);
+        disklessStorageSupport.reconcileTrackedPartitions(deletedDisklessPartitions(delta), onTopicMaybeEmptied);
     }
 
-    private Set<Uuid> deletedTopicIds(MetadataDelta delta) {
+    private Set<TopicIdPartition> deletedDisklessPartitions(MetadataDelta delta) {
         TopicsDelta topicsDelta = delta.topicsDelta();
         if (topicsDelta == null || topicsDelta.deletedTopicIds().isEmpty()) {
             return Collections.emptySet();
         }
 
-        return new HashSet<>(topicsDelta.deletedTopicIds());
+        MetadataImage oldImage = delta.image();
+        Set<TopicIdPartition> deletedPartitions = new HashSet<>();
+        for (Uuid topicId : topicsDelta.deletedTopicIds()) {
+            TopicImage oldTopicImage = oldImage.topics().getTopic(topicId);
+            if (oldTopicImage == null || !isDisklessTopic(oldImage, oldTopicImage.name())) {
+                continue;
+            }
+
+            for (Integer partitionId : oldTopicImage.partitions().keySet()) {
+                deletedPartitions.add(new TopicIdPartition(
+                        topicId,
+                        new TopicPartition(oldTopicImage.name(), partitionId)
+                ));
+            }
+        }
+        return deletedPartitions;
+    }
+
+    private boolean isDisklessTopic(MetadataImage image, String topicName) {
+        ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, topicName);
+        Map<String, String> configs = image.configs().configMapForResource(resource);
+        String enabledValue = configs.get(TopicConfig.URSA_STORAGE_ENABLE_CONFIG);
+        return Boolean.parseBoolean(enabledValue);
     }
 }
