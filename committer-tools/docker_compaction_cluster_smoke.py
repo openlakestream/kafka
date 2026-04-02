@@ -100,7 +100,9 @@ def build_kafka_diskless_image(project_dir: str, tarball: str, image_tag: str) -
         )
 
 
-def docker_compose(compose_dir: str, args: list[str], env: dict[str, str]) -> None:
+def docker_compose(
+    compose_dir: str, args: list[str], env: dict[str, str], check: bool = True
+) -> None:
     docker = shutil.which("docker")
     if not docker:
         print("Error: docker CLI not found on PATH.")
@@ -109,8 +111,29 @@ def docker_compose(compose_dir: str, args: list[str], env: dict[str, str]) -> No
         [docker, "compose", *args],
         cwd=compose_dir,
         env=env,
-        check=True,
+        check=check,
     )
+
+
+def print_compose_diagnostics(
+    compose_dir: str, compose_file: str, env: dict[str, str], services: list[str]
+) -> None:
+    print("\nDocker compose startup failed. Collecting diagnostics...")
+
+    diagnostic_commands = [
+        (
+            "docker compose ps -a",
+            ["-f", compose_file, "ps", "-a"],
+        ),
+        (
+            "docker compose logs",
+            ["-f", compose_file, "logs", "--no-color", "--tail", "200", *services],
+        ),
+    ]
+
+    for title, args in diagnostic_commands:
+        print(f"\n[{title}]")
+        docker_compose(compose_dir, args, env, check=False)
 
 
 def main() -> None:
@@ -193,6 +216,9 @@ def main() -> None:
         )
 
         print("\nOK: docker compose smoke test completed.")
+    except subprocess.CalledProcessError:
+        print_compose_diagnostics(compose_dir, base_compose, env, up_services)
+        raise
     finally:
         print("\nCleaning up docker compose resources...")
         try:
@@ -207,4 +233,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

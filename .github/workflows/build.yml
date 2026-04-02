@@ -35,7 +35,7 @@ on:
         type: boolean
 
 env:
-  URSA_STORAGE_REF: branch-4.1.3.2
+  URSA_STORAGE_REF: branch-4.1.3.4
 
 jobs:
   configure:

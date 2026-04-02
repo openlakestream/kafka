@@ -32,7 +32,8 @@ services:
       retries: 10
 
   localstack:
-    image: localstack/localstack:latest
+    # Pin LocalStack to a stable release so CI is not affected by `latest` nightly/account-gating changes.
+    image: ${LOCALSTACK_IMAGE:-localstack/localstack:3.6.0}
     hostname: localstack
     container_name: localstack
     ports:
