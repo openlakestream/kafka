@@ -49,7 +49,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -132,6 +134,52 @@ class UrsaStorageStateTest {
 
         verify(producerStateManager, never()).cleanup(false);
         verify(managedLedgerFactory, never()).asyncOpen(anyString(), any(), any(), any(), any());
+    }
+
+    @Test
+    void testDeletePartitionDataUsesManagedLedgerFactoryDelete() throws Exception {
+        TopicIdPartition tp = new TopicIdPartition(Uuid.randomUuid(), new TopicPartition("delete-topic", 0));
+        ManagedLedgerFactory managedLedgerFactory = mock(ManagedLedgerFactory.class);
+
+        try (UrsaStorageState state = new UrsaStorageState(
+                Time.SYSTEM,
+                1,
+                mock(UrsaStorageConfig.class),
+                mock(BrokerTopicStats.class),
+                managedLedgerFactory,
+                ignored -> mock(ProducerStateManager.class))) {
+            state.deletePartitionData(tp);
+
+            verify(managedLedgerFactory).delete(
+                    eq("public/default/persistent/delete-topic-partition-0"),
+                    any(CompletableFuture.class)
+            );
+            verify(managedLedgerFactory, never()).asyncOpen(anyString(), any(), any(), any(), any());
+        }
+    }
+
+    @Test
+    void testDeletePartitionDataTreatsMissingMetadataAsSuccess() throws Exception {
+        TopicIdPartition tp = new TopicIdPartition(Uuid.randomUuid(), new TopicPartition("delete-missing-topic", 0));
+        ManagedLedgerFactory managedLedgerFactory = mock(ManagedLedgerFactory.class);
+        doThrow(new org.apache.bookkeeper.mledger.ManagedLedgerException.MetadataNotFoundException("missing"))
+                .when(managedLedgerFactory)
+                .delete(eq("public/default/persistent/delete-missing-topic-partition-0"), any(CompletableFuture.class));
+
+        try (UrsaStorageState state = new UrsaStorageState(
+                Time.SYSTEM,
+                1,
+                mock(UrsaStorageConfig.class),
+                mock(BrokerTopicStats.class),
+                managedLedgerFactory,
+                ignored -> mock(ProducerStateManager.class))) {
+            state.deletePartitionData(tp);
+
+            verify(managedLedgerFactory).delete(
+                    eq("public/default/persistent/delete-missing-topic-partition-0"),
+                    any(CompletableFuture.class)
+            );
+        }
     }
 
     @Test

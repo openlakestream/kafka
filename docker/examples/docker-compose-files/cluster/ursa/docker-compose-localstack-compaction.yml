@@ -42,6 +42,8 @@ services:
       SERVICES: s3
       DEBUG: 0
       PERSISTENCE: 1
+      # LocalStack latest may require explicit acknowledgement to continue in community mode.
+      LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: "1"
     volumes:
       - localstack-data:/var/lib/localstack
       - /var/run/docker.sock:/var/run/docker.sock

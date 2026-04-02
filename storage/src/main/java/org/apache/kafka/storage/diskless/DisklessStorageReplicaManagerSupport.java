@@ -207,24 +207,79 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         return Set.copyOf(partitionsNeedingReconcile());
     }
 
-    public void reconcileTrackedPartitions(Set<Uuid> deletedTopicIds, Consumer<String> onTopicMaybeEmptied) {
+    public void reconcileTrackedPartitions(
+            Set<TopicIdPartition> deletedPartitions,
+            Consumer<String> onTopicMaybeEmptied
+    ) {
         Set<TopicIdPartition> partitionsToCheck = partitionsNeedingReconcile();
-        if (!enabled || partitionsToCheck.isEmpty()) {
+        Set<TopicIdPartition> permanentlyDeletedPartitions =
+                deletedPartitions != null ? deletedPartitions : Collections.emptySet();
+        if (!enabled || (partitionsToCheck.isEmpty() && permanentlyDeletedPartitions.isEmpty())) {
             return;
         }
 
-        Set<Uuid> deletedTopics = deletedTopicIds != null ? deletedTopicIds : Collections.emptySet();
         Consumer<String> topicMaybeEmptied = onTopicMaybeEmptied != null ? onTopicMaybeEmptied : ignored -> { };
+        Set<TopicIdPartition> trackedPartitionsToCleanup = new LinkedHashSet<>();
+        Set<TopicIdPartition> trackedPartitionsToDelete = new LinkedHashSet<>();
 
         for (TopicIdPartition trackedPartition : partitionsToCheck) {
-            boolean deletePartition = deletedTopics.contains(trackedPartition.topicId());
-            if (!shouldCleanupTrackedPartition(trackedPartition, deletePartition)) {
-                continue;
+            if (permanentlyDeletedPartitions.contains(trackedPartition)) {
+                trackedPartitionsToDelete.add(trackedPartition);
+            } else if (shouldCleanupTrackedPartition(trackedPartition)) {
+                trackedPartitionsToCleanup.add(trackedPartition);
             }
+        }
 
-            if (cleanupPartitionInternal(trackedPartition, deletePartition)) {
+        // TODO: Since deleted partitions are only passed on the deletion delta,
+        //  there may be no subsequent retries—leaving managed-ledger metadata/stream leaked.
+        cleanupTrackedPartitions(trackedPartitionsToCleanup, topicMaybeEmptied);
+        cleanupDeletedTrackedPartitions(trackedPartitionsToDelete, topicMaybeEmptied);
+
+        Set<TopicIdPartition> deletedPartitionsWithoutTrackedState =
+                deletedPartitionsWithoutTrackedState(partitionsToCheck, permanentlyDeletedPartitions);
+        cleanupDeletedPartitionsWithoutTrackedState(deletedPartitionsWithoutTrackedState);
+    }
+
+    private void cleanupTrackedPartitions(
+            Set<TopicIdPartition> trackedPartitionsToCleanup,
+            Consumer<String> topicMaybeEmptied
+    ) {
+        for (TopicIdPartition trackedPartition : trackedPartitionsToCleanup) {
+            if (cleanupPartitionInternal(trackedPartition, false)) {
                 topicMaybeEmptied.accept(trackedPartition.topic());
             }
+        }
+    }
+
+    private void cleanupDeletedTrackedPartitions(
+            Set<TopicIdPartition> trackedPartitionsToDelete,
+            Consumer<String> topicMaybeEmptied
+    ) {
+        for (TopicIdPartition trackedPartition : trackedPartitionsToDelete) {
+            boolean cleanupSucceeded = cleanupPartitionInternal(trackedPartition, true);
+            cleanupSucceeded = deletePartitionDataInternal(trackedPartition) && cleanupSucceeded;
+            if (cleanupSucceeded) {
+                topicMaybeEmptied.accept(trackedPartition.topic());
+            }
+        }
+    }
+
+    private Set<TopicIdPartition> deletedPartitionsWithoutTrackedState(
+            Set<TopicIdPartition> trackedPartitions,
+            Set<TopicIdPartition> permanentlyDeletedPartitions
+    ) {
+        Set<TopicIdPartition> deletedPartitionsWithoutTrackedState = new LinkedHashSet<>();
+        for (TopicIdPartition deletedPartition : permanentlyDeletedPartitions) {
+            if (!trackedPartitions.contains(deletedPartition)) {
+                deletedPartitionsWithoutTrackedState.add(deletedPartition);
+            }
+        }
+        return deletedPartitionsWithoutTrackedState;
+    }
+
+    private void cleanupDeletedPartitionsWithoutTrackedState(Set<TopicIdPartition> deletedPartitionsWithoutTrackedState) {
+        for (TopicIdPartition deletedPartition : deletedPartitionsWithoutTrackedState) {
+            deletePartitionDataInternal(deletedPartition);
         }
     }
 
@@ -370,6 +425,14 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         return cleanupSucceeded;
     }
 
+    private boolean deletePartitionDataInternal(TopicIdPartition tp) {
+        if (!enabled || tp == null || !isCurrentDisklessOwner(tp) || ursaState == null) {
+            return true;
+        }
+        // TODO: Add retry for transient failures.
+        return cleanupStep("persistent storage", tp, () -> ursaState.deletePartitionData(tp));
+    }
+
     private <V, O, R> CompletableFuture<Map<TopicIdPartition, R>> handleWithOwnership(
             Map<TopicIdPartition, V> entries,
             String operationName,
@@ -511,10 +574,7 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         return partitions;
     }
 
-    private boolean shouldCleanupTrackedPartition(TopicIdPartition trackedPartition, boolean deletePartition) {
-        if (deletePartition) {
-            return true;
-        }
+    private boolean shouldCleanupTrackedPartition(TopicIdPartition trackedPartition) {
 
         // Compare against the current metadata topic ID instead of the tracked one so we
         // can cleanup stale local state after topic deletion or same-name topic recreation.

@@ -59,8 +59,10 @@ public final class UrsaPartitionedTopicsMetadataSync implements AutoCloseable {
     }
 
     /**
-     * Delete /admin/partitioned-topics entry, and optionally /managed-ledgers and producer-state snapshot entries
-     * if partitions >= 0.
+     * Delete the partitioned topic metadata entry and any producer-state snapshot entries if partitions >= 0.
+     *
+     * <p>Managed ledger metadata and the underlying Ursa stream are deleted by the broker-side reconciliation path,
+     * which still has enough context to perform a complete delete through the managed ledger factory.
      *
      * <p>Producer-state snapshot keys are only deleted when topicId is present.
      */
@@ -69,8 +71,6 @@ public final class UrsaPartitionedTopicsMetadataSync implements AutoCloseable {
         enqueue("delete " + partitionedKey, context, () -> store.delete(partitionedKey));
         if (partitions >= 0) {
             for (int partition = 0; partition < partitions; partition++) {
-                String mlKey = managedLedgerMetadataPath(topicName, partition);
-                enqueue("delete " + mlKey, context, () -> store.delete(mlKey));
                 if (topicId != null && !topicId.isBlank()) {
                     String producerStateKey = ProducerStateSnapshotKeys.snapshotKey(topicId, partition);
                     enqueue("delete " + producerStateKey, context, () -> store.delete(producerStateKey));
@@ -119,13 +119,5 @@ public final class UrsaPartitionedTopicsMetadataSync implements AutoCloseable {
                 + KafkaManagedLedgerNaming.NAMESPACE + "/"
                 + KafkaManagedLedgerNaming.DOMAIN + "/"
                 + topicName;
-    }
-
-    static String managedLedgerMetadataPath(String topicName, int partition) {
-        return KafkaManagedLedgerNaming.MANAGED_LEDGER_PREFIX
-                + KafkaManagedLedgerNaming.TENANT + "/"
-                + KafkaManagedLedgerNaming.NAMESPACE + "/"
-                + KafkaManagedLedgerNaming.DOMAIN + "/"
-                + topicName + "-partition-" + partition;
     }
 }

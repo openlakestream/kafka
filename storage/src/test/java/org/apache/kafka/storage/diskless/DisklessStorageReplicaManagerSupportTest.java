@@ -156,14 +156,46 @@ class DisklessStorageReplicaManagerSupportTest {
             assertEquals(Set.of(topic), support.trackedTopicNames());
 
             AtomicInteger callbackCount = new AtomicInteger(0);
-            support.reconcileTrackedPartitions(Set.of(tp.topicId()), ignored -> callbackCount.incrementAndGet());
+            support.reconcileTrackedPartitions(Set.of(tp), ignored -> callbackCount.incrementAndGet());
 
             verify(writer).cleanupPartition(tp);
             verify(reader).cleanupPartition(tp);
             verify(ursaState).cleanupPartition(tp, true);
+            verify(ursaState).deletePartitionData(tp);
             assertEquals(1, callbackCount.get());
             assertTrue(support.snapshotTrackedPartitions().isEmpty());
             assertFalse(support.hasTrackedPartitionsForTopic(topic));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test
+    void testReconcileDeletesPartitionDataOnlyOnOwnerBroker() {
+        int localBrokerId = 1;
+        TopicIdPartition tp = topicIdPartition("diskless-delete-owned-by-other-topic", 0);
+        Writer writer = mock(Writer.class);
+        Reader reader = mock(Reader.class);
+        UrsaStorageState ursaState = mock(UrsaStorageState.class);
+        DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
+        DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
+        configureWriterState(writer, true);
+        when(selector.selectBroker(tp.topicId(), tp.partition())).thenReturn(
+                java.util.OptionalInt.of(localBrokerId),
+                java.util.OptionalInt.of(localBrokerId + 1)
+        );
+
+        try (DisklessStorageReplicaManagerSupport support =
+                     new DisklessStorageReplicaManagerSupport(metadataView, localBrokerId, selector, writer, reader, ursaState)) {
+            support.handleAppend(Map.of(tp, MemoryRecords.EMPTY)).join();
+
+            support.reconcileTrackedPartitions(Set.of(tp), ignored -> { });
+
+            verify(writer).cleanupPartition(tp);
+            verify(reader).cleanupPartition(tp);
+            verify(ursaState).cleanupPartition(tp, true);
+            verify(ursaState, never()).deletePartitionData(tp);
+            assertTrue(support.snapshotTrackedPartitions().isEmpty());
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -195,6 +227,7 @@ class DisklessStorageReplicaManagerSupportTest {
             verify(writer).cleanupPartition(tp);
             verify(reader).cleanupPartition(tp);
             verify(ursaState).cleanupPartition(tp, false);
+            verify(ursaState, never()).deletePartitionData(tp);
             assertTrue(support.snapshotTrackedPartitions().isEmpty());
         } catch (Exception e) {
             throw new RuntimeException(e);
@@ -224,6 +257,7 @@ class DisklessStorageReplicaManagerSupportTest {
             verify(writer).cleanupPartition(tp);
             verify(reader).cleanupPartition(tp);
             verify(ursaState).cleanupPartition(tp, false);
+            verify(ursaState, never()).deletePartitionData(tp);
             assertTrue(support.snapshotTrackedPartitions().isEmpty());
         } catch (Exception e) {
             throw new RuntimeException(e);
@@ -253,6 +287,7 @@ class DisklessStorageReplicaManagerSupportTest {
             verify(writer, never()).cleanupPartition(tp);
             verify(reader, never()).cleanupPartition(tp);
             verify(ursaState, never()).cleanupPartition(any(), eq(false));
+            verify(ursaState, never()).deletePartitionData(any());
             assertEquals(Set.of(tp), support.snapshotTrackedPartitions());
             assertTrue(support.hasTrackedPartitionsForTopic(tp.topic()));
         } catch (Exception e) {
@@ -285,6 +320,7 @@ class DisklessStorageReplicaManagerSupportTest {
             verify(writer, times(1)).cleanupPartition(tp);
             verify(reader, times(1)).cleanupPartition(tp);
             verify(ursaState, times(1)).cleanupPartition(tp, false);
+            verify(ursaState, never()).deletePartitionData(tp);
             assertEquals(0, callbackCount.get());
             assertEquals(Set.of(tp), support.snapshotTrackedPartitions());
         } catch (Exception e) {
@@ -312,6 +348,31 @@ class DisklessStorageReplicaManagerSupportTest {
             verify(writer).cleanupPartition(tp);
             verify(reader).cleanupPartition(tp);
             verify(ursaState).cleanupPartition(tp, false);
+            verify(ursaState, never()).deletePartitionData(tp);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test
+    void testReconcileDeletesUntrackedDeletedPartitionDataWhenCurrentBrokerIsOwner() {
+        int localBrokerId = 1;
+        TopicIdPartition tp = topicIdPartition("diskless-deleted-untracked-topic", 0);
+        Writer writer = mock(Writer.class);
+        Reader reader = mock(Reader.class);
+        UrsaStorageState ursaState = mock(UrsaStorageState.class);
+        DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
+        DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
+        when(selector.selectBroker(tp.topicId(), tp.partition())).thenReturn(java.util.OptionalInt.of(localBrokerId));
+
+        try (DisklessStorageReplicaManagerSupport support =
+                     new DisklessStorageReplicaManagerSupport(metadataView, localBrokerId, selector, writer, reader, ursaState)) {
+            support.reconcileTrackedPartitions(Set.of(tp), ignored -> { });
+
+            verify(writer, never()).cleanupPartition(tp);
+            verify(reader, never()).cleanupPartition(tp);
+            verify(ursaState, never()).cleanupPartition(any(), eq(false));
+            verify(ursaState).deletePartitionData(tp);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
