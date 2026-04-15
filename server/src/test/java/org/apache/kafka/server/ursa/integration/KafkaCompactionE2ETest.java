@@ -86,8 +86,6 @@ public class KafkaCompactionE2ETest extends UrsaStorageE2ETestBase {
     private static final String S3_BUCKET = "kafka-ursa-storage";
     private static final String EXTERNAL_READER_FACTORY_CLASS =
             "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory";
-    private static final String EXTERNAL_READER_FACTORY_CLASS_PROP = "ursa.externalReaderFactoryClass";
-    private static final String KOP_SCHEMA_REGISTRY_URL_PROP = "kopSchemaRegistryUrl";
 
     private static final String COMPACTOR_IMAGE_ENV = "URSA_COMPACTOR_IMAGE";
     private static final String SN_LICENSE_FILE_ENV = "SN_LICENSE_FILE";
@@ -160,9 +158,6 @@ public class KafkaCompactionE2ETest extends UrsaStorageE2ETestBase {
                 .asyncClient()
                 .get();
 
-        System.setProperty(EXTERNAL_READER_FACTORY_CLASS_PROP, EXTERNAL_READER_FACTORY_CLASS);
-        System.setProperty(KOP_SCHEMA_REGISTRY_URL_PROP, schemaRegistryBaseUrl);
-
         cluster = createCluster(
                 oxiaContainer.getServiceAddress(), s3Endpoint, localStackContainer, s3Prefix);
         cluster.format();
@@ -173,9 +168,6 @@ public class KafkaCompactionE2ETest extends UrsaStorageE2ETestBase {
 
     @AfterAll
     static void stopContainers() {
-        System.clearProperty(EXTERNAL_READER_FACTORY_CLASS_PROP);
-        System.clearProperty(KOP_SCHEMA_REGISTRY_URL_PROP);
-
         closeQuietly(verificationClient, "verification client");
         closeQuietly(cluster, "Kafka cluster");
         closeQuietly(schemaRegistryContainer, "schema registry container");
@@ -465,6 +457,9 @@ public class KafkaCompactionE2ETest extends UrsaStorageE2ETestBase {
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_S3_SECRET_KEY_CONFIG, "test")
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_S3_BUCKET_CONFIG, S3_BUCKET)
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG, localStackContainer.getRegion())
+                .setConfigProp(ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_CONFIG,
+                        EXTERNAL_READER_FACTORY_CLASS)
+                .setConfigProp(ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_CONFIG, schemaRegistryBaseUrl)
                 .setConfigProp("offsets.topic.replication.factor", "1")
                 .setConfigProp("transaction.state.log.replication.factor", "1")
                 .setConfigProp("transaction.state.log.min.isr", "1")

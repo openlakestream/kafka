@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.diskless.handlers;
 
+import org.apache.kafka.common.config.types.Password;
 import org.apache.kafka.server.config.ServerLogConfigs;
 
 import org.junit.jupiter.api.Test;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class UrsaStorageConfigTest {
 
@@ -52,6 +54,48 @@ class UrsaStorageConfigTest {
 
         assertEquals(1234L, config.getProducerStateSnapshotIntervalMs());
         assertEquals(5678, config.getProducerStateSnapshotRecordThreshold());
+    }
+
+    @Test
+    void testExternalReaderDefaults() throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of());
+
+        assertEquals(ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_DEFAULT,
+            config.getExternalReaderFactoryClass());
+        assertNull(config.getConfiguredExternalReaderFactoryClass());
+        assertNull(config.getKopSchemaRegistryUrl());
+        assertNull(config.getKopSchemaRegistryHttpHeaderAuthorization());
+        assertNull(config.getKopSchemaRegistryHttpHeaderAuthorizationFile());
+    }
+
+    @Test
+    void testExternalReaderOverrides() throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of(
+            ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_CONFIG,
+                "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory",
+            ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_CONFIG, "http://example:8001",
+            ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_CONFIG, "Bearer token",
+            ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_CONFIG,
+                "/mnt/secrets/token"
+        ));
+
+        assertEquals("io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory",
+            config.getExternalReaderFactoryClass());
+        assertEquals("io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory",
+            config.getConfiguredExternalReaderFactoryClass());
+        assertEquals("http://example:8001", config.getKopSchemaRegistryUrl());
+        assertEquals("Bearer token", config.getKopSchemaRegistryHttpHeaderAuthorization());
+        assertEquals("/mnt/secrets/token", config.getKopSchemaRegistryHttpHeaderAuthorizationFile());
+    }
+
+    @Test
+    void testExternalReaderAuthorizationPasswordValueIsUnwrapped() throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of(
+            ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_CONFIG,
+                new Password("Bearer token")
+        ));
+
+        assertEquals("Bearer token", config.getKopSchemaRegistryHttpHeaderAuthorization());
     }
 
     private static String backendType(String backendType) throws Exception {

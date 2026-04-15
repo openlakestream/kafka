@@ -36,14 +36,12 @@ import io.streamnative.ursa.mledger.PersistentStorageWalManagedLedgerStorage;
  */
 final class KafkaManagedLedgerFactoryHolder implements Closeable {
 
-    private static final String EXTERNAL_READER_FACTORY_CLASS_PROP = "externalReaderFactoryClass";
-    private static final String NOOP_EXTERNAL_READER_FACTORY_CLASS =
-            "io.streamnative.ursa.mledger.reader.NoopExternalReaderFactory";
-    private static final String SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP = "ursa.externalReaderFactoryClass";
-    private static final String SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP = "kopSchemaRegistryUrl";
-    private static final String SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP =
+    public static final String EXTERNAL_READER_FACTORY_CLASS_PROP = "externalReaderFactoryClass";
+    public static final String LEGACY_SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP = "ursa.externalReaderFactoryClass";
+    public static final String KOP_SCHEMA_REGISTRY_URL_PROP = "kopSchemaRegistryUrl";
+    public static final String KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP =
             "kopSchemaRegistryHttpHeaderAuthorization";
-    private static final String SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP =
+    public static final String KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP =
             "kopSchemaRegistryHttpHeaderAuthorizationFile";
 
     private static final String SERVICE_NAME = "kafka-diskless-storage";
@@ -164,30 +162,37 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
             setIfNotEmpty(config.getS3Region(), v -> properties.setProperty("s3Region", v));
         }
 
-        String externalReaderFactoryClass =
-                System.getProperty(SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP, NOOP_EXTERNAL_READER_FACTORY_CLASS);
+        String externalReaderFactoryClass = firstNonBlank(
+                config.getConfiguredExternalReaderFactoryClass(),
+                System.getProperty(LEGACY_SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP),
+                UrsaStorageConfig.NOOP_EXTERNAL_READER_FACTORY_CLASS);
         properties.setProperty(EXTERNAL_READER_FACTORY_CLASS_PROP, externalReaderFactoryClass);
-        if (!NOOP_EXTERNAL_READER_FACTORY_CLASS.equals(externalReaderFactoryClass)) {
+        if (!UrsaStorageConfig.NOOP_EXTERNAL_READER_FACTORY_CLASS.equals(externalReaderFactoryClass)) {
             // Required by LakehouseReaderFactory / KSNSchemaRegistry.
-            String kopSchemaRegistryUrl = System.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP);
-            if (kopSchemaRegistryUrl != null && !kopSchemaRegistryUrl.isBlank()) {
-                properties.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP, kopSchemaRegistryUrl);
+            String kopSchemaRegistryUrl = firstNonBlank(
+                    config.getKopSchemaRegistryUrl(),
+                    System.getProperty(KOP_SCHEMA_REGISTRY_URL_PROP),
+                    null);
+            if (kopSchemaRegistryUrl != null) {
+                properties.setProperty(KOP_SCHEMA_REGISTRY_URL_PROP, kopSchemaRegistryUrl);
             }
 
-            String kopSchemaRegistryHttpHeaderAuthorizationFile =
-                    System.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP);
-            if (kopSchemaRegistryHttpHeaderAuthorizationFile != null
-                    && !kopSchemaRegistryHttpHeaderAuthorizationFile.isBlank()) {
+            String kopSchemaRegistryHttpHeaderAuthorizationFile = firstNonBlank(
+                    config.getKopSchemaRegistryHttpHeaderAuthorizationFile(),
+                    System.getProperty(KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP),
+                    null);
+            if (kopSchemaRegistryHttpHeaderAuthorizationFile != null) {
                 properties.setProperty(
-                        SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP,
+                        KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP,
                         kopSchemaRegistryHttpHeaderAuthorizationFile);
             } else {
-                String kopSchemaRegistryHttpHeaderAuthorization =
-                        System.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP);
-                if (kopSchemaRegistryHttpHeaderAuthorization != null
-                        && !kopSchemaRegistryHttpHeaderAuthorization.isBlank()) {
+                String kopSchemaRegistryHttpHeaderAuthorization = firstNonBlank(
+                        config.getKopSchemaRegistryHttpHeaderAuthorization(),
+                        System.getProperty(KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP),
+                        null);
+                if (kopSchemaRegistryHttpHeaderAuthorization != null) {
                     properties.setProperty(
-                            SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP,
+                            KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP,
                             kopSchemaRegistryHttpHeaderAuthorization);
                 }
             }
@@ -223,6 +228,16 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
         if (value != null && !value.isEmpty()) {
             setter.accept(value);
         }
+    }
+
+    private static String firstNonBlank(String first, String second, String defaultValue) {
+        if (first != null && !first.isBlank()) {
+            return first;
+        }
+        if (second != null && !second.isBlank()) {
+            return second;
+        }
+        return defaultValue;
     }
 
     @Override
