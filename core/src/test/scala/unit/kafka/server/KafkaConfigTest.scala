@@ -914,14 +914,22 @@ class KafkaConfigTest {
 
         // Ursa storage configs: many are plain strings, so do not treat "not_a_number" as invalid.
         case ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG => // ignore string
+        case ServerLogConfigs.PULSAR_OXIA_SERVICE_URL_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_OXIA_SERVICE_URL_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_NAMESPACE_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_PATH_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_COMPACTION_PREFIX_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_COMPACTION_BUCKET_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_S3_ACCESS_KEY_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_S3_SECRET_KEY_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_S3_BUCKET_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_CONFIG => // ignore string
 
         case CleanerConfig.LOG_CLEANER_IO_MAX_BYTES_PER_SECOND_PROP => assertPropertyInvalid(baseProperties, name, "not_a_number")
         case CleanerConfig.LOG_CLEANER_DEDUPE_BUFFER_SIZE_PROP => assertPropertyInvalid(baseProperties, name, "not_a_number", "1024")
@@ -938,6 +946,10 @@ class KafkaConfigTest {
         case ServerLogConfigs.LOG_MESSAGE_TIMESTAMP_BEFORE_MAX_MS_CONFIG => assertPropertyInvalid(baseProperties, name, "not_a_number")
         case ServerLogConfigs.LOG_MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG => assertPropertyInvalid(baseProperties, name, "not_a_number")
         case ServerLogConfigs.LOG_FLUSH_START_OFFSET_CHECKPOINT_INTERVAL_MS_CONFIG => assertPropertyInvalid(baseProperties, name, "not_a_number")
+        case ServerLogConfigs.URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_CONFIG =>
+          assertPropertyInvalid(baseProperties, name, "not_a_number")
+        case ServerLogConfigs.URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_RECORD_THRESHOLD_CONFIG =>
+          assertPropertyInvalid(baseProperties, name, "not_a_number")
         case ServerLogConfigs.NUM_RECOVERY_THREADS_PER_DATA_DIR_CONFIG => assertPropertyInvalid(baseProperties, name, "not_a_number", "0")
         case ServerLogConfigs.AUTO_CREATE_TOPICS_ENABLE_CONFIG => assertPropertyInvalid(baseProperties, name, "not_a_boolean", "0")
         case ServerLogConfigs.MIN_IN_SYNC_REPLICAS_CONFIG => assertPropertyInvalid(baseProperties, name, "not_a_number", "0")
@@ -1265,6 +1277,7 @@ class KafkaConfigTest {
           assertDynamic(kafkaConfigProp, 10015L, () => config.remoteLogManagerConfig.logLocalRetentionMs)
         case TopicConfig.LOCAL_LOG_RETENTION_BYTES_CONFIG =>
           assertDynamic(kafkaConfigProp, 10016L, () => config.remoteLogManagerConfig.logLocalRetentionBytes)
+        case TopicConfig.URSA_STORAGE_ENABLE_CONFIG =>
         // not dynamically updatable
         case QuotaConfig.FOLLOWER_REPLICATION_THROTTLED_REPLICAS_CONFIG =>
         // topic only config

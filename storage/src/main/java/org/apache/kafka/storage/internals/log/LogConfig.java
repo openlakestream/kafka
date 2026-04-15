@@ -58,6 +58,7 @@ import static org.apache.kafka.common.config.ConfigDef.Type.DOUBLE;
 import static org.apache.kafka.common.config.ConfigDef.Type.INT;
 import static org.apache.kafka.common.config.ConfigDef.Type.LIST;
 import static org.apache.kafka.common.config.ConfigDef.Type.LONG;
+import static org.apache.kafka.common.config.ConfigDef.Type.PASSWORD;
 import static org.apache.kafka.common.config.ConfigDef.Type.STRING;
 import static org.apache.kafka.common.config.ConfigDef.ValidString.in;
 
@@ -212,6 +213,19 @@ public class LogConfig extends AbstractConfig {
             .define(ServerLogConfigs.URSA_STORAGE_COMPACTION_BUCKET_CONFIG, STRING,
                     ServerLogConfigs.URSA_STORAGE_COMPACTION_BUCKET_DEFAULT,
                     new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_COMPACTION_BUCKET_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_CONFIG, STRING,
+                    ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_DEFAULT,
+                    new ConfigDef.NonEmptyString(), LOW,
+                    ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_CONFIG, STRING,
+                    ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_DEFAULT, LOW,
+                    ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_CONFIG, PASSWORD,
+                    ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_DEFAULT, LOW,
+                    ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_CONFIG, STRING,
+                    ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_DEFAULT, LOW,
+                    ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_CONFIG, LONG, ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DEFAULT, atLeast(0), LOW, ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_CONFIG, LONG, ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DEFAULT, atLeast(0), LOW, ServerLogConfigs.URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_CONFIG, LONG,

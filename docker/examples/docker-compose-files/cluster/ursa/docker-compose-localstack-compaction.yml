@@ -208,10 +208,12 @@ services:
       KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: "100"
 
       # Enable lakehouse reader for compacted(parquet) indexes.
-      # NOTE: the `kafka-diskless` image uses `KAFKA_JVM_PERFORMANCE_OPTS` (not `KAFKA_OPTS`) to pass JVM system properties.
+      KAFKA_URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS: >-
+        io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory
+      KAFKA_URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL: "http://schema-registry:8001"
+      # NOTE: the `kafka-diskless` image uses `KAFKA_JVM_PERFORMANCE_OPTS` (not `KAFKA_OPTS`) for JVM system properties
+      # that still need to be passed directly to the JVM, such as AWS SDK credentials used by parquet readers/writers.
       KAFKA_JVM_PERFORMANCE_OPTS: >-
-        -Dursa.externalReaderFactoryClass=io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory
-        -DkopSchemaRegistryUrl=http://schema-registry:8001
         -Daws.accessKeyId=test
         -Daws.secretAccessKey=test
     volumes:
@@ -258,9 +260,10 @@ services:
       KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE: "4096"
       KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: "100"
 
+      KAFKA_URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS: >-
+        io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory
+      KAFKA_URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL: "http://schema-registry:8001"
       KAFKA_JVM_PERFORMANCE_OPTS: >-
-        -Dursa.externalReaderFactoryClass=io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory
-        -DkopSchemaRegistryUrl=http://schema-registry:8001
         -Daws.accessKeyId=test
         -Daws.secretAccessKey=test
     volumes:
@@ -307,9 +310,10 @@ services:
       KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE: "4096"
       KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: "100"
 
+      KAFKA_URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS: >-
+        io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory
+      KAFKA_URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL: "http://schema-registry:8001"
       KAFKA_JVM_PERFORMANCE_OPTS: >-
-        -Dursa.externalReaderFactoryClass=io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory
-        -DkopSchemaRegistryUrl=http://schema-registry:8001
         -Daws.accessKeyId=test
         -Daws.secretAccessKey=test
     volumes:

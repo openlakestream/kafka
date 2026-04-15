@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.diskless.handlers;
 
+import org.apache.kafka.common.config.types.Password;
 import org.apache.kafka.server.config.ServerLogConfigs;
 import org.apache.kafka.storage.diskless.OxiaServiceUrl;
 
@@ -25,6 +26,8 @@ import java.util.Map;
  * Configuration for Ursa storage integration using ManagedLedger.
  */
 public class UrsaStorageConfig {
+    public static final String NOOP_EXTERNAL_READER_FACTORY_CLASS =
+            ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_DEFAULT;
 
     private final boolean enabled;
     /**
@@ -49,6 +52,10 @@ public class UrsaStorageConfig {
     private final String s3Bucket;
     private final String compactionBucket;
     private final String s3Region;
+    private final String externalReaderFactoryClass;
+    private final String kopSchemaRegistryUrl;
+    private final String kopSchemaRegistryHttpHeaderAuthorization;
+    private final String kopSchemaRegistryHttpHeaderAuthorizationFile;
     private final long producerStateSnapshotIntervalMs;
     private final int producerStateSnapshotRecordThreshold;
 
@@ -68,6 +75,10 @@ public class UrsaStorageConfig {
                               String s3Bucket,
                               String compactionBucket,
                               String s3Region,
+                              String externalReaderFactoryClass,
+                              String kopSchemaRegistryUrl,
+                              String kopSchemaRegistryHttpHeaderAuthorization,
+                              String kopSchemaRegistryHttpHeaderAuthorizationFile,
                               long producerStateSnapshotIntervalMs,
                               int producerStateSnapshotRecordThreshold) {
 
@@ -86,6 +97,10 @@ public class UrsaStorageConfig {
         this.s3Bucket = s3Bucket;
         this.compactionBucket = compactionBucket;
         this.s3Region = s3Region;
+        this.externalReaderFactoryClass = externalReaderFactoryClass;
+        this.kopSchemaRegistryUrl = kopSchemaRegistryUrl;
+        this.kopSchemaRegistryHttpHeaderAuthorization = kopSchemaRegistryHttpHeaderAuthorization;
+        this.kopSchemaRegistryHttpHeaderAuthorizationFile = kopSchemaRegistryHttpHeaderAuthorizationFile;
         this.producerStateSnapshotIntervalMs = producerStateSnapshotIntervalMs;
         this.producerStateSnapshotRecordThreshold = producerStateSnapshotRecordThreshold;
     }
@@ -150,6 +165,18 @@ public class UrsaStorageConfig {
         String s3Region = getStringConfig(configs, ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_S3_REGION_DEFAULT);
 
+        String externalReaderFactoryClass = getOptionalStringConfig(configs,
+                ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_CONFIG);
+
+        String kopSchemaRegistryUrl = getOptionalStringConfig(configs,
+                ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_CONFIG);
+
+        String kopSchemaRegistryHttpHeaderAuthorization = getOptionalStringConfig(configs,
+                ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_CONFIG);
+
+        String kopSchemaRegistryHttpHeaderAuthorizationFile = getOptionalStringConfig(configs,
+                ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_CONFIG);
+
         long producerStateSnapshotIntervalMs = getLongConfig(configs,
                 ServerLogConfigs.URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_CONFIG,
                 ServerLogConfigs.URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_DEFAULT);
@@ -162,6 +189,8 @@ public class UrsaStorageConfig {
                 backendType, storagePath, compactionPrefix,
                 writeBufferFlushIntervalMs, writeBufferSize, writeBufferFlushSize,
                 s3Endpoint, s3AccessKey, s3SecretKey, s3Bucket, compactionBucket, s3Region,
+                externalReaderFactoryClass, kopSchemaRegistryUrl, kopSchemaRegistryHttpHeaderAuthorization,
+                kopSchemaRegistryHttpHeaderAuthorizationFile,
                 producerStateSnapshotIntervalMs, producerStateSnapshotRecordThreshold
         );
     }
@@ -169,6 +198,20 @@ public class UrsaStorageConfig {
     private static String getStringConfig(Map<String, ?> configs, String key, String defaultValue) {
         Object value = configs.get(key);
         return value != null ? String.valueOf(value) : defaultValue;
+    }
+
+    private static String getOptionalStringConfig(Map<String, ?> configs, String key) {
+        Object value = configs.get(key);
+        if (value == null) {
+            return null;
+        }
+        String stringValue = value instanceof Password
+                ? ((Password) value).value()
+                : String.valueOf(value);
+        if (stringValue == null) {
+            return null;
+        }
+        return stringValue.isBlank() ? null : stringValue;
     }
 
     private static long getLongConfig(Map<String, ?> configs, String key, long defaultValue) {
@@ -245,6 +288,26 @@ public class UrsaStorageConfig {
 
     public String getS3Region() {
         return s3Region;
+    }
+
+    public String getExternalReaderFactoryClass() {
+        return externalReaderFactoryClass != null ? externalReaderFactoryClass : NOOP_EXTERNAL_READER_FACTORY_CLASS;
+    }
+
+    public String getConfiguredExternalReaderFactoryClass() {
+        return externalReaderFactoryClass;
+    }
+
+    public String getKopSchemaRegistryUrl() {
+        return kopSchemaRegistryUrl;
+    }
+
+    public String getKopSchemaRegistryHttpHeaderAuthorization() {
+        return kopSchemaRegistryHttpHeaderAuthorization;
+    }
+
+    public String getKopSchemaRegistryHttpHeaderAuthorizationFile() {
+        return kopSchemaRegistryHttpHeaderAuthorizationFile;
     }
 
     public long getProducerStateSnapshotIntervalMs() {

@@ -234,6 +234,35 @@ public class ServerLogConfigs {
     public static final String URSA_STORAGE_COMPACTION_BUCKET_DOC =
             "The object storage bucket or container name for Ursa compaction output.";
 
+    public static final String URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_CONFIG =
+            "ursa.storage.external.reader.factory.class";
+    public static final String URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_DEFAULT =
+            "io.streamnative.ursa.mledger.reader.NoopExternalReaderFactory";
+    public static final String URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_DOC =
+            "The external reader factory class used by Ursa managed ledger readers.";
+
+    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_CONFIG =
+            "ursa.storage.kop.schema.registry.url";
+    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_DEFAULT = "";
+    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_DOC =
+            "The schema registry URL used by the external reader factory for Kafka parquet serde.";
+
+    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_CONFIG =
+            "ursa.storage.kop.schema.registry.http.header.authorization";
+    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_DEFAULT = "";
+    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_DOC =
+            "Optional full <code>Authorization</code> header value sent as-is to the schema registry by the external "
+                    + "reader factory. Examples: <code>Bearer token</code>, "
+                    + "<code>Basic base64(username:password)</code>.";
+
+    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_CONFIG =
+            "ursa.storage.kop.schema.registry.http.header.authorization.file";
+    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_DEFAULT = "";
+    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_DOC =
+            "Optional file path containing the full <code>Authorization</code> header value sent as-is to the schema "
+                    + "registry by the external reader factory. The file contents should be a value such as "
+                    + "<code>Bearer token</code> or <code>Basic base64(username:password)</code>.";
+
     public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_CONFIG = "ursa.storage.write.buffer.flush.interval.ms";
     public static final long URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DEFAULT = 250L;
     public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DOC = "The interval in milliseconds for flushing the write buffer.";

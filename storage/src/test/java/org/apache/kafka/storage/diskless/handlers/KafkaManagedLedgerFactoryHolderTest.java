@@ -33,16 +33,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class KafkaManagedLedgerFactoryHolderTest {
 
-    private static final String SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP = "ursa.externalReaderFactoryClass";
-    private static final String EXTERNAL_READER_FACTORY_CLASS_PROP = "externalReaderFactoryClass";
-    private static final String NOOP_EXTERNAL_READER_FACTORY_CLASS =
-            "io.streamnative.ursa.mledger.reader.NoopExternalReaderFactory";
-    private static final String SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP = "kopSchemaRegistryUrl";
-    private static final String SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP =
-            "kopSchemaRegistryHttpHeaderAuthorization";
-    private static final String SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP =
-            "kopSchemaRegistryHttpHeaderAuthorizationFile";
-
     @BeforeEach
     void setUp() {
         clearSystemProperties();
@@ -54,10 +44,10 @@ class KafkaManagedLedgerFactoryHolderTest {
     }
 
     private static void clearSystemProperties() {
-        System.clearProperty(SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP);
-        System.clearProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP);
-        System.clearProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP);
-        System.clearProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP);
+        System.clearProperty(KafkaManagedLedgerFactoryHolder.LEGACY_SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP);
+        System.clearProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_URL_PROP);
+        System.clearProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP);
+        System.clearProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP);
         System.clearProperty("otel.service.name");
         System.clearProperty("otel.metrics.exporter");
         System.clearProperty("otel.traces.exporter");
@@ -72,70 +62,123 @@ class KafkaManagedLedgerFactoryHolderTest {
     void testDoesNotInjectSchemaRegistryConfigWhenExternalReaderFactoryIsNoop() throws Exception {
         UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of());
 
-        System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP, "http://example:8001");
-        System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP, "Bearer token");
-        System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP, "/mnt/secrets/token");
+        System.setProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_URL_PROP, "http://example:8001");
+        System.setProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP, "Bearer token");
+        System.setProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP,
+                "/mnt/secrets/token");
 
         Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
 
-        assertEquals(NOOP_EXTERNAL_READER_FACTORY_CLASS, properties.getProperty(EXTERNAL_READER_FACTORY_CLASS_PROP));
-        assertFalse(properties.containsKey(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP));
-        assertFalse(properties.containsKey(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP));
-        assertFalse(properties.containsKey(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP));
+        assertEquals(UrsaStorageConfig.NOOP_EXTERNAL_READER_FACTORY_CLASS,
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.EXTERNAL_READER_FACTORY_CLASS_PROP));
+        assertFalse(properties.containsKey(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_URL_PROP));
+        assertFalse(properties.containsKey(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP));
+        assertFalse(properties.containsKey(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP));
     }
 
     @Test
-    void testInjectsSchemaRegistryAuthorizationWhenExternalReaderEnabled() throws Exception {
-        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of());
-
-        System.setProperty(SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP,
-                "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory");
-        System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP, "http://example:8001");
-        System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP, "Bearer token");
+    void testInjectsSchemaRegistryAuthorizationWhenExternalReaderConfigured() throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of(
+                ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_CONFIG,
+                        "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory",
+                ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_CONFIG, "http://example:8001",
+                ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_CONFIG, "Bearer token"
+        ));
 
         Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
 
         assertEquals(
                 "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory",
-                properties.getProperty(EXTERNAL_READER_FACTORY_CLASS_PROP));
-        assertEquals("http://example:8001", properties.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP));
-        assertEquals("Bearer token", properties.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP));
-        assertFalse(properties.containsKey(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP));
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.EXTERNAL_READER_FACTORY_CLASS_PROP));
+        assertEquals("http://example:8001",
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_URL_PROP));
+        assertEquals("Bearer token",
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP));
+        assertFalse(properties.containsKey(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP));
     }
 
     @Test
     void testAuthorizationFileTakesPrecedenceOverAuthorizationValue() throws Exception {
-        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of());
-
-        System.setProperty(SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP,
-                "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory");
-        System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP, "http://example:8001");
-        System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP, "Bearer token");
-        System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP, "/mnt/secrets/token");
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of(
+                ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_CONFIG,
+                        "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory",
+                ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_CONFIG, "http://example:8001",
+                ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_CONFIG, "Bearer token",
+                ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_CONFIG,
+                        "/mnt/secrets/token"
+        ));
 
         Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
 
-        assertEquals("http://example:8001", properties.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP));
+        assertEquals("http://example:8001",
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_URL_PROP));
         assertEquals(
                 "/mnt/secrets/token",
-                properties.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP));
-        assertFalse(properties.containsKey(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP));
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP));
+        assertFalse(properties.containsKey(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP));
     }
 
     @Test
     void testBlankAuthorizationIsIgnored() throws Exception {
-        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of());
-
-        System.setProperty(SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP,
-                "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory");
-        System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP, "http://example:8001");
-        System.setProperty(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP, "   ");
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of(
+                ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_CONFIG,
+                        "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory",
+                ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_CONFIG, "http://example:8001",
+                ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_CONFIG, "   "
+        ));
 
         Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
 
-        assertEquals("http://example:8001", properties.getProperty(SYSTEM_KOP_SCHEMA_REGISTRY_URL_PROP));
-        assertFalse(properties.containsKey(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP));
-        assertFalse(properties.containsKey(SYSTEM_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP));
+        assertEquals("http://example:8001",
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_URL_PROP));
+        assertFalse(properties.containsKey(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP));
+        assertFalse(properties.containsKey(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_PROP));
+    }
+
+    @Test
+    void testBrokerConfigOverridesLegacySystemPropertyFallback() throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of(
+                ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_CONFIG,
+                        "io.streamnative.ursa.lakehouse.reader.ConfigReaderFactory",
+                ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_CONFIG, "http://config:8001",
+                ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_CONFIG,
+                        "Bearer config-token"
+        ));
+
+        System.setProperty(KafkaManagedLedgerFactoryHolder.LEGACY_SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP,
+                "io.streamnative.ursa.lakehouse.reader.LegacyReaderFactory");
+        System.setProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_URL_PROP, "http://legacy:8001");
+        System.setProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP,
+                "Bearer legacy-token");
+
+        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
+
+        assertEquals("io.streamnative.ursa.lakehouse.reader.ConfigReaderFactory",
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.EXTERNAL_READER_FACTORY_CLASS_PROP));
+        assertEquals("http://config:8001",
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_URL_PROP));
+        assertEquals("Bearer config-token",
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP));
+    }
+
+    @Test
+    void testLegacySystemPropertyFallbackStillWorks() throws Exception {
+        UrsaStorageConfig config = UrsaStorageConfig.fromConfigs(Map.of());
+
+        System.setProperty(KafkaManagedLedgerFactoryHolder.LEGACY_SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP,
+                "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory");
+        System.setProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_URL_PROP, "http://legacy:8001");
+        System.setProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP,
+                "Bearer legacy-token");
+
+        Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
+
+        assertEquals("io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory",
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.EXTERNAL_READER_FACTORY_CLASS_PROP));
+        assertEquals("http://legacy:8001",
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_URL_PROP));
+        assertEquals("Bearer legacy-token",
+                properties.getProperty(KafkaManagedLedgerFactoryHolder.KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_PROP));
     }
 
     @Test
@@ -242,7 +285,7 @@ class KafkaManagedLedgerFactoryHolderTest {
                 ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG, "unused-region"
         ));
 
-        System.setProperty(SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP,
+        System.setProperty(KafkaManagedLedgerFactoryHolder.LEGACY_SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP,
                 "io.streamnative.ursa.lakehouse.reader.LakehouseReaderFactory");
 
         Properties properties = KafkaManagedLedgerFactoryHolder.buildManagedLedgerProperties(config);
