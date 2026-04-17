@@ -46,7 +46,10 @@ jobs:
 
       - name: Run Claude Code
         id: claude
-        uses: anthropics/claude-code-action@v1
+        # Pinned around https://github.com/anthropics/claude-code-action/issues/1187
+        # (v1.0.89+ crashes with `ENOENT: …, symlink` when CLAUDE.md is a symlink).
+        # Unpin back to @v1 once https://github.com/anthropics/claude-code-action/pull/1186 ships.
+        uses: anthropics/claude-code-action@v1.0.88
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
