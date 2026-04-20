@@ -28,6 +28,8 @@ import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.message.ShareAcknowledgeResponseData;
 import org.apache.kafka.common.message.ShareFetchResponseData.PartitionData;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.requests.ShareRequestMetadata;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.internals.ImplicitLinkedHashCollection;
@@ -47,6 +49,7 @@ import org.apache.kafka.server.share.dlq.ShareGroupDLQManager;
 import org.apache.kafka.server.share.fetch.DelayedShareFetchGroupKey;
 import org.apache.kafka.server.share.fetch.DelayedShareFetchKey;
 import org.apache.kafka.server.share.fetch.DelayedShareFetchPartitionKey;
+import org.apache.kafka.server.share.fetch.PartitionMaxBytesStrategy;
 import org.apache.kafka.server.share.fetch.PartitionRotateStrategy;
 import org.apache.kafka.server.share.fetch.PartitionRotateStrategy.PartitionRotateMetadata;
 import org.apache.kafka.server.share.fetch.ShareFetch;
@@ -56,10 +59,13 @@ import org.apache.kafka.server.share.session.ShareSession;
 import org.apache.kafka.server.share.session.ShareSessionCache;
 import org.apache.kafka.server.share.session.ShareSessionKey;
 import org.apache.kafka.server.storage.log.FetchParams;
+import org.apache.kafka.server.storage.log.FetchPartitionData;
+import org.apache.kafka.server.util.FutureUtils;
 import org.apache.kafka.server.util.timer.SystemTimer;
 import org.apache.kafka.server.util.timer.SystemTimerReaper;
 import org.apache.kafka.server.util.timer.Timer;
 import org.apache.kafka.server.util.timer.TimerTask;
+import org.apache.kafka.storage.diskless.DisklessStorageReplicaManagerSupport;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
 import org.slf4j.Logger;
@@ -73,11 +79,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+
+import static org.apache.kafka.server.share.persister.PartitionFactory.DEFAULT_LEADER_EPOCH;
 
 /**
  * The SharePartitionManager is responsible for managing the SharePartitions and ShareSessions.
@@ -333,10 +343,65 @@ public class SharePartitionManager implements AutoCloseable {
             .type(PartitionRotateStrategy.StrategyType.ROUND_ROBIN)
             .rotate(topicIdPartitions, new PartitionRotateMetadata(sessionEpoch));
 
-        CompletableFuture<Map<TopicIdPartition, PartitionData>> future = new CompletableFuture<>();
-        processShareFetch(new ShareFetch(fetchParams, groupId, memberId, future, rotatedTopicIdPartitions, shareAcquireMode, batchSize, maxFetchRecords, brokerTopicStats));
+        DisklessStorageReplicaManagerSupport disklessStorageSupport = replicaManager.disklessStorageSupport();
+        if (disklessStorageSupport == null) {
+            return createClassicShareFetchFuture(
+                groupId,
+                memberId,
+                fetchParams,
+                shareAcquireMode,
+                batchSize,
+                maxFetchRecords,
+                rotatedTopicIdPartitions
+            );
+        }
 
-        return future;
+        Map<TopicIdPartition, FetchRequest.PartitionData> fetchInfos = new LinkedHashMap<>(rotatedTopicIdPartitions.size());
+        rotatedTopicIdPartitions.forEach(topicIdPartition -> fetchInfos.put(topicIdPartition, new FetchRequest.PartitionData(
+            topicIdPartition.topicId(),
+            0,
+            0,
+            fetchParams.maxBytes,
+            Optional.empty()
+        )));
+
+        DisklessStorageReplicaManagerSupport.PartitionedEntries<TopicIdPartition, FetchRequest.PartitionData> partitionedFetchInfos =
+            disklessStorageSupport.partitionFetchInfos(fetchInfos);
+
+        CompletableFuture<Map<TopicIdPartition, PartitionData>> classicFuture =
+            partitionedFetchInfos.classic().isEmpty() ? CompletableFuture.completedFuture(Map.of()) : createClassicShareFetchFuture(
+                groupId,
+                memberId,
+                fetchParams,
+                shareAcquireMode,
+                batchSize,
+                maxFetchRecords,
+                new ArrayList<>(partitionedFetchInfos.classic().keySet())
+            );
+
+        CompletableFuture<Map<TopicIdPartition, PartitionData>> disklessFuture =
+            partitionedFetchInfos.diskless().isEmpty() ? CompletableFuture.completedFuture(Map.of()) : createDisklessShareFetchFuture(
+                groupId,
+                memberId,
+                fetchParams,
+                shareAcquireMode,
+                batchSize,
+                maxFetchRecords,
+                new ArrayList<>(partitionedFetchInfos.diskless().keySet()),
+                disklessStorageSupport
+            );
+
+        return classicFuture.thenCombine(disklessFuture, (classicResult, disklessResult) -> {
+            Map<TopicIdPartition, PartitionData> combinedResult = new LinkedHashMap<>(rotatedTopicIdPartitions.size());
+            rotatedTopicIdPartitions.forEach(topicIdPartition -> {
+                if (disklessResult.containsKey(topicIdPartition)) {
+                    combinedResult.put(topicIdPartition, disklessResult.get(topicIdPartition));
+                } else if (classicResult.containsKey(topicIdPartition)) {
+                    combinedResult.put(topicIdPartition, classicResult.get(topicIdPartition));
+                }
+            });
+            return combinedResult;
+        });
     }
 
     /**
@@ -672,6 +737,37 @@ public class SharePartitionManager implements AutoCloseable {
         replicaManager.addDelayedShareFetchRequest(delayedShareFetch, keys);
     }
 
+    private CompletableFuture<Map<TopicIdPartition, PartitionData>> createClassicShareFetchFuture(
+        String groupId,
+        String memberId,
+        FetchParams fetchParams,
+        byte shareAcquireMode,
+        int batchSize,
+        int maxFetchRecords,
+        List<TopicIdPartition> topicIdPartitions
+    ) {
+        CompletableFuture<Map<TopicIdPartition, PartitionData>> future = new CompletableFuture<>();
+        processShareFetch(new ShareFetch(fetchParams, groupId, memberId, future, topicIdPartitions,
+            shareAcquireMode, batchSize, maxFetchRecords, brokerTopicStats));
+        return future;
+    }
+
+    private CompletableFuture<Map<TopicIdPartition, PartitionData>> createDisklessShareFetchFuture(
+        String groupId,
+        String memberId,
+        FetchParams fetchParams,
+        byte shareAcquireMode,
+        int batchSize,
+        int maxFetchRecords,
+        List<TopicIdPartition> topicIdPartitions,
+        DisklessStorageReplicaManagerSupport disklessStorageSupport
+    ) {
+        CompletableFuture<Map<TopicIdPartition, PartitionData>> future = new CompletableFuture<>();
+        processDisklessShareFetch(new ShareFetch(fetchParams, groupId, memberId, future, topicIdPartitions,
+            shareAcquireMode, batchSize, maxFetchRecords, brokerTopicStats), disklessStorageSupport);
+        return future;
+    }
+
     @Override
     public void close() throws Exception {
         this.timer.close();
@@ -683,6 +779,108 @@ public class SharePartitionManager implements AutoCloseable {
 
     private static String partitionsToLogString(Collection<TopicIdPartition> partitions) {
         return ShareSession.partitionsToLogString(partitions, log.isTraceEnabled());
+    }
+
+    private void processDisklessShareFetch(
+        ShareFetch shareFetch,
+        DisklessStorageReplicaManagerSupport disklessStorageSupport
+    ) {
+        if (shareFetch.topicIdPartitions().isEmpty() || shareFetch.maxFetchRecords() == 0 || shareFetch.fetchParams().maxBytes == 0) {
+            shareFetch.maybeComplete(Map.of());
+            return;
+        }
+
+        LinkedHashMap<TopicIdPartition, SharePartition> sharePartitions = new LinkedHashMap<>();
+        List<CompletableFuture<Void>> initializationFutures = new ArrayList<>();
+        Set<String> topics = new HashSet<>();
+
+        for (TopicIdPartition topicIdPartition : shareFetch.topicIdPartitions()) {
+            topics.add(topicIdPartition.topic());
+            SharePartitionKey sharePartitionKey = sharePartitionKey(shareFetch.groupId(), topicIdPartition);
+
+            SharePartition sharePartition;
+            try {
+                sharePartition = getOrCreateSharePartition(sharePartitionKey);
+            } catch (Exception e) {
+                shareFetch.addErroneous(topicIdPartition, e);
+                continue;
+            }
+
+            CompletableFuture<Void> initFuture = sharePartition.maybeInitialize().handle((result, throwable) -> {
+                if (throwable != null) {
+                    handleInitializationException(sharePartitionKey, shareFetch, throwable);
+                }
+                return null;
+            });
+
+            initializationFutures.add(initFuture);
+            sharePartitions.put(topicIdPartition, sharePartition);
+        }
+
+        topics.forEach(topic -> {
+            brokerTopicStats.allTopicsStats().totalShareFetchRequestRate().mark();
+            brokerTopicStats.topicStats(topic).totalShareFetchRequestRate().mark();
+        });
+
+        CompletableFuture.allOf(initializationFutures.toArray(new CompletableFuture<?>[0])).whenComplete((ignored, throwable) -> {
+            if (shareFetch.errorInAllPartitions()) {
+                shareFetch.maybeComplete(Map.of());
+                return;
+            }
+
+            DelayedShareFetch delayedShareFetch = new DelayedShareFetch(
+                shareFetch,
+                replicaManager,
+                fencedSharePartitionHandler(),
+                sharePartitions,
+                shareGroupMetrics,
+                time,
+                remoteFetchMaxWaitMs
+            );
+
+            LinkedHashMap<TopicIdPartition, Long> topicPartitionFetchOffsets = delayedShareFetch.acquirablePartitions(sharePartitions);
+            if (topicPartitionFetchOffsets.isEmpty()) {
+                shareFetch.maybeComplete(Map.of());
+                return;
+            }
+
+            Map<TopicIdPartition, Integer> partitionMaxBytes = PartitionMaxBytesStrategy
+                .type(PartitionMaxBytesStrategy.StrategyType.UNIFORM)
+                .maxBytes(shareFetch.fetchParams().maxBytes, topicPartitionFetchOffsets.keySet(),
+                        topicPartitionFetchOffsets.size());
+
+            Map<TopicIdPartition, FetchRequest.PartitionData> fetchInfos = new LinkedHashMap<>(topicPartitionFetchOffsets.size());
+            topicPartitionFetchOffsets.forEach((topicIdPartition, fetchOffset) -> fetchInfos.put(topicIdPartition, new FetchRequest.PartitionData(
+                topicIdPartition.topicId(),
+                fetchOffset,
+                0,
+                partitionMaxBytes.get(topicIdPartition),
+                Optional.empty()
+            )));
+
+            disklessStorageSupport.handleFetch(shareFetch.fetchParams(), fetchInfos).whenComplete((fetchResult, fetchThrowable) -> {
+                try {
+                    if (fetchThrowable != null) {
+                        handleDisklessFetchException(shareFetch, topicPartitionFetchOffsets.keySet(), fetchThrowable);
+                        return;
+                    }
+
+                    shareFetch.maybeComplete(ShareFetchUtils.processFetchResponse(
+                        shareFetch,
+                        topicPartitionFetchOffsets,
+                        fetchResult,
+                        sharePartitions,
+                        replicaManager,
+                        fencedSharePartitionHandler(),
+                        unknownErrorFetchPartitionData()
+                    ));
+                } catch (Exception e) {
+                    handleDisklessFetchException(shareFetch, topicPartitionFetchOffsets.keySet(), e);
+                } finally {
+                    delayedShareFetch.releasePartitionLocks(topicPartitionFetchOffsets.keySet());
+                }
+            });
+        });
     }
 
     // Visible for testing.
@@ -766,7 +964,10 @@ public class SharePartitionManager implements AutoCloseable {
     private SharePartition getOrCreateSharePartition(SharePartitionKey sharePartitionKey) {
         return partitionCache.computeIfAbsent(sharePartitionKey,
                 k -> {
-                    int leaderEpoch = metadataProvider.leaderEpoch(sharePartitionKey.topicIdPartition());
+                    int leaderEpoch = DEFAULT_LEADER_EPOCH;
+                    if (!metadataProvider.isDiskless(sharePartitionKey.topicIdPartition())) {
+                        leaderEpoch = metadataProvider.leaderEpoch(sharePartitionKey.topicIdPartition());
+                    }
                     // Attach listener to Partition which shall invoke partition change handlers.
                     // However, as there could be multiple share partitions (per group name) for a single topic-partition,
                     // hence create separate listeners per share partition which holds the share partition key
@@ -791,6 +992,31 @@ public class SharePartitionManager implements AutoCloseable {
                             shareGroupDLQManager
                     );
                 });
+    }
+
+    private void handleDisklessFetchException(
+        ShareFetch shareFetch,
+        Set<TopicIdPartition> topicIdPartitions,
+        Throwable throwable
+    ) {
+        BiConsumer<SharePartitionKey, Throwable> fencedSharePartitionHandler = fencedSharePartitionHandler();
+        topicIdPartitions.forEach(topicIdPartition ->
+            fencedSharePartitionHandler.accept(new SharePartitionKey(shareFetch.groupId(), topicIdPartition), throwable));
+        shareFetch.maybeCompleteWithException(topicIdPartitions, throwable);
+    }
+
+    private FetchPartitionData unknownErrorFetchPartitionData() {
+        return new FetchPartitionData(
+            Errors.UNKNOWN_SERVER_ERROR,
+            0,
+            0,
+            MemoryRecords.EMPTY,
+            Optional.empty(),
+            OptionalLong.empty(),
+            Optional.empty(),
+            OptionalInt.empty(),
+            false
+        );
     }
 
     private void handleInitializationException(

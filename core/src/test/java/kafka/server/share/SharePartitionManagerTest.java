@@ -79,6 +79,8 @@ import org.apache.kafka.server.share.session.ShareSessionCache;
 import org.apache.kafka.server.share.session.ShareSessionKey;
 import org.apache.kafka.server.storage.log.FetchIsolation;
 import org.apache.kafka.server.storage.log.FetchParams;
+import org.apache.kafka.server.storage.log.FetchPartitionData;
+import org.apache.kafka.server.util.FutureUtils;
 import org.apache.kafka.server.util.MockTime;
 import org.apache.kafka.server.util.ServerTestUtils;
 import org.apache.kafka.server.util.timer.MockTimer;
@@ -86,6 +88,7 @@ import org.apache.kafka.server.util.timer.SystemTimer;
 import org.apache.kafka.server.util.timer.SystemTimerReaper;
 import org.apache.kafka.server.util.timer.Timer;
 import org.apache.kafka.server.util.timer.TimerTask;
+import org.apache.kafka.storage.diskless.DisklessStorageReplicaManagerSupport;
 import org.apache.kafka.storage.internals.log.FetchDataInfo;
 import org.apache.kafka.storage.internals.log.LogOffsetMetadata;
 import org.apache.kafka.storage.internals.log.LogReadResult;
@@ -1232,6 +1235,83 @@ public class SharePartitionManagerTest {
             new TopicMetrics(6, 0, 0, 0),
             Map.of("foo", new TopicMetrics(3, 0, 0, 0), "bar", new TopicMetrics(3, 0, 0, 0))
         );
+    }
+
+    @Test
+    public void testFetchMessagesSeparatesDisklessAndClassicTopics() {
+        String groupId = "grp";
+        String memberId = Uuid.randomUuid().toString();
+        Uuid classicTopicId = Uuid.randomUuid();
+        Uuid disklessTopicId = Uuid.randomUuid();
+        TopicIdPartition classicTp = new TopicIdPartition(classicTopicId, new TopicPartition("classic-topic", 0));
+        TopicIdPartition disklessTp = new TopicIdPartition(disklessTopicId, new TopicPartition("diskless-topic", 0));
+        List<TopicIdPartition> topicIdPartitions = List.of(classicTp, disklessTp);
+
+        mockFetchOffsetForTimestamp(mockReplicaManager);
+
+        Timer mockTimer = systemTimerReaper();
+        DelayedOperationPurgatory<DelayedShareFetch> delayedShareFetchPurgatory = new DelayedOperationPurgatory<>(
+            "TestShareFetch", mockTimer, mockReplicaManager.localBrokerId(),
+            DELAYED_SHARE_FETCH_PURGATORY_PURGE_INTERVAL, false, true);
+        mockReplicaManagerDelayedShareFetch(mockReplicaManager, delayedShareFetchPurgatory);
+        mockTopicIdPartitionToReturnDataEqualToMinBytes(mockReplicaManager, classicTp, 1);
+
+        DisklessStorageReplicaManagerSupport mockDisklessStorageSupport = mock(DisklessStorageReplicaManagerSupport.class);
+        when(mockReplicaManager.disklessStorageSupport()).thenReturn(mockDisklessStorageSupport);
+        when(mockDisklessStorageSupport.partitionFetchInfos(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Map<TopicIdPartition, FetchRequest.PartitionData> fetchInfos =
+                (Map<TopicIdPartition, FetchRequest.PartitionData>) invocation.getArgument(0);
+            Map<TopicIdPartition, FetchRequest.PartitionData> disklessFetchInfos = new LinkedHashMap<>();
+            Map<TopicIdPartition, FetchRequest.PartitionData> classicFetchInfos = new LinkedHashMap<>();
+            fetchInfos.forEach((topicIdPartition, partitionData) -> {
+                if (topicIdPartition.equals(disklessTp)) {
+                    disklessFetchInfos.put(topicIdPartition, partitionData);
+                } else {
+                    classicFetchInfos.put(topicIdPartition, partitionData);
+                }
+            });
+            return new DisklessStorageReplicaManagerSupport.PartitionedEntries<>(disklessFetchInfos, classicFetchInfos);
+        });
+
+        sharePartitionManager = SharePartitionManagerBuilder.builder()
+            .withReplicaManager(mockReplicaManager)
+            .withTimer(mockTimer)
+            .withBrokerTopicStats(brokerTopicStats)
+            .build();
+
+        doAnswer(invocation -> buildLogReadResult(List.of(classicTp)))
+            .when(mockReplicaManager).readFromLog(any(), any(), any(ReplicaQuota.class), anyBoolean());
+
+        FetchPartitionData disklessFetchData = new FetchPartitionData(
+            Errors.NONE,
+            1L,
+            0L,
+            MemoryRecords.withRecords(Compression.NONE, new SimpleRecord("diskless-key".getBytes(), "diskless-value".getBytes())),
+            Optional.empty(),
+            OptionalLong.empty(),
+            Optional.empty(),
+            OptionalInt.empty(),
+            false
+        );
+        when(mockDisklessStorageSupport.handleFetch(any(), any()))
+            .thenReturn(CompletableFuture.completedFuture(Map.of(disklessTp, disklessFetchData)));
+
+        CompletableFuture<Map<TopicIdPartition, PartitionData>> future = sharePartitionManager.fetchMessages(
+            groupId, memberId, FETCH_PARAMS, BATCH_OPTIMIZED, 1, MAX_FETCH_RECORDS, BATCH_SIZE, topicIdPartitions);
+
+        assertTrue(future.isDone());
+        Map<TopicIdPartition, PartitionData> result = future.join();
+        assertEquals(2, result.size());
+        assertTrue(result.containsKey(classicTp));
+        assertTrue(result.containsKey(disklessTp));
+        assertEquals(Errors.NONE.code(), result.get(classicTp).errorCode());
+        assertEquals(Errors.NONE.code(), result.get(disklessTp).errorCode());
+        assertFalse(result.get(classicTp).acquiredRecords().isEmpty());
+        assertFalse(result.get(disklessTp).acquiredRecords().isEmpty());
+
+        verify(mockReplicaManager, times(1)).readFromLog(any(), any(), any(ReplicaQuota.class), anyBoolean());
+        verify(mockDisklessStorageSupport, times(1)).handleFetch(any(), any());
     }
 
     @Test

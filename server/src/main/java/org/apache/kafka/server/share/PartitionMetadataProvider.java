@@ -21,6 +21,8 @@ import org.apache.kafka.server.partition.PartitionListener;
 import org.apache.kafka.server.storage.log.FetchIsolation;
 import org.apache.kafka.storage.internals.log.LogOffsetMetadata;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * Abstraction for partition metadata operations.
  */
@@ -64,4 +66,20 @@ public interface PartitionMetadataProvider {
      * Remove a previously registered partition listener.
      */
     void removePartitionListener(TopicIdPartition topicIdPartition, PartitionListener listener);
+
+    /**
+     * Whether the partition keeps its data in diskless storage. A diskless partition has no local log, so its
+     * offsets come from {@link #disklessOffsetForTimestamp} instead of the methods above.
+     */
+    default boolean isDiskless(TopicIdPartition topicIdPartition) {
+        return false;
+    }
+
+    /**
+     * Resolve the offset for a timestamp of a diskless partition without blocking. The timestamp may also be
+     * {@code ListOffsetsRequest.EARLIEST_TIMESTAMP} or {@code ListOffsetsRequest.LATEST_TIMESTAMP}.
+     */
+    default CompletableFuture<Long> disklessOffsetForTimestamp(TopicIdPartition topicIdPartition, long timestamp, int leaderEpoch) {
+        return CompletableFuture.failedFuture(new UnsupportedOperationException("Not a diskless partition: " + topicIdPartition));
+    }
 }

@@ -35,6 +35,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 import scala.Some;
 
@@ -113,7 +114,23 @@ public class ReplicaManagerPartitionMetadataProvider implements PartitionMetadat
         replicaManager.removeListener(topicIdPartition.topicPartition(), listener);
     }
 
+    @Override
+    public boolean isDiskless(TopicIdPartition topicIdPartition) {
+        return ShareFetchUtils.isDisklessTopic(replicaManager, topicIdPartition.topic());
+    }
+
+    @Override
+    public CompletableFuture<Long> disklessOffsetForTimestamp(TopicIdPartition topicIdPartition, long timestamp, int leaderEpoch) {
+        String description = timestamp == ListOffsetsRequest.EARLIEST_TIMESTAMP ? "earliest timestamp"
+            : timestamp == ListOffsetsRequest.LATEST_TIMESTAMP ? "latest timestamp"
+            : "duration timestamp " + timestamp;
+        return ShareFetchUtils.disklessOffsetForTimestamp(topicIdPartition, replicaManager, timestamp, leaderEpoch, description);
+    }
+
     private Partition partition(TopicIdPartition topicIdPartition) {
+        if (isDiskless(topicIdPartition)) {
+            throw new UnsupportedOperationException("Diskless topics do not have local Partition state for " + topicIdPartition.topicPartition());
+        }
         Partition partition = replicaManager.getPartitionOrException(topicIdPartition.topicPartition());
         if (!partition.isLeader()) {
             log.debug("The broker is not the leader for topic partition: {}", topicIdPartition.topicPartition());

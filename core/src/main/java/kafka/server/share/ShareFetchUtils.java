@@ -29,6 +29,9 @@ import org.apache.kafka.server.share.fetch.ShareAcquiredRecords;
 import org.apache.kafka.server.share.fetch.ShareFetch;
 import org.apache.kafka.server.share.fetch.ShareFetchPartitionData;
 import org.apache.kafka.server.storage.log.FetchPartitionData;
+import org.apache.kafka.storage.diskless.DisklessStorageReplicaManagerSupport;
+import org.apache.kafka.storage.diskless.ListOffsetsPartitionRequest;
+import org.apache.kafka.storage.diskless.ListOffsetsPartitionResponse;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,6 +41,8 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 
 /**
@@ -124,6 +129,77 @@ public class ShareFetchUtils {
             response.put(topicIdPartition, partitionData);
         }
         return response;
+    }
+
+    static Map<TopicIdPartition, ShareFetchResponseData.PartitionData> processFetchResponse(
+            ShareFetch shareFetch,
+            Map<TopicIdPartition, Long> fetchOffsets,
+            Map<TopicIdPartition, FetchPartitionData> fetchPartitionData,
+            LinkedHashMap<TopicIdPartition, SharePartition> sharePartitions,
+            ReplicaManager replicaManager,
+            BiConsumer<SharePartitionKey, Throwable> exceptionHandler,
+            FetchPartitionData defaultFetchPartitionData
+    ) {
+        List<ShareFetchPartitionData> shareFetchPartitionDataList = new java.util.ArrayList<>(fetchOffsets.size());
+        fetchOffsets.forEach((topicIdPartition, fetchOffset) -> shareFetchPartitionDataList.add(
+            new ShareFetchPartitionData(
+                topicIdPartition,
+                fetchOffset,
+                fetchPartitionData != null && fetchPartitionData.containsKey(topicIdPartition) ?
+                    fetchPartitionData.get(topicIdPartition) : defaultFetchPartitionData
+            )));
+        return processFetchResponse(shareFetch, shareFetchPartitionDataList, sharePartitions, replicaManager, exceptionHandler);
+    }
+
+    /**
+     * Resolves the offset for a timestamp of a diskless topic partition through the diskless storage.
+     */
+    public static CompletableFuture<Long> disklessOffsetForTimestamp(
+        TopicIdPartition topicIdPartition,
+        ReplicaManager replicaManager,
+        long timestamp,
+        int leaderEpoch,
+        String description
+    ) {
+        ListOffsetsPartitionRequest request = new ListOffsetsPartitionRequest(
+            topicIdPartition,
+            timestamp,
+            Optional.of(leaderEpoch)
+        );
+
+        return replicaManager.disklessStorageSupport()
+                .handleListOffsets(Map.of(topicIdPartition, request))
+                .thenApply(response -> {
+                    ListOffsetsPartitionResponse partitionResponse = response.get(topicIdPartition);
+                    if (partitionResponse == null) {
+                        throw new OffsetNotAvailableException(
+                            "Offset for " + description + " not found for topic partition: " + topicIdPartition
+                        );
+                    }
+                    if (partitionResponse.error() != Errors.NONE) {
+                        if (partitionResponse.error() == Errors.NOT_LEADER_OR_FOLLOWER) {
+                            throw new NotLeaderOrFollowerException(
+                                    "Error while fetching partition state for " + topicIdPartition.topicPartition()
+                            );
+                        }
+                        throw new OffsetNotAvailableException(
+                                "Failed to fetch offset for " + description + " for topic partition: " + topicIdPartition
+                                        + ", error: " + partitionResponse.error()
+                        );
+                    }
+                    if (partitionResponse.offset() < 0) {
+                        throw new OffsetNotAvailableException(
+                                "Offset for " + description + " not found for topic partition: " + topicIdPartition
+                        );
+                    }
+
+                    return partitionResponse.offset();
+                });
+    }
+
+    public static boolean isDisklessTopic(ReplicaManager replicaManager, String topic) {
+        DisklessStorageReplicaManagerSupport disklessStorageSupport = replicaManager.disklessStorageSupport();
+        return disklessStorageSupport != null && disklessStorageSupport.isDisklessStorageTopic(topic);
     }
 
     /**
