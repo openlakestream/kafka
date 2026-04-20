@@ -38,6 +38,7 @@ import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.internal.ControlRecordType;
 import org.apache.kafka.common.record.internal.Record;
 import org.apache.kafka.common.record.internal.RecordBatch;
+import org.apache.kafka.common.requests.ListOffsetsRequest;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.coordinator.group.GroupConfig;
@@ -64,6 +65,7 @@ import org.apache.kafka.server.share.persister.PartitionStateBatchData;
 import org.apache.kafka.server.share.persister.Persister;
 import org.apache.kafka.server.share.persister.PersisterStateBatch;
 import org.apache.kafka.server.share.persister.ReadShareGroupStateParameters;
+import org.apache.kafka.server.share.persister.ReadShareGroupStateResult;
 import org.apache.kafka.server.share.persister.TopicData;
 import org.apache.kafka.server.share.persister.WriteShareGroupStateParameters;
 import org.apache.kafka.server.storage.log.FetchIsolation;
@@ -93,6 +95,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import static kafka.server.share.ShareFetchUtils.disklessOffsetForTimestamp;
 import static kafka.server.share.ShareFetchUtils.offsetForEarliestTimestamp;
 import static kafka.server.share.ShareFetchUtils.offsetForLatestTimestamp;
 import static kafka.server.share.ShareFetchUtils.offsetForTimestamp;
@@ -333,6 +336,12 @@ public class SharePartition implements AutoCloseable {
      */
     private long fetchLockIdleDurationMs;
 
+    /**
+     * The isDisklessTopic flag is used to indicate if the topic is a diskless storage topic.
+     * This is used to determine if the share partition should be initialized with persisted state or not.
+     */
+    private final boolean isDisklessTopic;
+
     SharePartition(
         String groupId,
         TopicIdPartition topicIdPartition,
@@ -395,6 +404,8 @@ public class SharePartition implements AutoCloseable {
         this.timeoutHandler = releaseAcquisitionLockOnTimeout();
         this.registerGaugeMetrics();
         this.deliveryCompleteCount = new AtomicInteger(0);
+        this.isDisklessTopic = ShareFetchUtils.isDisklessTopic(
+                replicaManager, topicIdPartition.topicPartition().topic());
     }
 
     /**
@@ -436,6 +447,10 @@ public class SharePartition implements AutoCloseable {
                 .build())
             .build()
         ).whenComplete((result, exception) -> {
+            if (isDisklessTopic) {
+                completeInitializationFuture(future, result, exception);
+                return;
+            }
             Throwable throwable = null;
             lock.writeLock().lock();
             try {
@@ -559,6 +574,164 @@ public class SharePartition implements AutoCloseable {
         });
 
         return future;
+    }
+
+    /**
+     * Completes the initialization future for diskless topic.
+     * The difference between diskless topic and regular topic is that for diskless topic,
+     * we need to compute the start offset asynchronously.
+     */
+    private void completeInitializationFuture(CompletableFuture<Void> future,
+                                              ReadShareGroupStateResult result,
+                                              Throwable exception) {
+        lock.writeLock().lock();
+        try {
+            var verifyThrowable = verifyShareGroupState(result, exception);
+            if (verifyThrowable != null) {
+                partitionState = SharePartitionState.FAILED;
+                future.completeExceptionally(verifyThrowable);
+                return;
+            }
+        } finally {
+            lock.writeLock().unlock();
+        }
+
+        var partitionDataStartOffset = result.topicsData().get(0).partitions().get(0).startOffset();
+        startOffsetDuringInitializationDiskless(partitionDataStartOffset)
+                .whenComplete((startOffset, ex) -> {
+                    lock.writeLock().lock();
+                    Throwable throwable = null;
+                    try {
+                        if (ex != null) {
+                            log.error("[Diskless] Failed to compute the start offset during initialization for share "
+                                    + "partition: {}-{}.", groupId, topicIdPartition, ex);
+                            throwable = ex;
+                            return;
+                        }
+                        this.startOffset = startOffset;
+                        throwable = completeInitializationDiskless(result);
+                    } catch (Exception e) {
+                        throwable = e;
+                    } finally {
+                        boolean isFailed = throwable != null;
+                        if (isFailed) {
+                            partitionState = SharePartitionState.FAILED;
+                        }
+                        lock.writeLock().unlock();
+                        if (isFailed) {
+                            future.completeExceptionally(throwable);
+                        } else {
+                            future.complete(null);
+                        }
+                    }
+                });
+    }
+
+    private Throwable verifyShareGroupState(ReadShareGroupStateResult result, Throwable exception) {
+        if (exception != null) {
+            log.error("[Diskless] Failed to initialize the share partition: {}-{}",
+                    groupId, topicIdPartition, exception);
+            return exception;
+        }
+
+        if (result == null || result.topicsData() == null || result.topicsData().size() != 1) {
+            log.error("[Diskless] Failed to initialize the share partition: {}-{}. Invalid state found: {}.",
+                    groupId, topicIdPartition, result);
+            return new IllegalStateException(String.format("[Diskless] Failed to initialize the share partition %s-%s",
+                    groupId, topicIdPartition));
+        }
+
+        TopicData<PartitionAllData> state = result.topicsData().get(0);
+        if (state.topicId() != topicIdPartition.topicId() || state.partitions().size() != 1) {
+            log.error("[Diskless] Failed to initialize the share partition: {}-{}."
+                    + "Invalid topic partition response: {}.", groupId, topicIdPartition, result);
+            return new IllegalStateException(String.format("[Diskless] Failed to initialize the share partition %s-%s",
+                    groupId, topicIdPartition));
+        }
+
+        PartitionAllData partitionData = state.partitions().get(0);
+        if (partitionData.partition() != topicIdPartition.partition()) {
+            log.error("[Diskless] Failed to initialize the share partition: {}-{}. Invalid partition response: {}.",
+                    groupId, topicIdPartition, partitionData);
+            return new IllegalStateException(String.format("[Diskless] Failed to initialize the share partition %s-%s",
+                    groupId, topicIdPartition));
+        }
+
+        if (partitionData.errorCode() != Errors.NONE.code()) {
+            KafkaException ex = fetchPersisterError(partitionData.errorCode(), partitionData.errorMessage());
+            maybeLogError(String.format("[Diskless] Failed to initialize the share partition: %s-%s."
+                            + "Exception occurred: %s.", groupId, topicIdPartition, partitionData),
+                    Errors.forCode(partitionData.errorCode()), ex);
+            return ex;
+        }
+        return null;
+    }
+
+    private Throwable completeInitializationDiskless(ReadShareGroupStateResult result) {
+        PartitionAllData partitionData = result.topicsData().get(0).partitions().get(0);
+        stateEpoch = partitionData.stateEpoch();
+
+        List<PersisterStateBatch> stateBatches = partitionData.stateBatches();
+        long gapStartOffset = -1;
+        // The previousBatchLastOffset is used to track the last offset of the previous batch.
+        // For the first batch that should ideally start from startOffset if there are no gaps,
+        // we assume the previousBatchLastOffset to be startOffset - 1.
+        long previousBatchLastOffset = startOffset - 1;
+        for (PersisterStateBatch stateBatch : stateBatches) {
+            if (stateBatch.firstOffset() < startOffset) {
+                log.error("[Diskless] Invalid state batch found for the share partition: {}-{}. The base offset: {}"
+                                + " is less than the start offset: {}.", groupId, topicIdPartition,
+                        stateBatch.firstOffset(), startOffset);
+                return new IllegalStateException(
+                        String.format("[Diskless] Failed to initialize the share partition %s-%s",
+                                groupId, topicIdPartition));
+            }
+
+            if (stateBatch.lastOffset() < stateBatch.firstOffset()) {
+                log.error("[Diskless] Invalid state batch found for the share partition: {}-{}. The first offset: {}"
+                                + " is less than the last offset of the batch: {}.", groupId, topicIdPartition,
+                        stateBatch.firstOffset(), stateBatch.lastOffset());
+                return new IllegalStateException(
+                        String.format("[Diskless] Failed to initialize the share partition %s-%s",
+                                groupId, topicIdPartition));
+            }
+
+            if (gapStartOffset == -1 && stateBatch.firstOffset() > previousBatchLastOffset + 1) {
+                gapStartOffset = previousBatchLastOffset + 1;
+            }
+            previousBatchLastOffset = stateBatch.lastOffset();
+            InFlightBatch inFlightBatch = new InFlightBatch(timer, time, EMPTY_MEMBER_ID, stateBatch.firstOffset(),
+                    stateBatch.lastOffset(), RecordState.forId(stateBatch.deliveryState()), stateBatch.deliveryCount(),
+                    null, timeoutHandler, sharePartitionMetrics);
+            cachedState.put(stateBatch.firstOffset(), inFlightBatch);
+            // During initialization, deliveryCompleteCount is updated with the number of records that are in the
+            // ACKNOWLEDGED or ARCHIVED state.
+            if (isStateTerminal(RecordState.forId(stateBatch.deliveryState()))) {
+                deliveryCompleteCount.addAndGet((int) (stateBatch.lastOffset() - stateBatch.firstOffset() + 1));
+            }
+            sharePartitionMetrics.recordInFlightBatchMessageCount(stateBatch.lastOffset() - stateBatch.firstOffset() + 1);
+        }
+        // Update the endOffset of the partition.
+        if (!cachedState.isEmpty()) {
+            // If the cachedState is not empty, findNextFetchOffset flag is set to true so that any AVAILABLE records
+            // in the cached state are not missed
+            updateFindNextFetchOffset(true);
+            endOffset = cachedState.lastEntry().getValue().lastOffset();
+            // gapWindow is not required, if there are no gaps in the read state response
+            if (gapStartOffset != -1) {
+                persisterReadResultGapWindow = new GapWindow(endOffset, gapStartOffset);
+            }
+            // In case the persister read state RPC result contains no AVAILABLE records, we can update cached state
+            // and start/end offsets.
+            maybeUpdateCachedStateAndOffsets();
+        } else {
+            endOffset = startOffset;
+        }
+        // Set the partition state to Active and complete the future.
+        partitionState = SharePartitionState.ACTIVE;
+        log.debug("[Diskless] Initialized share partition: {}-{} with persister read state: {}, cached state: {}",
+                groupId, topicIdPartition, result.topicsData(), cachedState);
+        return null;
     }
 
     /**
@@ -3066,6 +3239,38 @@ public class SharePartition implements AutoCloseable {
             // offsetResetStrategy type is BY_DURATION
             return offsetForTimestamp(topicIdPartition, replicaManager, offsetResetStrategy.timestamp(), leaderEpoch);
         }
+    }
+
+    private CompletableFuture<Long> startOffsetDuringInitializationDiskless(long partitionDataStartOffset) {
+        if (partitionDataStartOffset != PartitionFactory.UNINITIALIZED_START_OFFSET) {
+            return CompletableFuture.completedFuture(partitionDataStartOffset);
+        }
+        ShareGroupAutoOffsetResetStrategy offsetResetStrategy;
+        if (groupConfigManager.groupConfig(groupId).isPresent()) {
+            offsetResetStrategy = groupConfigManager.groupConfig(groupId).get().shareAutoOffsetReset();
+        } else {
+            offsetResetStrategy = GroupConfig.defaultShareAutoOffsetReset();
+        }
+
+        long timestampToSearch;
+        String description;
+        switch (offsetResetStrategy.type()) {
+            case LATEST -> {
+                timestampToSearch = ListOffsetsRequest.LATEST_TIMESTAMP;
+                description = "latest timestamp";
+            }
+            case EARLIEST -> {
+                timestampToSearch = ListOffsetsRequest.EARLIEST_TIMESTAMP;
+                description = "earliest timestamp";
+            }
+            case BY_DURATION -> {
+                timestampToSearch = offsetResetStrategy.timestamp();
+                description = "duration timestamp " + timestampToSearch;
+            }
+            default -> throw new IllegalStateException("Unexpected value: " + offsetResetStrategy.type());
+        }
+        return disklessOffsetForTimestamp(
+                topicIdPartition, replicaManager, timestampToSearch, leaderEpoch, description);
     }
 
     private ShareAcquiredRecords maybeFilterAbortedTransactionalAcquiredRecords(

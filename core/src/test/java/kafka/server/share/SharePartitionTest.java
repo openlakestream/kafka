@@ -75,6 +75,8 @@ import org.apache.kafka.server.storage.log.FetchPartitionData;
 import org.apache.kafka.server.util.timer.MockTimer;
 import org.apache.kafka.server.util.timer.Timer;
 import org.apache.kafka.server.util.timer.TimerTask;
+import org.apache.kafka.storage.diskless.DisklessStorageReplicaManagerSupport;
+import org.apache.kafka.storage.diskless.ListOffsetsPartitionResponse;
 import org.apache.kafka.storage.internals.log.OffsetResultHolder;
 import org.apache.kafka.test.TestUtils;
 
@@ -250,6 +252,56 @@ public class SharePartitionTest {
         assertEquals(SharePartitionState.ACTIVE, sharePartition.partitionState());
         assertEquals(0, sharePartition.startOffset());
         assertEquals(0, sharePartition.endOffset());
+        assertEquals(PartitionFactory.DEFAULT_STATE_EPOCH, sharePartition.stateEpoch());
+        assertEquals(0, sharePartition.deliveryCompleteCount());
+    }
+
+    @Test
+    public void testMaybeInitializeDisklessDefaultStartEpochGroupConfigReturnsEarliest() {
+        Persister persister = Mockito.mock(Persister.class);
+        ReadShareGroupStateResult readShareGroupStateResult = Mockito.mock(ReadShareGroupStateResult.class);
+        Mockito.when(readShareGroupStateResult.topicsData()).thenReturn(List.of(
+            new TopicData<>(TOPIC_ID_PARTITION.topicId(), List.of(
+                PartitionFactory.newPartitionAllData(
+                    0, PartitionFactory.DEFAULT_STATE_EPOCH,
+                    PartitionFactory.UNINITIALIZED_START_OFFSET,
+                    PartitionFactory.DEFAULT_ERROR_CODE,
+                    PartitionFactory.DEFAULT_ERR_MESSAGE,
+                    List.of())))));
+        Mockito.when(persister.readState(Mockito.any())).thenReturn(CompletableFuture.completedFuture(readShareGroupStateResult));
+
+        GroupConfigManager groupConfigManager = Mockito.mock(GroupConfigManager.class);
+        GroupConfig groupConfig = Mockito.mock(GroupConfig.class);
+        Mockito.when(groupConfigManager.groupConfig(GROUP_ID)).thenReturn(Optional.of(groupConfig));
+        Mockito.when(groupConfig.shareAutoOffsetReset()).thenReturn(ShareGroupAutoOffsetResetStrategy.EARLIEST);
+
+        ReplicaManager replicaManager = Mockito.mock(ReplicaManager.class);
+        DisklessStorageReplicaManagerSupport disklessStorageSupport = Mockito.mock(DisklessStorageReplicaManagerSupport.class);
+        Mockito.when(replicaManager.disklessStorageSupport()).thenReturn(disklessStorageSupport);
+        Mockito.when(disklessStorageSupport.isDisklessStorageTopic(TOPIC_ID_PARTITION.topic())).thenReturn(true);
+        Mockito.when(disklessStorageSupport.handleListOffsets(Mockito.any())).thenReturn(CompletableFuture.completedFuture(
+            Map.of(TOPIC_ID_PARTITION, ListOffsetsPartitionResponse.success(
+                TOPIC_ID_PARTITION,
+                42L,
+                ListOffsetsRequest.EARLIEST_TIMESTAMP
+            ))
+        ));
+
+        SharePartition sharePartition = SharePartitionBuilder.builder()
+            .withPersister(persister)
+            .withGroupConfigManager(groupConfigManager)
+            .withReplicaManager(replicaManager)
+            .build();
+
+        CompletableFuture<Void> result = sharePartition.maybeInitialize();
+        assertTrue(result.isDone());
+        assertFalse(result.isCompletedExceptionally());
+
+        Mockito.verify(disklessStorageSupport).handleListOffsets(Mockito.any());
+
+        assertEquals(SharePartitionState.ACTIVE, sharePartition.partitionState());
+        assertEquals(42L, sharePartition.startOffset());
+        assertEquals(42L, sharePartition.endOffset());
         assertEquals(PartitionFactory.DEFAULT_STATE_EPOCH, sharePartition.stateEpoch());
         assertEquals(0, sharePartition.deliveryCompleteCount());
     }

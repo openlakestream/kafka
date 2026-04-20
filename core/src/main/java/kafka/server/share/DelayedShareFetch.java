@@ -774,6 +774,9 @@ public class DelayedShareFetch extends DelayedOperation {
 
         for (TopicIdPartition topicIdPartition : pendingRemoteFetchesOpt.get().fetchOffsetMetadataMap().keySet()) {
             try {
+                if (ShareFetchUtils.isDisklessTopic(replicaManager, topicIdPartition.topic())) {
+                    continue;
+                }
                 Partition partition = replicaManager.getPartitionOrException(topicIdPartition.topicPartition());
                 if (!partition.isLeader()) {
                     throw new NotLeaderException("Broker is no longer the leader of topicPartition: " + topicIdPartition);
