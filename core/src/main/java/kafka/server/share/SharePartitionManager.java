@@ -796,7 +796,7 @@ public class SharePartitionManager implements AutoCloseable {
                 Optional.empty()
             )));
 
-            disklessStorageSupport.handleFetch(shareFetch.fetchParams(), fetchInfos).whenComplete((fetchResult, fetchThrowable) -> {
+            disklessStorageSupport.handleFetch(shareFetch.fetchParams(), fetchInfos, null).whenComplete((fetchResult, fetchThrowable) -> {
                 try {
                     if (fetchThrowable != null) {
                         handleDisklessFetchException(shareFetch, topicPartitionFetchOffsets.keySet(), fetchThrowable);

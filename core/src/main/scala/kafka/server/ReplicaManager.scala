@@ -487,15 +487,6 @@ class ReplicaManager(val config: KafkaConfig,
     allPartitions.values.asScala.iterator.count(_.getClass == classOf[HostedPartition.Offline[Partition]])
   }
 
-  private def preAppendErrorForHostedDisklessTransactionalPartition(topicPartition: TopicPartition): Option[Errors] = {
-    if (!disklessStorageSupport.isDisklessStorageTopic(topicPartition.topic))
-      None
-    else if (disklessStorageSupport.isCurrentDisklessOwner(topicIdPartition(topicPartition)))
-      Some(Errors.INVALID_REQUEST)
-    else
-      Some(Errors.NOT_LEADER_OR_FOLLOWER)
-  }
-
   def getPartitionOrException(topicPartition: TopicPartition): Partition = {
     getPartitionOrError(topicPartition) match {
       case Left(Errors.KAFKA_STORAGE_ERROR) =>
@@ -657,6 +648,32 @@ class ReplicaManager(val config: KafkaConfig,
                     requestLocal: RequestLocal = RequestLocal.noCaching,
                     verificationGuards: Map[TopicPartition, VerificationGuard] = Map.empty,
                     transactionVersion: Short = TransactionVersion.TV_UNKNOWN): Unit = {
+    appendRecords(
+      timeout,
+      requiredAcks,
+      internalTopicsAllowed,
+      origin,
+      entriesPerPartition,
+      responseCallback,
+      recordValidationStatsCallback,
+      requestLocal,
+      verificationGuards,
+      transactionVersion,
+      null
+    )
+  }
+
+  def appendRecords(timeout: Long,
+                    requiredAcks: Short,
+                    internalTopicsAllowed: Boolean,
+                    origin: AppendOrigin,
+                    entriesPerPartition: Map[TopicIdPartition, MemoryRecords],
+                    responseCallback: Map[TopicIdPartition, PartitionResponse] => Unit,
+                    recordValidationStatsCallback: Map[TopicIdPartition, RecordValidationStats] => Unit,
+                    requestLocal: RequestLocal,
+                    verificationGuards: Map[TopicPartition, VerificationGuard],
+                    transactionVersion: Short,
+                    clientId: String): Unit = {
     if (!isValidRequiredAcks(requiredAcks)) {
       sendInvalidRequiredAcksResponse(entriesPerPartition, responseCallback)
       return
@@ -683,7 +700,7 @@ class ReplicaManager(val config: KafkaConfig,
     val disklessResponsesFuture: CompletableFuture[util.Map[TopicIdPartition, PartitionResponse]] = 
       if (disklessEntries.nonEmpty) {
         debug(s"Diskless storage append path: ${disklessEntries.size} partitions")
-        disklessStorageSupport.handleAppend(disklessEntries.asJava)
+        disklessStorageSupport.handleAppend(disklessEntries.asJava, clientId)
       } else {
         CompletableFuture.completedFuture(util.Map.of[TopicIdPartition, PartitionResponse]())
       }
@@ -803,6 +820,30 @@ class ReplicaManager(val config: KafkaConfig,
                           recordValidationStatsCallback: Map[TopicIdPartition, RecordValidationStats] => Unit = _ => (),
                           requestLocal: RequestLocal = RequestLocal.noCaching,
                           transactionSupportedOperation: TransactionSupportedOperation): Unit = {
+    handleProduceAppend(
+      timeout,
+      requiredAcks,
+      internalTopicsAllowed,
+      transactionalId,
+      entriesPerPartition,
+      responseCallback,
+      recordValidationStatsCallback,
+      requestLocal,
+      transactionSupportedOperation,
+      null
+    )
+  }
+
+  def handleProduceAppend(timeout: Long,
+                          requiredAcks: Short,
+                          internalTopicsAllowed: Boolean,
+                          transactionalId: String,
+                          entriesPerPartition: Map[TopicIdPartition, MemoryRecords],
+                          responseCallback: Map[TopicIdPartition, PartitionResponse] => Unit,
+                          recordValidationStatsCallback: Map[TopicIdPartition, RecordValidationStats] => Unit,
+                          requestLocal: RequestLocal,
+                          transactionSupportedOperation: TransactionSupportedOperation,
+                          clientId: String): Unit = {
 
     val transactionalProducerInfo = mutable.HashSet[(Long, Short)]()
     val topicPartitionBatchInfo = mutable.Map[TopicPartition, Int]()
@@ -873,7 +914,9 @@ class ReplicaManager(val config: KafkaConfig,
         responseCallback = newResponseCallback,
         recordValidationStatsCallback = recordValidationStatsCallback,
         requestLocal = newRequestLocal,
-        verificationGuards = verificationGuards
+        verificationGuards = verificationGuards,
+        transactionVersion = TransactionVersion.TV_UNKNOWN,
+        clientId = clientId
       )
     }
 
@@ -1121,24 +1164,18 @@ class ReplicaManager(val config: KafkaConfig,
     val errors = mutable.Map[TopicPartition, Errors]()
 
     topicPartitionBatchInfo.map { case (topicPartition, baseSequence) =>
-      preAppendErrorForHostedDisklessTransactionalPartition(topicPartition) match {
-        case Some(error) =>
-          errors.put(topicPartition, error)
+      val errorOrGuard = maybeStartTransactionVerificationForPartition(
+        topicPartition,
+        producerId,
+        producerEpoch,
+        baseSequence,
+        transactionSupportedOperation.supportsEpochBump
+      )
 
-        case None =>
-          val errorOrGuard = maybeStartTransactionVerificationForPartition(
-            topicPartition,
-            producerId,
-            producerEpoch,
-            baseSequence,
-            transactionSupportedOperation.supportsEpochBump
-          )
-
-          errorOrGuard match {
-            case Left(error) => errors.put(topicPartition, error)
-            case Right(verificationGuard) => if (verificationGuard != VerificationGuard.SENTINEL)
-              verificationGuards.put(topicPartition, verificationGuard)
-          }
+      errorOrGuard match {
+        case Left(error) => errors.put(topicPartition, error)
+        case Right(verificationGuard) => if (verificationGuard != VerificationGuard.SENTINEL)
+          verificationGuards.put(topicPartition, verificationGuard)
       }
     }
 
@@ -1621,7 +1658,7 @@ class ReplicaManager(val config: KafkaConfig,
       if (disklessStorageRequests.isEmpty) {
         CompletableFuture.completedFuture(new util.HashMap[TopicIdPartition, DirectStorageListOffsetsResponse]())
       } else {
-        disklessStorageSupport.handleListOffsets(disklessStorageRequests)
+        disklessStorageSupport.handleListOffsets(disklessStorageRequests, clientId)
       }
 
     if (classicTopics.isEmpty) {
@@ -1936,6 +1973,14 @@ class ReplicaManager(val config: KafkaConfig,
                     fetchInfos: Seq[(TopicIdPartition, PartitionData)],
                     quota: ReplicaQuota,
                     responseCallback: Seq[(TopicIdPartition, FetchPartitionData)] => Unit): Unit = {
+    fetchMessages(params, fetchInfos, quota, responseCallback, null)
+  }
+
+  def fetchMessages(params: FetchParams,
+                    fetchInfos: Seq[(TopicIdPartition, PartitionData)],
+                    quota: ReplicaQuota,
+                    responseCallback: Seq[(TopicIdPartition, FetchPartitionData)] => Unit,
+                    clientId: String): Unit = {
 
     // Partition fetch infos by storage mode: diskless storage vs classic
     val requestOrder = fetchInfos.map(_._1)
@@ -1952,7 +1997,8 @@ class ReplicaManager(val config: KafkaConfig,
     // Handle diskless storage fetches asynchronously
     val disklessFetchFuture: CompletableFuture[util.Map[TopicIdPartition, FetchPartitionData]] =
       if (disklessFetchInfos.nonEmpty) {
-        disklessStorageSupport.handleFetch(params, partitionedFetchInfos.diskless())
+        val effectiveClientId = Option(clientId).orElse(params.clientMetadata.toScala.map(_.clientId())).orNull
+        disklessStorageSupport.handleFetch(params, partitionedFetchInfos.diskless(), effectiveClientId)
       } else {
         CompletableFuture.completedFuture(util.Map.of[TopicIdPartition, FetchPartitionData]())
       }

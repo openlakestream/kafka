@@ -22,6 +22,7 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.server.metrics.KafkaMetricsGroup;
 import org.apache.kafka.server.metrics.KafkaYammerMetrics;
+import org.apache.kafka.storage.diskless.DisklessClientZone;
 import org.apache.kafka.storage.diskless.idempotent.ProducerStateManager;
 import org.apache.kafka.storage.internals.log.LogMetricNames;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
@@ -36,6 +37,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -97,10 +99,9 @@ class UrsaStorageStateTest {
                 1,
                 mock(UrsaStorageConfig.class),
                 mock(BrokerTopicStats.class),
-                managedLedgerFactory,
-                ignored -> producerStateManager)) {
-            state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
-            state.getOrCreateProducerStateManager(tp);
+                managedLedgerFactory)) {
+            ensureManagedLedger(state, tp);
+            installProducerStateManager(state, tp, DisklessClientZone.NO_ZONE, producerStateManager);
 
             assertTrue(state.cleanupPartition(tp));
 
@@ -109,7 +110,7 @@ class UrsaStorageStateTest {
 
             assertTrue(closeLatch.await(5, TimeUnit.SECONDS));
 
-            state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
+            ensureManagedLedger(state, tp);
             verify(managedLedgerFactory, times(2)).asyncOpen(anyString(), any(), any(), any(), any());
         }
     }
@@ -127,13 +128,42 @@ class UrsaStorageStateTest {
                 1,
                 mock(UrsaStorageConfig.class),
                 mock(BrokerTopicStats.class),
-                managedLedgerFactory,
-                ignored -> producerStateManager);
+                managedLedgerFactory);
 
         assertFalse(state.cleanupPartition(tp));
 
         verify(producerStateManager, never()).cleanup(false);
         verify(managedLedgerFactory, never()).asyncOpen(anyString(), any(), any(), any(), any());
+    }
+
+    @Test
+    void testCleanupNonOwnedProducerStatesRemovesOnlyStaleZones() throws Exception {
+        TopicIdPartition tp = new TopicIdPartition(Uuid.randomUuid(), new TopicPartition("test-topic", 1));
+
+        ProducerStateManager noZoneManager = mock(ProducerStateManager.class);
+        ProducerStateManager zoneAManager = mock(ProducerStateManager.class);
+        when(noZoneManager.cleanup(false)).thenReturn(CompletableFuture.completedFuture(null));
+        when(zoneAManager.cleanup(false)).thenReturn(CompletableFuture.completedFuture(null));
+
+        ManagedLedgerFactory managedLedgerFactory = mock(ManagedLedgerFactory.class);
+
+        try (UrsaStorageState state = new UrsaStorageState(
+                Time.SYSTEM,
+                1,
+                mock(UrsaStorageConfig.class),
+                mock(BrokerTopicStats.class),
+                managedLedgerFactory)) {
+            installProducerStateManager(state, tp, DisklessClientZone.NO_ZONE, noZoneManager);
+            installProducerStateManager(state, tp, "zone-a", zoneAManager);
+
+            assertTrue(state.cleanupNonOwnedProducerStates(tp, Set.of("zone-a"), false));
+            verify(noZoneManager).cleanup(false);
+            verify(zoneAManager, never()).cleanup(false);
+            assertEquals(Set.of(tp), state.snapshotTrackedPartitions());
+
+            assertTrue(state.cleanupPartition(tp, false));
+            verify(zoneAManager).cleanup(false);
+        }
     }
 
     @Test
@@ -146,8 +176,7 @@ class UrsaStorageStateTest {
                 1,
                 mock(UrsaStorageConfig.class),
                 mock(BrokerTopicStats.class),
-                managedLedgerFactory,
-                ignored -> mock(ProducerStateManager.class))) {
+                managedLedgerFactory)) {
             state.deletePartitionData(tp);
 
             verify(managedLedgerFactory).delete(
@@ -171,8 +200,7 @@ class UrsaStorageStateTest {
                 1,
                 mock(UrsaStorageConfig.class),
                 mock(BrokerTopicStats.class),
-                managedLedgerFactory,
-                ignored -> mock(ProducerStateManager.class))) {
+                managedLedgerFactory)) {
             state.deletePartitionData(tp);
 
             verify(managedLedgerFactory).delete(
@@ -210,13 +238,12 @@ class UrsaStorageStateTest {
                 1,
                 mock(UrsaStorageConfig.class),
                 mock(BrokerTopicStats.class),
-                managedLedgerFactory,
-                ignored -> producerStateManager)) {
+                managedLedgerFactory)) {
             assertNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
             assertNull(jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
             assertNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
 
-            state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
+            ensureManagedLedger(state, tp);
 
             assertEquals(1234L, jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
             assertEquals(5L, jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
@@ -245,9 +272,8 @@ class UrsaStorageStateTest {
                 1,
                 mock(UrsaStorageConfig.class),
                 mock(BrokerTopicStats.class),
-                managedLedgerFactory,
-                ignored -> producerStateManager)) {
-            state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
+                managedLedgerFactory)) {
+            ensureManagedLedger(state, tp);
             assertNotNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
             assertNotNull(jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
             assertNotNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
@@ -257,6 +283,35 @@ class UrsaStorageStateTest {
             assertNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
             assertNull(jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
             assertNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
+        }
+    }
+
+    @Test
+    void testManagedLedgerOpenInitializesPartitionLog() throws Exception {
+        TopicIdPartition tp = new TopicIdPartition(Uuid.randomUuid(), new TopicPartition("read-state-topic", 0));
+
+        ProducerStateManager producerStateManager = mock(ProducerStateManager.class);
+        when(producerStateManager.cleanup(false)).thenReturn(CompletableFuture.completedFuture(null));
+
+        ManagedLedgerFactory managedLedgerFactory = mock(ManagedLedgerFactory.class);
+        ManagedLedger managedLedger = mock(ManagedLedger.class);
+        doAnswer(invocation -> {
+            AsyncCallbacks.OpenLedgerCallback callback = invocation.getArgument(2);
+            callback.openLedgerComplete(managedLedger, invocation.getArgument(3));
+            return null;
+        }).when(managedLedgerFactory).asyncOpen(anyString(), any(ManagedLedgerConfig.class), any(), any(), any());
+
+        try (UrsaStorageState state = new UrsaStorageState(
+                Time.SYSTEM,
+                1,
+                mock(UrsaStorageConfig.class),
+                mock(BrokerTopicStats.class),
+                managedLedgerFactory)) {
+            assertNull(state.partitionLog(tp));
+
+            ensureManagedLedger(state, tp);
+
+            assertNotNull(state.partitionLog(tp));
         }
     }
 
@@ -303,9 +358,8 @@ class UrsaStorageStateTest {
                 1,
                 mock(UrsaStorageConfig.class),
                 mock(BrokerTopicStats.class),
-                managedLedgerFactory,
-                ignored -> producerStateManager)) {
-            CompletableFuture<ManagedLedger> firstOpenFuture = state.getOrCreateManagedLedger(tp);
+                managedLedgerFactory)) {
+            ensureManagedLedger(state, tp);
 
             assertTrue(state.cleanupPartition(tp, false));
             assertNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
@@ -313,14 +367,12 @@ class UrsaStorageStateTest {
             assertNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
 
             firstOpenCallback.get().openLedgerComplete(firstLedger, null);
-            firstOpenFuture.get(5, TimeUnit.SECONDS);
-
             assertTrue(firstCloseLatch.await(5, TimeUnit.SECONDS));
             assertNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
             assertNull(jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
             assertNull(jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
 
-            state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
+            ensureManagedLedger(state, tp);
 
             verify(managedLedgerFactory, times(2)).asyncOpen(anyString(), any(), any(), any(), any());
             assertEquals(222L, jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
@@ -349,11 +401,10 @@ class UrsaStorageStateTest {
                 1,
                 mock(UrsaStorageConfig.class),
                 mock(BrokerTopicStats.class),
-                managedLedgerFactory,
-                ignored -> producerStateManager);
+                managedLedgerFactory);
 
-        state.getOrCreateManagedLedger(tp0).get(5, TimeUnit.SECONDS);
-        state.getOrCreateManagedLedger(tp1).get(5, TimeUnit.SECONDS);
+        ensureManagedLedger(state, tp0);
+        ensureManagedLedger(state, tp1);
         assertNotNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp0.topicPartition()));
         assertNotNull(jmxGaugeLongValue(LogMetricNames.SIZE, tp1.topicPartition()));
 
@@ -397,13 +448,12 @@ class UrsaStorageStateTest {
                 1,
                 mock(UrsaStorageConfig.class),
                 mock(BrokerTopicStats.class),
-                managedLedgerFactory,
-                ignored -> producerStateManager)) {
+                managedLedgerFactory)) {
             assertEquals(777L, jmxGaugeLongValue(LogMetricNames.SIZE, topicPartition));
             assertEquals(11L, jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, topicPartition));
             assertEquals(22L, jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, topicPartition));
 
-            state.getOrCreateManagedLedger(tp).get(5, TimeUnit.SECONDS);
+            ensureManagedLedger(state, tp);
             assertEquals(777L, jmxGaugeLongValue(LogMetricNames.SIZE, topicPartition));
             assertEquals(11L, jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, topicPartition));
             assertEquals(22L, jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, topicPartition));
@@ -435,5 +485,17 @@ class UrsaStorageStateTest {
             }
         }
         return null;
+    }
+
+    private static void ensureManagedLedger(UrsaStorageState state, TopicIdPartition tp) {
+        state.getOrCreatePartitionLog(tp);
+    }
+
+    private static void installProducerStateManager(
+            UrsaStorageState state,
+            TopicIdPartition tp,
+            String zone,
+            ProducerStateManager producerStateManager) {
+        state.getOrCreatePartitionLog(tp).installProducerStateManager(zone, producerStateManager);
     }
 }

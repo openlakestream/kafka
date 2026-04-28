@@ -25,6 +25,7 @@ import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.SimpleRecord;
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.storage.diskless.DisklessClientZone;
 import org.apache.kafka.storage.diskless.idempotent.ProducerStateManager;
 import org.apache.kafka.test.TestUtils;
 
@@ -59,6 +60,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 class UrsaManagedLedgerWriterIdempotentTest {
@@ -107,26 +109,26 @@ class UrsaManagedLedgerWriterIdempotentTest {
             any(AsyncCallbacks.AddEntryCallback.class),
             any());
 
-        ProducerStateManager producerStateManager = new ProducerStateManager(
+        ProducerStateManager producerStateManager = spy(new ProducerStateManager(
             tp,
             () -> null,
-            () -> CompletableFuture.completedFuture(managedLedger));
+            () -> CompletableFuture.completedFuture(managedLedger)));
 
         UrsaStorageState state = mock(UrsaStorageState.class);
-        AtomicInteger producerStateManagerCalls = new AtomicInteger(0);
-        CountDownLatch firstProducerStateManagerCall = new CountDownLatch(1);
-        CountDownLatch allowFirstProducerStateManagerReturn = new CountDownLatch(1);
+        UrsaPartitionLog partitionLog = attachPartitionLog(state, tp, managedLedger);
+        partitionLog.installProducerStateManager(DisklessClientZone.NO_ZONE, producerStateManager);
+        AtomicInteger prepareAppendCalls = new AtomicInteger(0);
+        CountDownLatch firstPrepareAppendCall = new CountDownLatch(1);
+        CountDownLatch allowFirstPrepareAppendReturn = new CountDownLatch(1);
         doAnswer(invocation -> {
-            if (producerStateManagerCalls.incrementAndGet() == 1) {
-                firstProducerStateManagerCall.countDown();
+            if (prepareAppendCalls.incrementAndGet() == 1) {
+                firstPrepareAppendCall.countDown();
                 assertTrue(
-                    allowFirstProducerStateManagerReturn.await(5, TimeUnit.SECONDS),
-                    "Timed out waiting to release first ProducerStateManager call");
+                    await(allowFirstPrepareAppendReturn, "Timed out waiting to release first prepareAppend call"),
+                    "Timed out waiting to release first prepareAppend call");
             }
-            return producerStateManager;
-        }).when(state).getOrCreateProducerStateManager(tp);
-        when(state.getOrCreateManagedLedger(tp)).thenReturn(CompletableFuture.completedFuture(managedLedger));
-        when(state.time()).thenReturn(Time.SYSTEM);
+            return invocation.callRealMethod();
+        }).when(producerStateManager).prepareAppend(any());
 
         UrsaManagedLedgerWriter writer = new UrsaManagedLedgerWriter(state);
 
@@ -149,22 +151,22 @@ class UrsaManagedLedgerWriterIdempotentTest {
 
         try {
             CompletableFuture<Map<TopicIdPartition, PartitionResponse>> firstWrite =
-                CompletableFuture.supplyAsync(() -> writer.write(Map.of(tp, records1)), executor)
+                CompletableFuture.supplyAsync(() -> writer.write(Map.of(tp, records1), DisklessClientZone.NO_ZONE), executor)
                     .thenCompose(future -> future);
 
             TestUtils.waitForCondition(
-                () -> firstProducerStateManagerCall.getCount() == 0,
+                () -> firstPrepareAppendCall.getCount() == 0,
                 5_000L,
-                "Timed out waiting for first ProducerStateManager call");
+                "Timed out waiting for first prepareAppend call");
 
             CompletableFuture<Map<TopicIdPartition, PartitionResponse>> secondWrite =
-                CompletableFuture.supplyAsync(() -> writer.write(Map.of(tp, records2)), executor)
+                CompletableFuture.supplyAsync(() -> writer.write(Map.of(tp, records2), DisklessClientZone.NO_ZONE), executor)
                     .thenCompose(future -> future);
 
             // Ensure the second write can't start preparing appends until the first one has been submitted.
-            assertEquals(1, producerStateManagerCalls.get());
+            assertEquals(1, prepareAppendCalls.get());
 
-            allowFirstProducerStateManagerReturn.countDown();
+            allowFirstPrepareAppendReturn.countDown();
 
             TestUtils.waitForCondition(
                 () -> firstAppendSubmitted.getCount() == 0,
@@ -239,36 +241,30 @@ class UrsaManagedLedgerWriterIdempotentTest {
             any(AsyncCallbacks.AddEntryCallback.class),
             any());
 
-        ProducerStateManager producerStateManager0 = new ProducerStateManager(
+        ProducerStateManager producerStateManager0 = spy(new ProducerStateManager(
             tp0,
             () -> null,
-            () -> CompletableFuture.completedFuture(managedLedger0));
+            () -> CompletableFuture.completedFuture(managedLedger0)));
         ProducerStateManager producerStateManager1 = new ProducerStateManager(
             tp1,
             () -> null,
             () -> CompletableFuture.completedFuture(managedLedger1));
 
         UrsaStorageState state = mock(UrsaStorageState.class);
-        when(state.getOrCreateManagedLedger(tp0)).thenReturn(CompletableFuture.completedFuture(managedLedger0));
-        when(state.getOrCreateManagedLedger(tp1)).thenReturn(CompletableFuture.completedFuture(managedLedger1));
-        when(state.time()).thenReturn(Time.SYSTEM);
 
-        CountDownLatch tp0ProducerStateManagerCalled = new CountDownLatch(1);
-        CountDownLatch releaseTp0ProducerStateManager = new CountDownLatch(1);
+        UrsaPartitionLog tp0PartitionLog = attachPartitionLog(state, tp0, managedLedger0);
+        tp0PartitionLog.installProducerStateManager(DisklessClientZone.NO_ZONE, producerStateManager0);
+        CountDownLatch tp0PrepareAppendCalled = new CountDownLatch(1);
+        CountDownLatch releaseTp0PrepareAppend = new CountDownLatch(1);
         doAnswer(invocation -> {
-            TopicIdPartition tp = invocation.getArgument(0);
-            if (tp0.equals(tp)) {
-                tp0ProducerStateManagerCalled.countDown();
-                assertTrue(
-                    releaseTp0ProducerStateManager.await(5, TimeUnit.SECONDS),
-                    "Timed out waiting to release producer state manager for tp0");
-                return producerStateManager0;
-            }
-            if (tp1.equals(tp)) {
-                return producerStateManager1;
-            }
-            throw new IllegalArgumentException("Unexpected partition " + tp);
-        }).when(state).getOrCreateProducerStateManager(any(TopicIdPartition.class));
+            tp0PrepareAppendCalled.countDown();
+            assertTrue(
+                await(releaseTp0PrepareAppend, "Timed out waiting to release prepareAppend for tp0"),
+                "Timed out waiting to release prepareAppend for tp0");
+            return invocation.callRealMethod();
+        }).when(producerStateManager0).prepareAppend(any());
+        UrsaPartitionLog tp1PartitionLog = attachPartitionLog(state, tp1, managedLedger1);
+        tp1PartitionLog.installProducerStateManager(DisklessClientZone.NO_ZONE, producerStateManager1);
 
         UrsaManagedLedgerWriter writer = new UrsaManagedLedgerWriter(state);
 
@@ -301,23 +297,23 @@ class UrsaManagedLedgerWriterIdempotentTest {
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
             CompletableFuture<Map<TopicIdPartition, PartitionResponse>> firstWrite =
-                CompletableFuture.supplyAsync(() -> writer.write(firstRequest), executor)
+                CompletableFuture.supplyAsync(() -> writer.write(firstRequest, DisklessClientZone.NO_ZONE), executor)
                     .thenCompose(future -> future);
 
             TestUtils.waitForCondition(
-                () -> tp0ProducerStateManagerCalled.getCount() == 0,
+                () -> tp0PrepareAppendCalled.getCount() == 0,
                 5_000L,
-                "Timed out waiting for tp0 producer state manager call");
+                "Timed out waiting for tp0 prepareAppend call");
 
             assertTrue(
                 tp1Seq0Submitted.await(5, TimeUnit.SECONDS),
                 "Timed out waiting for tp1 sequence 0 to be submitted while tp0 is blocked");
 
             CompletableFuture<Map<TopicIdPartition, PartitionResponse>> secondWrite =
-                CompletableFuture.supplyAsync(() -> writer.write(Map.of(tp1, tp1Seq1)), executor)
+                CompletableFuture.supplyAsync(() -> writer.write(Map.of(tp1, tp1Seq1), DisklessClientZone.NO_ZONE), executor)
                     .thenCompose(future -> future);
 
-            releaseTp0ProducerStateManager.countDown();
+            releaseTp0PrepareAppend.countDown();
 
             PartitionResponse firstResponse = firstWrite.get().get(tp1);
             PartitionResponse secondResponse = secondWrite.get().get(tp1);
@@ -327,7 +323,7 @@ class UrsaManagedLedgerWriterIdempotentTest {
             assertEquals(0L, firstResponse.baseOffset);
             assertEquals(1L, secondResponse.baseOffset);
         } finally {
-            releaseTp0ProducerStateManager.countDown();
+            releaseTp0PrepareAppend.countDown();
             executor.shutdownNow();
             producerStateManager0.close();
             producerStateManager1.close();
@@ -361,9 +357,7 @@ class UrsaManagedLedgerWriterIdempotentTest {
             () -> CompletableFuture.completedFuture(managedLedger));
 
         UrsaStorageState state = mock(UrsaStorageState.class);
-        when(state.getOrCreateProducerStateManager(tp)).thenReturn(producerStateManager);
-        when(state.getOrCreateManagedLedger(tp)).thenReturn(CompletableFuture.completedFuture(managedLedger));
-        when(state.time()).thenReturn(Time.SYSTEM);
+        attachPartitionLog(state, tp, managedLedger).installProducerStateManager(DisklessClientZone.NO_ZONE, producerStateManager);
 
         UrsaManagedLedgerWriter writer = new UrsaManagedLedgerWriter(state);
 
@@ -377,8 +371,10 @@ class UrsaManagedLedgerWriterIdempotentTest {
         );
 
         try {
-            CompletableFuture<Map<TopicIdPartition, PartitionResponse>> firstWrite = writer.write(Map.of(tp, records));
-            CompletableFuture<Map<TopicIdPartition, PartitionResponse>> secondWrite = writer.write(Map.of(tp, records));
+            CompletableFuture<Map<TopicIdPartition, PartitionResponse>> firstWrite =
+                    writer.write(Map.of(tp, records), DisklessClientZone.NO_ZONE);
+            CompletableFuture<Map<TopicIdPartition, PartitionResponse>> secondWrite =
+                    writer.write(Map.of(tp, records), DisklessClientZone.NO_ZONE);
 
             assertFalse(firstWrite.isDone());
             assertFalse(secondWrite.isDone());
@@ -426,9 +422,7 @@ class UrsaManagedLedgerWriterIdempotentTest {
             () -> CompletableFuture.completedFuture(managedLedger));
 
         UrsaStorageState state = mock(UrsaStorageState.class);
-        when(state.getOrCreateProducerStateManager(tp)).thenReturn(producerStateManager);
-        when(state.getOrCreateManagedLedger(tp)).thenReturn(CompletableFuture.completedFuture(managedLedger));
-        when(state.time()).thenReturn(Time.SYSTEM);
+        attachPartitionLog(state, tp, managedLedger).installProducerStateManager(DisklessClientZone.NO_ZONE, producerStateManager);
 
         UrsaManagedLedgerWriter writer = new UrsaManagedLedgerWriter(state);
 
@@ -452,7 +446,8 @@ class UrsaManagedLedgerWriterIdempotentTest {
         MemoryRecords mergedRecords = mergeRecords(firstBatch, secondBatch);
 
         try {
-            Map<TopicIdPartition, PartitionResponse> response = writer.write(Map.of(tp, mergedRecords)).get();
+            Map<TopicIdPartition, PartitionResponse> response =
+                    writer.write(Map.of(tp, mergedRecords), DisklessClientZone.NO_ZONE).get();
             PartitionResponse partitionResponse = response.get(tp);
             assertEquals(Errors.NONE, partitionResponse.error);
             assertEquals(100L, partitionResponse.baseOffset);
@@ -492,5 +487,32 @@ class UrsaManagedLedgerWriterIdempotentTest {
             return metadata.getSequenceId();
         }
         return -1L;
+    }
+
+    private static boolean await(CountDownLatch latch, String failureMessage) {
+        try {
+            return latch.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(failureMessage, e);
+        }
+    }
+
+    private static UrsaPartitionLog attachPartitionLog(
+            UrsaStorageState state,
+            TopicIdPartition tp,
+            ManagedLedger managedLedger) {
+        UrsaPartitionLog partitionLog = new UrsaPartitionLog(
+                tp,
+                state,
+                new DisklessLogMetrics(),
+                CompletableFuture.completedFuture(managedLedger),
+                null,
+                0L,
+                0,
+                null);
+        when(state.time()).thenReturn(Time.SYSTEM);
+        when(state.getOrCreatePartitionLog(tp)).thenReturn(partitionLog);
+        return partitionLog;
     }
 }

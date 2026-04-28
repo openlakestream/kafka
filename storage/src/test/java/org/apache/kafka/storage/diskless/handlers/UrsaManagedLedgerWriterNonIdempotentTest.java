@@ -26,9 +26,11 @@ import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.record.SimpleRecord;
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.storage.diskless.DisklessClientZone;
 
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
 import org.apache.bookkeeper.mledger.ManagedLedger;
+import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.Position;
 import org.junit.jupiter.api.Test;
 
@@ -50,8 +52,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class UrsaManagedLedgerWriterNonIdempotentTest {
@@ -88,7 +93,8 @@ class UrsaManagedLedgerWriterNonIdempotentTest {
         );
 
         try {
-            Map<TopicIdPartition, PartitionResponse> response = writer.write(Map.of(tp, records)).get(5, TimeUnit.SECONDS);
+            Map<TopicIdPartition, PartitionResponse> response =
+                    writer.write(Map.of(tp, records), DisklessClientZone.NO_ZONE).get(5, TimeUnit.SECONDS);
             PartitionResponse partitionResponse = response.get(tp);
             assertEquals(Errors.NONE, partitionResponse.error);
             assertEquals(0L, partitionResponse.baseOffset);
@@ -146,14 +152,14 @@ class UrsaManagedLedgerWriterNonIdempotentTest {
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
             CompletableFuture<Map<TopicIdPartition, PartitionResponse>> firstWrite =
-                CompletableFuture.supplyAsync(() -> writer.write(Map.of(tp, records1)), executor)
+                CompletableFuture.supplyAsync(() -> writer.write(Map.of(tp, records1), DisklessClientZone.NO_ZONE), executor)
                     .thenCompose(future -> future);
 
             assertTrue(firstAppendSubmitted.await(5, TimeUnit.SECONDS),
                 "Timed out waiting for first non-idempotent append submission");
 
             CompletableFuture<Map<TopicIdPartition, PartitionResponse>> secondWrite =
-                CompletableFuture.supplyAsync(() -> writer.write(Map.of(tp, records2)), executor)
+                CompletableFuture.supplyAsync(() -> writer.write(Map.of(tp, records2), DisklessClientZone.NO_ZONE), executor)
                     .thenCompose(future -> future);
 
             assertTrue(secondAppendSubmitted.await(5, TimeUnit.SECONDS),
@@ -174,12 +180,65 @@ class UrsaManagedLedgerWriterNonIdempotentTest {
         }
     }
 
+    @Test
+    void testNonIdempotentWriteReturnsNotLeaderWhenManagedLedgerIsClosed() throws Exception {
+        TopicIdPartition tp = testTopicPartition();
+        ManagedLedger managedLedger = mock(ManagedLedger.class);
+
+        doAnswer(invocation -> {
+            AsyncCallbacks.AddEntryCallback callback = invocation.getArgument(2);
+            callback.addFailed(new ManagedLedgerException("Already closed"), null);
+            return null;
+        }).when(managedLedger).asyncAddEntry(
+            any(ByteBuf.class),
+            anyInt(),
+            any(AsyncCallbacks.AddEntryCallback.class),
+            any());
+
+        UrsaStorageState state = mock(UrsaStorageState.class);
+        UrsaPartitionLog partitionLog = new UrsaPartitionLog(
+                tp,
+                state,
+                new DisklessLogMetrics(),
+                CompletableFuture.completedFuture(managedLedger),
+                null,
+                0L,
+                0,
+                null);
+        when(state.time()).thenReturn(Time.SYSTEM);
+        when(state.getOrCreatePartitionLog(tp)).thenReturn(partitionLog);
+
+        UrsaManagedLedgerWriter writer = new UrsaManagedLedgerWriter(state);
+        MemoryRecords records = MemoryRecords.withRecords(
+            Compression.NONE,
+            new SimpleRecord("a".getBytes(StandardCharsets.UTF_8))
+        );
+
+        try {
+            Map<TopicIdPartition, PartitionResponse> response =
+                    writer.write(Map.of(tp, records), DisklessClientZone.NO_ZONE).get(5, TimeUnit.SECONDS);
+            assertEquals(Errors.NOT_LEADER_OR_FOLLOWER, response.get(tp).error);
+            verify(state).removePartitionLog(eq(tp), same(partitionLog));
+        } finally {
+            writer.close();
+        }
+    }
+
     private static UrsaStorageState newWriterState(
             TopicIdPartition tp,
             ManagedLedger managedLedger) {
         UrsaStorageState state = mock(UrsaStorageState.class);
+        UrsaPartitionLog partitionLog = new UrsaPartitionLog(
+                tp,
+                state,
+                new DisklessLogMetrics(),
+                CompletableFuture.completedFuture(managedLedger),
+                null,
+                0L,
+                0,
+                null);
         when(state.time()).thenReturn(Time.SYSTEM);
-        when(state.getOrCreateManagedLedger(tp)).thenReturn(CompletableFuture.completedFuture(managedLedger));
+        when(state.getOrCreatePartitionLog(tp)).thenReturn(partitionLog);
         return state;
     }
 

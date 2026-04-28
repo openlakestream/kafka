@@ -45,6 +45,14 @@ public class DisklessTopicMetadataTransformer {
             ListenerName listenerName,
             Iterable<MetadataResponseTopic> topicMetadata
     ) {
+        transformClusterMetadata(listenerName, null, topicMetadata);
+    }
+
+    public void transformClusterMetadata(
+            ListenerName listenerName,
+            String clientId,
+            Iterable<MetadataResponseTopic> topicMetadata
+    ) {
         Objects.requireNonNull(topicMetadata, "topicMetadata cannot be null");
 
         for (MetadataResponseTopic topic : topicMetadata) {
@@ -52,7 +60,7 @@ public class DisklessTopicMetadataTransformer {
                 continue;
             }
             for (var partition : topic.partitions()) {
-                int leader = selectLeaderForDisklessPartition(topic.topicId(), partition.partitionIndex());
+                int leader = selectLeaderForDisklessPartition(topic.topicId(), partition.partitionIndex(), clientId);
                 partition.setLeaderId(leader);
                 List<Integer> replicas = List.of(leader);
                 partition.setErrorCode(Errors.NONE.code());
@@ -66,6 +74,7 @@ public class DisklessTopicMetadataTransformer {
 
     public void transformDescribeTopicResponse(
             ListenerName listenerName,
+            String clientId,
             DescribeTopicPartitionsResponseData responseData
     ) {
         Objects.requireNonNull(responseData, "responseData cannot be null");
@@ -76,7 +85,7 @@ public class DisklessTopicMetadataTransformer {
             }
 
             for (var partition : topic.partitions()) {
-                int leader = selectLeaderForDisklessPartition(topic.topicId(), partition.partitionIndex());
+                int leader = selectLeaderForDisklessPartition(topic.topicId(), partition.partitionIndex(), clientId);
                 partition.setLeaderId(leader);
                 List<Integer> replicas = List.of(leader);
                 partition.setErrorCode(Errors.NONE.code());
@@ -90,8 +99,8 @@ public class DisklessTopicMetadataTransformer {
         }
     }
 
-    private int selectLeaderForDisklessPartition(Uuid topicId, int partitionIndex) {
-        return brokerSelector.selectBroker(topicId, partitionIndex)
+    private int selectLeaderForDisklessPartition(Uuid topicId, int partitionIndex, String clientId) {
+        return brokerSelector.selectBrokerForZone(topicId, partitionIndex, brokerSelector.effectiveZone(clientId))
                 .orElseThrow(() ->
                         new RuntimeException("No alive brokers found for diskless partition assignment"));
     }

@@ -2913,7 +2913,8 @@ class KafkaApisTest extends Logging {
         responseCallback.capture(),
         any(),
         any(),
-        any())
+        any(),
+        anyString())
       ).thenAnswer(_ => responseCallback.getValue.apply(Map(tp -> new PartitionResponse(Errors.NOT_LEADER_OR_FOLLOWER))))
 
       when(replicaManager.getPartitionOrError(tp.topicPartition())).thenAnswer(_ => Right(partition))
@@ -2984,7 +2985,8 @@ class KafkaApisTest extends Logging {
         responseCallback.capture(),
         any(),
         any(),
-        any())
+        any(),
+        anyString())
       ).thenAnswer(_ => responseCallback.getValue.apply(Map(tp -> new PartitionResponse(Errors.NOT_LEADER_OR_FOLLOWER))))
 
       when(replicaManager.getPartitionOrError(tp.topicPartition())).thenAnswer(_ => Left(Errors.UNKNOWN_TOPIC_OR_PARTITION))
@@ -3056,7 +3058,8 @@ class KafkaApisTest extends Logging {
         responseCallback.capture(),
         any(),
         any(),
-        any())
+        any(),
+        anyString())
       ).thenAnswer(_ => responseCallback.getValue.apply(Map(tp -> new PartitionResponse(Errors.NOT_LEADER_OR_FOLLOWER))))
 
       when(replicaManager.getPartitionOrError(tp.topicPartition)).thenAnswer(_ => Left(Errors.UNKNOWN_TOPIC_OR_PARTITION))
@@ -3094,13 +3097,15 @@ class KafkaApisTest extends Logging {
     val topic = "diskless-topic"
     val topicId = Uuid.randomUuid()
     val requestListener = ListenerName.forSecurityProtocol(SecurityProtocol.PLAINTEXT)
+    val zoneAwareClientId = "producer,zone_id=zone-a"
     val aliveBrokers = util.List.of(
-      new Node(0, "broker0", 9092),
-      new Node(1, "broker1", 9092),
-      new Node(2, "broker2", 9092)
+      new Node(0, "broker0", 9092, "zone-a"),
+      new Node(1, "broker1", 9092, "zone-b"),
+      new Node(2, "broker2", 9092, "zone-a")
     )
-    val expectedLeaderId = new DisklessBrokerSelector(_ => aliveBrokers, requestListener)
-      .selectBroker(topicId, 0)
+    val selector = new DisklessBrokerSelector(_ => aliveBrokers, requestListener)
+    val expectedLeaderId = selector
+      .selectBrokerForZone(topicId, 0, selector.effectiveZone(zoneAwareClientId))
       .getAsInt
 
     metadataCache = mock(classOf[KRaftMetadataCache])
@@ -3127,7 +3132,8 @@ class KafkaApisTest extends Logging {
       responseCallback.capture(),
       any(),
       any(),
-      any())
+      any(),
+      anyString())
     ).thenAnswer(_ => responseCallback.getValue.apply(Map(tp -> new PartitionResponse(Errors.NOT_LEADER_OR_FOLLOWER))))
 
     when(clientRequestQuotaManager.maybeRecordAndGetThrottleTimeMs(any[RequestChannel.Request](),
@@ -3149,7 +3155,10 @@ class KafkaApisTest extends Logging {
       .setAcks(1.toShort)
       .setTimeoutMs(5000))
       .build(ApiKeys.PRODUCE.latestVersion())
-    val request = buildRequest(produceRequest)
+    val request = buildRequest(
+      produceRequest,
+      requestHeader = Some(new RequestHeader(ApiKeys.PRODUCE, produceRequest.version, zoneAwareClientId, 0))
+    )
 
     kafkaApis = createKafkaApis(overrideProperties = Map(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG -> "true"))
     kafkaApis.handleProduceRequest(request, RequestLocal.withThreadConfinedCaching)
@@ -3163,6 +3172,67 @@ class KafkaApisTest extends Logging {
     assertEquals(0, partitionProduceResponse.currentLeader.leaderEpoch())
     assertEquals(expectedLeaderId, leaderNode.nodeId)
     verify(replicaManager, never()).getPartitionOrError(tp.topicPartition())
+  }
+
+  @Test
+  def testDisklessMetadataRequestUsesZoneAwarePseudoLeader(): Unit = {
+    val topic = "diskless-metadata-topic"
+    val topicId = Uuid.randomUuid()
+    val requestListener = ListenerName.forSecurityProtocol(SecurityProtocol.PLAINTEXT)
+    val zoneAwareClientId = "metadata,zone_id=zone-a"
+    val aliveBrokers = util.List.of(
+      new Node(0, "broker0", 9092, "zone-a"),
+      new Node(1, "broker1", 9092, "zone-b"),
+      new Node(2, "broker2", 9092, "zone-a")
+    )
+    val selector = new DisklessBrokerSelector(_ => aliveBrokers, requestListener)
+    val expectedLeaderId = selector
+      .selectBrokerForZone(topicId, 0, selector.effectiveZone(zoneAwareClientId))
+      .getAsInt
+
+    metadataCache = mock(classOf[KRaftMetadataCache])
+    val disklessTopicConfig = new Properties()
+    disklessTopicConfig.put(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true")
+
+    when(metadataCache.contains(topic)).thenReturn(true)
+    when(metadataCache.topicConfig(topic)).thenReturn(disklessTopicConfig)
+    when(metadataCache.getTopicId(topic)).thenReturn(topicId)
+    when(metadataCache.getRandomAliveBrokerId).thenReturn(Optional.of(0))
+    when(metadataCache.getAliveBrokerNodes(any[ListenerName])).thenReturn(aliveBrokers)
+    when(metadataCache.getTopicMetadata(any[java.util.Set[String]], any[ListenerName], anyBoolean, anyBoolean)).thenReturn(
+      util.List.of(
+        new MetadataResponseTopic()
+          .setErrorCode(Errors.NONE.code)
+          .setName(topic)
+          .setTopicId(topicId)
+          .setIsInternal(false)
+          .setPartitions(util.List.of(
+            new MetadataResponseData.MetadataResponsePartition()
+              .setPartitionIndex(0)
+              .setLeaderId(99)
+              .setReplicaNodes(util.List.of(99))
+              .setIsrNodes(util.List.of(99))
+          ))
+      )
+    )
+    when(clientRequestQuotaManager.maybeRecordAndGetThrottleTimeMs(any[RequestChannel.Request](), any[Long]))
+      .thenReturn(0)
+
+    val metadataRequest = new MetadataRequest.Builder(util.List.of(topic), false).build()
+    val request = buildRequest(
+      metadataRequest,
+      requestHeader = Some(new RequestHeader(ApiKeys.METADATA, metadataRequest.version, zoneAwareClientId, 0))
+    )
+
+    kafkaApis = createKafkaApis(overrideProperties = Map(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG -> "true"))
+    kafkaApis.handleTopicMetadataRequest(request)
+
+    val response = verifyNoThrottling[MetadataResponse](request)
+    val partition = response.data.topics().asScala.head.partitions().asScala.head
+
+    assertEquals(expectedLeaderId, partition.leaderId())
+    assertEquals(util.List.of(expectedLeaderId), partition.replicaNodes())
+    assertEquals(util.List.of(expectedLeaderId), partition.isrNodes())
   }
 
   @Test
@@ -3211,7 +3281,8 @@ class KafkaApisTest extends Logging {
           any(),
           any(),
           any(),
-          any())
+          any(),
+          anyString())
       } finally {
         kafkaApis.close()
       }
@@ -3310,7 +3381,8 @@ class KafkaApisTest extends Logging {
       any(),
       any(),
       any(),
-      any()
+      any(),
+      anyString()
     )).thenAnswer(invocation => {
       val entries = invocation.getArgument[Map[TopicIdPartition, MemoryRecords]](4)
       val responseCallback = invocation.getArgument[Map[TopicIdPartition, PartitionResponse] => Unit](5)
@@ -4787,7 +4859,8 @@ class KafkaApisTest extends Logging {
       any[FetchParams],
       any[Seq[(TopicIdPartition, FetchRequest.PartitionData)]],
       any[ReplicaQuota],
-      any[Seq[(TopicIdPartition, FetchPartitionData)] => Unit]()
+      any[Seq[(TopicIdPartition, FetchPartitionData)] => Unit](),
+      anyString()
     )).thenAnswer(invocation => {
       val callback = invocation.getArgument(3).asInstanceOf[Seq[(TopicIdPartition, FetchPartitionData)] => Unit]
       val records = MemoryRecords.withRecords(Compression.NONE,
@@ -4909,7 +4982,8 @@ class KafkaApisTest extends Logging {
       any[FetchParams],
       any[Seq[(TopicIdPartition, FetchRequest.PartitionData)]],
       any[ReplicaQuota],
-      any[Seq[(TopicIdPartition, FetchPartitionData)] => Unit]()
+      any[Seq[(TopicIdPartition, FetchPartitionData)] => Unit](),
+      anyString()
     )).thenAnswer(invocation => {
       val callback = invocation.getArgument(3).asInstanceOf[Seq[(TopicIdPartition, FetchPartitionData)] => Unit]
       callback(Seq(tidp -> new FetchPartitionData(Errors.NOT_LEADER_OR_FOLLOWER, UnifiedLog.UNKNOWN_OFFSET, UnifiedLog.UNKNOWN_OFFSET, MemoryRecords.EMPTY,
@@ -4956,13 +5030,15 @@ class KafkaApisTest extends Logging {
     val topicId = Uuid.randomUuid()
     val tidp = new TopicIdPartition(topicId, new TopicPartition(topic, 0))
     val requestListener = ListenerName.forSecurityProtocol(SecurityProtocol.PLAINTEXT)
+    val zoneAwareClientId = "consumer,zone_id=zone-a"
     val aliveBrokers = util.List.of(
-      new Node(0, "broker0", 9092),
-      new Node(1, "broker1", 9092),
-      new Node(2, "broker2", 9092)
+      new Node(0, "broker0", 9092, "zone-a"),
+      new Node(1, "broker1", 9092, "zone-b"),
+      new Node(2, "broker2", 9092, "zone-a")
     )
-    val expectedLeaderId = new DisklessBrokerSelector(_ => aliveBrokers, requestListener)
-      .selectBroker(topicId, 0)
+    val selector = new DisklessBrokerSelector(_ => aliveBrokers, requestListener)
+    val expectedLeaderId = selector
+      .selectBrokerForZone(topicId, 0, selector.effectiveZone(zoneAwareClientId))
       .getAsInt
 
     metadataCache = mock(classOf[KRaftMetadataCache])
@@ -4983,7 +5059,8 @@ class KafkaApisTest extends Logging {
       any[FetchParams],
       any[Seq[(TopicIdPartition, FetchRequest.PartitionData)]],
       any[ReplicaQuota],
-      any[Seq[(TopicIdPartition, FetchPartitionData)] => Unit]()
+      any[Seq[(TopicIdPartition, FetchPartitionData)] => Unit](),
+      anyString()
     )).thenAnswer(invocation => {
       val callback = invocation.getArgument(3).asInstanceOf[Seq[(TopicIdPartition, FetchPartitionData)] => Unit]
       callback(Seq(tidp -> new FetchPartitionData(Errors.NOT_LEADER_OR_FOLLOWER, UnifiedLog.UNKNOWN_OFFSET, UnifiedLog.UNKNOWN_OFFSET, MemoryRecords.EMPTY,
@@ -5010,7 +5087,10 @@ class KafkaApisTest extends Logging {
 
     val fetchRequest = new FetchRequest.Builder(16, 16, -1, -1, 100, 0, fetchDataBuilder)
       .build()
-    val request = buildRequest(fetchRequest)
+    val request = buildRequest(
+      fetchRequest,
+      requestHeader = Some(new RequestHeader(ApiKeys.FETCH, fetchRequest.version, zoneAwareClientId, 0))
+    )
     kafkaApis = createKafkaApis(overrideProperties = Map(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG -> "true"))
     kafkaApis.handleFetchRequest(request)
 
@@ -10282,7 +10362,8 @@ class KafkaApisTest extends Logging {
       any[FetchParams],
       any[Seq[(TopicIdPartition, FetchRequest.PartitionData)]],
       any[ReplicaQuota],
-      any[Seq[(TopicIdPartition, FetchPartitionData)] => Unit]()
+      any[Seq[(TopicIdPartition, FetchPartitionData)] => Unit](),
+      anyString()
     )).thenAnswer(invocation => {
       val callback = invocation.getArgument(3).asInstanceOf[Seq[(TopicIdPartition, FetchPartitionData)] => Unit]
       callback(Seq(tidp0 -> new FetchPartitionData(Errors.NONE, hw, 0, records,

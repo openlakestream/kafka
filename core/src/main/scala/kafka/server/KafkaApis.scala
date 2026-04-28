@@ -406,9 +406,17 @@ class KafkaApis(val requestChannel: RequestChannel,
   case class LeaderNode(leaderId: Int, leaderEpoch: Int, node: Option[Node])
 
   private def getCurrentLeader(tp: TopicPartition, ln: ListenerName): LeaderNode = {
+    getCurrentLeader(tp, ln, null)
+  }
+
+  private def getCurrentLeader(tp: TopicPartition, ln: ListenerName, clientId: String): LeaderNode = {
     if (disklessMetadataView.exists(_.isDisklessStorageTopic(tp.topic))) {
       val selectedLeaderId = disklessBrokerSelector.flatMap { selector =>
-        val selected = selector.selectBroker(metadataCache.getTopicId(tp.topic), tp.partition)
+        val selected = selector.selectBrokerForZone(
+          metadataCache.getTopicId(tp.topic),
+          tp.partition,
+          selector.effectiveZone(clientId)
+        )
         if (selected.isPresent) Some(selected.getAsInt) else None
       }
 
@@ -439,9 +447,10 @@ class KafkaApis(val requestChannel: RequestChannel,
    */
   def handleProduceRequest(request: RequestChannel.Request, requestLocal: RequestLocal): Unit = {
     val produceRequest = request.body[ProduceRequest]
+    val requestContainsTransactionalRecords = RequestUtils.hasTransactionalRecords(produceRequest)
 
     try {
-      if (RequestUtils.hasTransactionalRecords(produceRequest)) {
+      if (requestContainsTransactionalRecords) {
         val isAuthorizedTransactional = produceRequest.transactionalId != null &&
           authHelper.authorize(request.context, WRITE, TRANSACTIONAL_ID, produceRequest.transactionalId)
         if (!isAuthorizedTransactional) {
@@ -484,6 +493,11 @@ class KafkaApis(val requestChannel: RequestChannel,
           unauthorizedTopicResponses += topicIdPartition -> new PartitionResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
         else if (!metadataCache.contains(topicIdPartition.topicPartition))
           nonExistingTopicResponses += topicIdPartition -> new PartitionResponse(Errors.UNKNOWN_TOPIC_OR_PARTITION)
+        else if (requestContainsTransactionalRecords &&
+          disklessMetadataView.exists(_.isDisklessStorageTopic(topicIdPartition.topic))) {
+          warn(s"Attempt to produce transactional records to diskless topic ${topicIdPartition.topic}")
+          invalidRequestResponses += topicIdPartition -> new PartitionResponse(Errors.INVALID_REQUEST)
+        }
         else
           try {
             ProduceRequest.validateRecords(request.header.apiVersion, memoryRecords)
@@ -516,7 +530,7 @@ class KafkaApis(val requestChannel: RequestChannel,
             if (request.header.apiVersion >= 10) {
               status.error match {
                 case Errors.NOT_LEADER_OR_FOLLOWER =>
-                  val leaderNode = getCurrentLeader(topicIdPartition.topicPartition(), request.context.listenerName)
+                  val leaderNode = getCurrentLeader(topicIdPartition.topicPartition(), request.context.listenerName, request.header.clientId)
                   leaderNode.node.foreach { node =>
                     nodeEndpoints.put(node.id(), node)
                   }
@@ -596,7 +610,8 @@ class KafkaApis(val requestChannel: RequestChannel,
           responseCallback = sendResponseCallback,
           recordValidationStatsCallback = processingStatsCallback,
           requestLocal = requestLocal,
-          transactionSupportedOperation = transactionSupportedOperation)
+          transactionSupportedOperation = transactionSupportedOperation,
+          clientId = request.header.clientId)
 
         // if the request is put into the purgatory, it will have a held reference and hence cannot be garbage collected;
         // hence we clear its data here in order to let GC reclaim its memory since it is already appended to log
@@ -703,7 +718,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         if (versionId >= 16) {
           data.error match {
             case Errors.NOT_LEADER_OR_FOLLOWER | Errors.FENCED_LEADER_EPOCH =>
-              val leaderNode = getCurrentLeader(topicIdPartition.topicPartition(), request.context.listenerName)
+              val leaderNode = getCurrentLeader(topicIdPartition.topicPartition(), request.context.listenerName, clientId)
               leaderNode.node.foreach { node =>
                 nodeEndpoints.put(node.id(), node)
               }
@@ -821,6 +836,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         fetchInfos = interesting,
         quota = replicationQuota(fetchRequest),
         responseCallback = processResponseCallback,
+        clientId = clientId
       )
     }
   }
@@ -1033,7 +1049,9 @@ class KafkaApis(val requestChannel: RequestChannel,
     val completeTopicMetadata =  unknownTopicIdsTopicMetadata ++
       topicMetadata ++ unauthorizedForCreateTopicMetadata ++ unauthorizedForDescribeTopicMetadata
 
-    disklessMetadataTransformer.foreach(_.transformClusterMetadata(request.context.listenerName, completeTopicMetadata.asJava))
+    disklessMetadataTransformer.foreach(
+      _.transformClusterMetadata(request.context.listenerName, request.header.clientId, completeTopicMetadata.asJava)
+    )
 
     val brokers = metadataCache.getAliveBrokerNodes(request.context.listenerName)
 
@@ -1058,7 +1076,9 @@ class KafkaApis(val requestChannel: RequestChannel,
     trace("Sending topic partitions metadata %s for correlation id %d to client %s".format(response.topics().asScala.mkString(","),
       request.header.correlationId, request.header.clientId))
 
-    disklessMetadataTransformer.foreach(_.transformDescribeTopicResponse(request.context.listenerName, response))
+    disklessMetadataTransformer.foreach(
+      _.transformDescribeTopicResponse(request.context.listenerName, request.header.clientId, response)
+    )
 
     requestHelper.sendResponseMaybeThrottle(request, requestThrottleMs => {
       response.setThrottleTimeMs(requestThrottleMs)
@@ -1812,11 +1832,16 @@ class KafkaApis(val requestChannel: RequestChannel,
 
       val currentErrors = new ConcurrentHashMap[TopicPartition, Errors]()
       marker.partitions.forEach { partition =>
-        replicaManager.onlinePartition(partition) match {
-          case Some(_)  =>
-            partitionsWithCompatibleMessageFormat += partition
-          case None =>
-            currentErrors.put(partition, Errors.UNKNOWN_TOPIC_OR_PARTITION)
+        if (disklessMetadataView.exists(_.isDisklessStorageTopic(partition.topic))) {
+          warn("Attempt to call WriteTxnMarkersRequest with diskless topic")
+          currentErrors.put(partition, Errors.INVALID_TOPIC_EXCEPTION)
+        } else {
+          replicaManager.onlinePartition(partition) match {
+            case Some(_)  =>
+              partitionsWithCompatibleMessageFormat += partition
+            case None =>
+              currentErrors.put(partition, Errors.UNKNOWN_TOPIC_OR_PARTITION)
+          }
         }
       }
 
@@ -1961,6 +1986,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       } else {
         val unauthorizedTopicErrors = mutable.Map[TopicPartition, Errors]()
         val nonExistingTopicErrors = mutable.Map[TopicPartition, Errors]()
+        val preventedDisklessTopicErrors = mutable.Map[TopicPartition, Errors]()
         val authorizedPartitions = new util.HashSet[TopicPartition]()
 
         // Only request versions less than 4 need write authorization since they come from clients.
@@ -1974,15 +2000,19 @@ class KafkaApis(val requestChannel: RequestChannel,
             unauthorizedTopicErrors += topicPartition -> Errors.TOPIC_AUTHORIZATION_FAILED
           else if (!metadataCache.contains(topicPartition))
             nonExistingTopicErrors += topicPartition -> Errors.UNKNOWN_TOPIC_OR_PARTITION
+          else if (disklessMetadataView.exists(_.isDisklessStorageTopic(topicPartition.topic))) {
+            warn("Attempt to call AddPartitionsToTxnRequest with diskless topic")
+            preventedDisklessTopicErrors += topicPartition -> Errors.INVALID_TOPIC_EXCEPTION
+          }
           else
             authorizedPartitions.add(topicPartition)
         }
 
-        if (unauthorizedTopicErrors.nonEmpty || nonExistingTopicErrors.nonEmpty) {
+        if (unauthorizedTopicErrors.nonEmpty || nonExistingTopicErrors.nonEmpty || preventedDisklessTopicErrors.nonEmpty) {
           // Any failed partition check causes the entire transaction to fail. We send the appropriate error codes for the
           // partitions which failed, and an 'OPERATION_NOT_ATTEMPTED' error code for the partitions which succeeded
           // the authorization check to indicate that they were not added to the transaction.
-          val partitionErrors = unauthorizedTopicErrors ++ nonExistingTopicErrors ++
+          val partitionErrors = unauthorizedTopicErrors ++ nonExistingTopicErrors ++ preventedDisklessTopicErrors ++
             authorizedPartitions.asScala.map(_ -> Errors.OPERATION_NOT_ATTEMPTED)
           addResultAndMaybeSendResponse(AddPartitionsToTxnResponse.resultForTransaction(transactionalId, partitionErrors.asJava))
         } else {
@@ -2123,6 +2153,10 @@ class KafkaApis(val requestChannel: RequestChannel,
           // to the response with UNKNOWN_TOPIC_OR_PARTITION.
           responseBuilder.addPartitions[TxnOffsetCommitRequestData.TxnOffsetCommitRequestPartition](
             topic.name, topic.partitions, _.partitionIndex, Errors.UNKNOWN_TOPIC_OR_PARTITION)
+        } else if (disklessMetadataView.exists(_.isDisklessStorageTopic(topic.name()))) {
+          warn("Attempt to call TxnOffsetCommitRequest with diskless topic")
+          responseBuilder.addPartitions[TxnOffsetCommitRequestData.TxnOffsetCommitRequestPartition](
+            topic.name, topic.partitions, _.partitionIndex, Errors.INVALID_TOPIC_EXCEPTION)
         } else {
           // Otherwise, we check all partitions to ensure that they all exist.
           val topicWithValidPartitions = new TxnOffsetCommitRequestData.TxnOffsetCommitRequestTopic().setName(topic.name)

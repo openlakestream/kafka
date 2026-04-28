@@ -1040,9 +1040,14 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
 
     private static void forceTrimForTopicPartition(Object ursaStorageState,
                                                    TopicIdPartition topicIdPartition) throws Exception {
-        var getOrCreateManagedLedgerMethod = ursaStorageState.getClass()
-                .getMethod("getOrCreateManagedLedger", TopicIdPartition.class);
-        Object managedLedgerFuture = getOrCreateManagedLedgerMethod.invoke(ursaStorageState, topicIdPartition);
+        var getOrCreatePartitionLogMethod = ursaStorageState.getClass()
+                .getDeclaredMethod("getOrCreatePartitionLog", TopicIdPartition.class);
+        getOrCreatePartitionLogMethod.setAccessible(true);
+        Object partitionLog = getOrCreatePartitionLogMethod.invoke(ursaStorageState, topicIdPartition);
+
+        var initializedMethod = partitionLog.getClass().getDeclaredMethod("initialized");
+        initializedMethod.setAccessible(true);
+        Object managedLedgerFuture = initializedMethod.invoke(partitionLog);
         Object managedLedger = ((CompletableFuture<?>) managedLedgerFuture)
                 .get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
 

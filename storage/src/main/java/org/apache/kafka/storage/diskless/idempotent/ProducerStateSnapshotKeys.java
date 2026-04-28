@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.storage.diskless.idempotent;
 
+import org.apache.kafka.storage.diskless.DisklessClientZone;
+
 /**
  * Oxia key builder for diskless producer-state snapshots.
  */
@@ -28,5 +30,13 @@ public final class ProducerStateSnapshotKeys {
 
     public static String snapshotKey(String topicId, int partition) {
         return SNAPSHOT_PREFIX + topicId + "-" + partition;
+    }
+
+    public static String snapshotKey(String topicId, int partition, String zone) {
+        String legacyKey = snapshotKey(topicId, partition);
+        if (DisklessClientZone.NO_ZONE.equals(zone)) {
+            return legacyKey;
+        }
+        return legacyKey + "/" + zone;
     }
 }

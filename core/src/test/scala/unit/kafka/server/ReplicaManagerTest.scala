@@ -82,7 +82,7 @@ import org.apache.kafka.server.util.{MockScheduler, MockTime, Scheduler}
 import org.apache.kafka.storage.internals.checkpoint.LazyOffsetCheckpoints
 import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache
 import org.apache.kafka.storage.internals.log.{AppendOrigin, CleanerConfig, FetchDataInfo, LocalLog, LogAppendInfo, LogConfig, LogDirFailureChannel, LogLoader, LogOffsetMetadata, LogOffsetSnapshot, LogOffsetsListener, LogReadResult, LogSegments, ProducerStateManager, ProducerStateManagerConfig, RemoteLogReadResult, RemoteStorageFetchInfo, UnifiedLog, VerificationGuard}
-import org.apache.kafka.storage.diskless.DisklessBrokerSelector
+import org.apache.kafka.storage.diskless.{DisklessBrokerSelector, DisklessClientZone}
 import org.apache.kafka.storage.diskless.ListOffsetsPartitionRequest
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 import org.apache.kafka.storage.diskless.DisklessStorageReplicaManagerSupport
@@ -304,7 +304,7 @@ class ReplicaManagerTest {
     )
     val maxAttempts = 10000
     Iterator.continually(Uuid.randomUuid()).take(maxAttempts).find { topicId =>
-      val selected = selector.selectBroker(topicId, partition)
+      val selected = selector.selectBrokerForZone(topicId, partition, DisklessClientZone.NO_ZONE)
       selected.isPresent && selected.getAsInt == targetBrokerId
     }.getOrElse {
       fail(
@@ -2496,46 +2496,6 @@ class ReplicaManagerTest {
 
       verify(addPartitionsToTxnManager, times(0)).addOrVerifyTransaction(any(), any(), any(), any(), any[AddPartitionsToTxnManager.AppendCallback](), any())
       assertEquals(Errors.NOT_LEADER_OR_FOLLOWER, result.assertFired.left.getOrElse(Errors.NONE))
-    } finally {
-      replicaManager.shutdown(checkpointHW = false)
-    }
-  }
-
-  @Test
-  def testPreVerificationErrorForHostedDisklessPartition(): Unit = {
-    val localId = 1
-    val tp0 = new TopicPartition(topic, 0)
-    val transactionalId = "txn-id"
-    val producerId = 24L
-    val producerEpoch = 0.toShort
-    val mockDisklessStorageSupport = mock(classOf[DisklessStorageReplicaManagerSupport])
-    when(mockDisklessStorageSupport.isDisklessStorageTopic(tp0.topic)).thenReturn(true)
-    when(mockDisklessStorageSupport.isCurrentDisklessOwner(any(classOf[TopicIdPartition]))).thenReturn(true)
-
-    val replicaManager = setupReplicaManagerWithMockedPurgatories(
-      timer = new MockTimer(time),
-      brokerId = localId,
-      mockDisklessStorageSupport = Some(mockDisklessStorageSupport)
-    )
-
-    try {
-      setupMetadataCacheWithTopicIds(Map(tp0.topic -> topicIds(topic)), replicaManager.metadataCache)
-
-      val leaderDelta = topicsCreateDelta(
-        localId,
-        isStartIdLeader = true,
-        partitions = List(tp0.partition),
-        topicName = topic,
-        topicId = topicIds(topic)
-      )
-      replicaManager.applyDelta(leaderDelta, imageFromTopics(leaderDelta.apply()))
-
-      assertEquals(HostedPartition.None, replicaManager.getPartition(tp0))
-
-      val result = maybeStartTransactionVerificationForPartition(replicaManager, tp0, transactionalId, producerId, producerEpoch)
-
-      verify(addPartitionsToTxnManager, times(0)).addOrVerifyTransaction(any(), any(), any(), any(), any[AddPartitionsToTxnManager.AppendCallback](), any())
-      assertEquals(Errors.INVALID_REQUEST, result.assertFired.left.getOrElse(Errors.NONE))
     } finally {
       replicaManager.shutdown(checkpointHW = false)
     }
@@ -6529,7 +6489,7 @@ class ReplicaManagerTest {
         classicEntries
       )
     })
-    when(mockDisklessStorageSupport.handleAppend(any())).thenReturn(
+    when(mockDisklessStorageSupport.handleAppend(any(), ArgumentMatchers.isNull())).thenReturn(
       CompletableFuture.completedFuture(Map(topicIdPartition -> new PartitionResponse(Errors.NONE)).asJava)
     )
 
@@ -6582,7 +6542,7 @@ class ReplicaManagerTest {
       )
     })
     when(mockDisklessStorageSupport.isDisklessStorageTopic(disklessTopic)).thenReturn(true)
-    when(mockDisklessStorageSupport.handleAppend(any())).thenReturn(
+    when(mockDisklessStorageSupport.handleAppend(any(), ArgumentMatchers.isNull())).thenReturn(
       CompletableFuture.completedFuture(Map(topicIdPartition -> new PartitionResponse(Errors.NOT_LEADER_OR_FOLLOWER)).asJava)
     )
 
@@ -6606,7 +6566,7 @@ class ReplicaManagerTest {
       )
 
       assertEquals(Errors.NOT_LEADER_OR_FOLLOWER, result.assertFired.error)
-      verify(mockDisklessStorageSupport).handleAppend(any())
+      verify(mockDisklessStorageSupport).handleAppend(any(), ArgumentMatchers.isNull())
     } finally {
       replicaManager.shutdown(checkpointHW = false)
     }
@@ -6630,7 +6590,7 @@ class ReplicaManagerTest {
         new util.LinkedHashMap[TopicIdPartition, FetchRequest.PartitionData]()
       )
     })
-    when(mockDisklessStorageSupport.handleFetch(any(), any())).thenReturn(
+    when(mockDisklessStorageSupport.handleFetch(any(), any(), ArgumentMatchers.isNull())).thenReturn(
       CompletableFuture.completedFuture(Map(
         topicIdPartition -> new FetchPartitionData(
           Errors.NOT_LEADER_OR_FOLLOWER,
@@ -6663,7 +6623,7 @@ class ReplicaManagerTest {
       )
 
       assertEquals(Errors.NOT_LEADER_OR_FOLLOWER, result.assertFired.error)
-      verify(mockDisklessStorageSupport).handleFetch(any(), any())
+      verify(mockDisklessStorageSupport).handleFetch(any(), any(), ArgumentMatchers.isNull())
     } finally {
       replicaManager.shutdown(checkpointHW = false)
     }
@@ -6707,7 +6667,7 @@ class ReplicaManagerTest {
           .setTimestamp(ListOffsetsResponse.UNKNOWN_TIMESTAMP)
       }
 
-      when(mockDisklessStorageSupport.handleListOffsets(any())).thenAnswer { invocation =>
+      when(mockDisklessStorageSupport.handleListOffsets(any(), ArgumentMatchers.eq("test-client"))).thenAnswer { invocation =>
         val requests = invocation.getArgument[util.Map[TopicIdPartition, ListOffsetsPartitionRequest]](0)
         val responses =
           new util.LinkedHashMap[TopicIdPartition, org.apache.kafka.storage.diskless.ListOffsetsPartitionResponse]()
@@ -6732,7 +6692,7 @@ class ReplicaManagerTest {
       val responses = responsePromise.get().asScala.toList
       val partitionResponse = responses.head.partitions().asScala.find(_.partitionIndex() == 0).get
       assertEquals(Errors.NOT_LEADER_OR_FOLLOWER.code(), partitionResponse.errorCode())
-      verify(mockDisklessStorageSupport).handleListOffsets(any())
+      verify(mockDisklessStorageSupport).handleListOffsets(any(), ArgumentMatchers.eq("test-client"))
     } finally {
       replicaManager.shutdown(checkpointHW = false)
     }
