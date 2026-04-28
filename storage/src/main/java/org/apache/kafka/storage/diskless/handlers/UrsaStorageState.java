@@ -17,13 +17,8 @@
 package org.apache.kafka.storage.diskless.handlers;
 
 import org.apache.kafka.common.TopicIdPartition;
-import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.utils.Time;
-import org.apache.kafka.server.metrics.KafkaMetricsGroup;
-import org.apache.kafka.server.metrics.KafkaYammerMetrics;
-import org.apache.kafka.storage.diskless.idempotent.ProducerStateManager;
-import org.apache.kafka.storage.internals.log.LogMetricNames;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
@@ -31,8 +26,6 @@ import org.apache.bookkeeper.mledger.ManagedLedger;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
-import org.apache.bookkeeper.mledger.Position;
-import org.apache.bookkeeper.mledger.PositionFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,7 +34,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Objects;
@@ -57,7 +49,6 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 import io.oxia.client.api.AsyncOxiaClient;
-import io.streamnative.ursa.mledger.UrsaPosition;
 
 /**
  * Shared state container for Ursa storage components.
@@ -71,20 +62,16 @@ public class UrsaStorageState implements Closeable {
     private final int brokerId;
     private final UrsaStorageConfig config;
     private final BrokerTopicStats brokerTopicStats;
-    private final KafkaMetricsGroup logMetricsGroup = new KafkaMetricsGroup("kafka.log", "Log");
+    private final DisklessLogMetrics logMetrics = new DisklessLogMetrics();
 
-    private final ConcurrentHashMap<TopicIdPartition, ProducerStateManager> producerStateManagers =
-        new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<TopicIdPartition, UrsaPartitionLog> partitionLogs = new ConcurrentHashMap<>();
 
     private final KafkaManagedLedgerFactoryHolder managedLedgerFactoryHolder;
     private final ManagedLedgerFactory managedLedgerFactory;
     private final Supplier<AsyncOxiaClient> oxiaClientSupplier;
     private final ScheduledExecutorService producerStateScheduler;
-    private final Function<TopicIdPartition, ProducerStateManager> producerStateManagerFactory;
     private final Map<String, Object> logConfigDefaults;
     private final Function<String, Map<String, String>> topicConfigSupplier;
-    private final ConcurrentHashMap<TopicIdPartition, CompletableFuture<ManagedLedger>> managedLedgerCache =
-            new ConcurrentHashMap<>();
 
     /**
      * Creates UrsaStorageState for production use.
@@ -106,24 +93,12 @@ public class UrsaStorageState implements Closeable {
             BrokerTopicStats brokerTopicStats,
             Map<String, Object> logConfigDefaults,
             Function<String, Map<String, String>> topicConfigSupplier) {
-        this(time, brokerId, config, brokerTopicStats, logConfigDefaults, topicConfigSupplier, null);
-    }
-
-    private UrsaStorageState(
-            Time time,
-            int brokerId,
-            UrsaStorageConfig config,
-            BrokerTopicStats brokerTopicStats,
-            Map<String, Object> logConfigDefaults,
-            Function<String, Map<String, String>> topicConfigSupplier,
-            Function<TopicIdPartition, ProducerStateManager> producerStateManagerFactory) {
         this.time = time;
         this.brokerId = brokerId;
         this.config = config;
         this.brokerTopicStats = brokerTopicStats;
         this.logConfigDefaults = logConfigDefaults != null ? logConfigDefaults : Collections.emptyMap();
         this.topicConfigSupplier = topicConfigSupplier;
-        this.producerStateManagerFactory = producerStateManagerFactory;
         this.producerStateScheduler = new ScheduledThreadPoolExecutor(1, runnable -> {
             Thread thread = new Thread(runnable, "producer-state-manager");
             thread.setDaemon(true);
@@ -147,13 +122,11 @@ public class UrsaStorageState implements Closeable {
             int brokerId,
             UrsaStorageConfig config,
             BrokerTopicStats brokerTopicStats,
-            ManagedLedgerFactory managedLedgerFactory,
-            Function<TopicIdPartition, ProducerStateManager> producerStateManagerFactory) {
+            ManagedLedgerFactory managedLedgerFactory) {
         this.time = Objects.requireNonNull(time, "time must not be null");
         this.brokerId = brokerId;
         this.config = Objects.requireNonNull(config, "config must not be null");
         this.brokerTopicStats = Objects.requireNonNull(brokerTopicStats, "brokerTopicStats must not be null");
-        this.producerStateManagerFactory = producerStateManagerFactory;
         this.managedLedgerFactoryHolder = null;
         this.managedLedgerFactory = Objects.requireNonNull(managedLedgerFactory, "managedLedgerFactory must not be null");
         this.oxiaClientSupplier = () -> null;
@@ -182,69 +155,28 @@ public class UrsaStorageState implements Closeable {
         return brokerTopicStats;
     }
 
-    public ProducerStateManager getOrCreateProducerStateManager(TopicIdPartition tp) {
-        return producerStateManagers.computeIfAbsent(tp, this::newProducerStateManager);
+    UrsaPartitionLog getOrCreatePartitionLog(TopicIdPartition tp) {
+        return partitionLogs.computeIfAbsent(tp,
+                ignored -> new UrsaPartitionLog(
+                        tp,
+                        this,
+                        logMetrics,
+                        openManagedLedger(tp),
+                        oxiaClientSupplier,
+                        config.getProducerStateSnapshotIntervalMs(),
+                        config.getProducerStateSnapshotRecordThreshold(),
+                        producerStateScheduler));
     }
 
-    private ProducerStateManager newProducerStateManager(TopicIdPartition tp) {
-        if (producerStateManagerFactory != null) {
-            return producerStateManagerFactory.apply(tp);
-        }
-        return new ProducerStateManager(
-            tp,
-            oxiaClientSupplier,
-            () -> getOrCreateManagedLedger(tp),
-            config.getProducerStateSnapshotIntervalMs(),
-            config.getProducerStateSnapshotRecordThreshold(),
-            producerStateScheduler
-        );
+    UrsaPartitionLog partitionLog(TopicIdPartition tp) {
+        return partitionLogs.get(tp);
     }
 
-    public CompletableFuture<ManagedLedger> getOrCreateManagedLedger(TopicIdPartition tp) {
-        CompletableFuture<ManagedLedger> existing = managedLedgerCache.get(tp);
-        if (existing != null) {
-            return existing.thenApply(managedLedger -> applyRetentionConfig(tp, managedLedger));
+    void removePartitionLog(TopicIdPartition tp, UrsaPartitionLog partitionLog) {
+        if (tp == null || partitionLog == null) {
+            return;
         }
-
-        String name = KafkaManagedLedgerNaming.managedLedgerName(tp);
-        ManagedLedgerConfig mlConfig = new ManagedLedgerConfig().setCreateIfMissing(true);
-
-        CompletableFuture<ManagedLedger> openFuture = new CompletableFuture<>();
-        managedLedgerFactory.asyncOpen(name, mlConfig, new AsyncCallbacks.OpenLedgerCallback() {
-            @Override
-            public void openLedgerComplete(ManagedLedger ledger, Object ctx) {
-                openFuture.complete(ledger);
-            }
-
-            @Override
-            public void openLedgerFailed(ManagedLedgerException exception, Object ctx) {
-                openFuture.completeExceptionally(exception);
-            }
-        }, null, null);
-
-        CompletableFuture<ManagedLedger> configuredFuture = openFuture.thenApply(managedLedger ->
-                applyRetentionConfig(tp, managedLedger));
-
-        CompletableFuture<ManagedLedger> raced = managedLedgerCache.putIfAbsent(tp, configuredFuture);
-        if (raced != null) {
-            return raced.thenApply(managedLedger -> applyRetentionConfig(tp, managedLedger));
-        }
-
-        // Evict from cache on failure to allow retry after transient errors
-        configuredFuture.whenComplete((ledger, error) -> {
-            if (error != null) {
-                managedLedgerCache.remove(tp, configuredFuture);
-                log.warn("Failed to open ManagedLedger for partition {}, evicting from cache", tp, error);
-                return;
-            }
-            if (managedLedgerCache.get(tp) != configuredFuture) {
-                log.debug("Skipping diskless log metric registration for partition {} because this future is not cache owner", tp);
-                return;
-            }
-            maybeRegisterDisklessLogMetrics(tp, ledger);
-        });
-
-        return configuredFuture;
+        partitionLogs.remove(tp, partitionLog);
     }
 
     /**
@@ -271,34 +203,27 @@ public class UrsaStorageState implements Closeable {
         if (tp == null) {
             return false;
         }
+        UrsaPartitionLog partitionLog = partitionLogs.remove(tp);
+        if (partitionLog != null) {
+            partitionLog.close(deletePartition);
+            return true;
+        }
+        return false;
+    }
 
-        boolean cleaned = removeDisklessLogMetrics(tp);
-
-        CompletableFuture<ManagedLedger> ledgerFuture = managedLedgerCache.remove(tp);
-        if (ledgerFuture != null) {
-            cleaned = true;
-            ledgerFuture.whenComplete((ledger, error) -> {
-                if (ledger == null) {
-                    return;
-                }
-                try {
-                    ledger.close();
-                } catch (Exception e) {
-                    log.warn("Failed to close ManagedLedger for partition {}", tp, e);
-                }
-            });
+    public boolean cleanupNonOwnedProducerStates(
+            TopicIdPartition tp,
+            Set<String> ownedZones,
+            boolean deletePartition) {
+        if (tp == null) {
+            return false;
+        }
+        UrsaPartitionLog partitionLog = partitionLogs.get(tp);
+        if (partitionLog == null) {
+            return false;
         }
 
-        ProducerStateManager producerStateManager = producerStateManagers.remove(tp);
-        if (producerStateManager != null) {
-            cleaned = true;
-            producerStateManager.cleanup(deletePartition).exceptionally(e -> {
-                log.warn("Failed to cleanup producer state manager for partition {}", tp, e);
-                return null;
-            });
-        }
-
-        return cleaned;
+        return partitionLog.cleanupNonOwnedProducerStates(ownedZones, deletePartition);
     }
 
     /**
@@ -325,13 +250,11 @@ public class UrsaStorageState implements Closeable {
         }
     }
 
-    public Set<TopicIdPartition> snapshotPartitionsWithLocalState() {
-        Set<TopicIdPartition> partitions = new LinkedHashSet<>(managedLedgerCache.keySet());
-        partitions.addAll(producerStateManagers.keySet());
-        return partitions;
+    public Set<TopicIdPartition> snapshotTrackedPartitions() {
+        return new LinkedHashSet<>(partitionLogs.keySet());
     }
 
-    private ManagedLedger applyRetentionConfig(TopicIdPartition tp, ManagedLedger managedLedger) {
+    ManagedLedger applyRetentionConfig(TopicIdPartition tp, ManagedLedger managedLedger) {
         try {
             RetentionConfig retentionConfig = buildRetentionConfig(tp);
             maybeUpdateRetentionConfig(managedLedger, retentionConfig.retentionMs, retentionConfig.retentionBytes);
@@ -513,111 +436,10 @@ public class UrsaStorageState implements Closeable {
     private record RetentionConfig(long retentionMs, long retentionBytes) {
     }
 
-    private void maybeRegisterDisklessLogMetrics(TopicIdPartition topicIdPartition, ManagedLedger managedLedger) {
-        if (topicIdPartition == null || managedLedger == null) {
-            return;
-        }
-        TopicPartition topicPartition = topicIdPartition.topicPartition();
-        Map<String, String> tags = createLogMetricTags(topicPartition);
-
-        logMetricsGroup.newGauge(
-                LogMetricNames.SIZE,
-                () -> Math.max(0L, readPartitionSize(managedLedger)),
-                tags
-        );
-        logMetricsGroup.newGauge(
-                LogMetricNames.LOG_START_OFFSET,
-                () -> Math.max(0L, readPartitionLogStartOffset(managedLedger)),
-                tags
-        );
-        logMetricsGroup.newGauge(
-                LogMetricNames.LOG_END_OFFSET,
-                () -> Math.max(0L, readPartitionLogEndOffset(managedLedger)),
-                tags
-        );
-    }
-
-    private boolean hasAnyExistingLogMetrics(Map<String, String> tags) {
-        return metricExists(LogMetricNames.SIZE, tags)
-                || metricExists(LogMetricNames.LOG_START_OFFSET, tags)
-                || metricExists(LogMetricNames.LOG_END_OFFSET, tags);
-    }
-
-    private boolean metricExists(String metricName, Map<String, String> tags) {
-        return KafkaYammerMetrics.defaultRegistry().allMetrics().containsKey(logMetricsGroup.metricName(metricName, tags));
-    }
-
-    private Map<String, String> createLogMetricTags(TopicPartition topicPartition) {
-        LinkedHashMap<String, String> tags = new LinkedHashMap<>();
-        tags.put("topic", topicPartition.topic());
-        tags.put("partition", String.valueOf(topicPartition.partition()));
-        return tags;
-    }
-
-    private boolean removeDisklessLogMetrics(TopicIdPartition topicIdPartition) {
-        Map<String, String> tags = createLogMetricTags(topicIdPartition.topicPartition());
-        boolean existing = hasAnyExistingLogMetrics(tags);
-        removeLogMetrics(tags);
-        return existing;
-    }
-
-    private void removeAllDisklessLogMetrics() {
-        managedLedgerCache.keySet().stream()
-                .map(TopicIdPartition::topicPartition)
-                .distinct()
-                .forEach(topicPartition -> removeLogMetrics(createLogMetricTags(topicPartition)));
-    }
-
-    private void removeLogMetrics(Map<String, String> tags) {
-        logMetricsGroup.removeMetric(LogMetricNames.SIZE, tags);
-        logMetricsGroup.removeMetric(LogMetricNames.LOG_START_OFFSET, tags);
-        logMetricsGroup.removeMetric(LogMetricNames.LOG_END_OFFSET, tags);
-    }
-
-    private long readPartitionSize(ManagedLedger managedLedger) {
-        return Math.max(0L, managedLedger.getTotalSize());
-    }
-
-    private long readPartitionLogStartOffset(ManagedLedger managedLedger) {
-        return resolveLogStartOffset(managedLedger);
-    }
-
-    private long readPartitionLogEndOffset(ManagedLedger managedLedger) {
-        return resolveLogEndOffset(managedLedger);
-    }
-
-    private long resolveLogStartOffset(ManagedLedger managedLedger) {
-        Position firstPosition = managedLedger.getFirstPosition();
-        if (isInvalidPosition(firstPosition)) {
-            return 0L;
-        }
-        if (firstPosition.compareTo(PositionFactory.EARLIEST) == 0) {
-            return 0L;
-        }
-        return Math.max(0L, firstPosition.getEntryId());
-    }
-
-    private long resolveLogEndOffset(ManagedLedger managedLedger) {
-        Position lastConfirmedEntry = managedLedger.getLastConfirmedEntry();
-        if (isInvalidPosition(lastConfirmedEntry)) {
-            return 0L;
-        }
-        if (lastConfirmedEntry instanceof UrsaPosition ursaPosition) {
-            return Math.max(0L, ursaPosition.getEntryId() + Math.max(1, ursaPosition.numMessages()));
-        }
-        return Math.max(0L, lastConfirmedEntry.getEntryId() + 1);
-    }
-
-    private boolean isInvalidPosition(Position position) {
-        return position == null || position.getEntryId() < 0;
-    }
-
     @Override
     public void close() throws IOException {
-        removeAllDisklessLogMetrics();
-        managedLedgerCache.clear();
-        producerStateManagers.values().forEach(ProducerStateManager::close);
-        producerStateManagers.clear();
+        partitionLogs.values().forEach(UrsaPartitionLog::close);
+        partitionLogs.clear();
         producerStateScheduler.shutdown();
         try {
             if (!producerStateScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -630,6 +452,26 @@ public class UrsaStorageState implements Closeable {
         if (managedLedgerFactoryHolder != null) {
             managedLedgerFactoryHolder.close();
         }
+    }
+
+    CompletableFuture<ManagedLedger> openManagedLedger(TopicIdPartition tp) {
+        String name = KafkaManagedLedgerNaming.managedLedgerName(tp);
+        ManagedLedgerConfig mlConfig = new ManagedLedgerConfig().setCreateIfMissing(true);
+
+        CompletableFuture<ManagedLedger> openFuture = new CompletableFuture<>();
+        managedLedgerFactory.asyncOpen(name, mlConfig, new AsyncCallbacks.OpenLedgerCallback() {
+            @Override
+            public void openLedgerComplete(ManagedLedger ledger, Object ctx) {
+                openFuture.complete(ledger);
+            }
+
+            @Override
+            public void openLedgerFailed(ManagedLedgerException exception, Object ctx) {
+                openFuture.completeExceptionally(exception);
+            }
+        }, null, null);
+
+        return openFuture.thenApply(managedLedger -> applyRetentionConfig(tp, managedLedger));
     }
 
 }

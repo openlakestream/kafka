@@ -18,6 +18,7 @@ package org.apache.kafka.storage.diskless;
 
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.message.DescribeTopicPartitionsResponseData;
 import org.apache.kafka.common.message.MetadataResponseData.MetadataResponsePartition;
 import org.apache.kafka.common.message.MetadataResponseData.MetadataResponseTopic;
 import org.apache.kafka.common.network.ListenerName;
@@ -120,6 +121,26 @@ class DisklessTopicMetadataTransformerTest {
         assertEquals(List.of(partition.leaderId()), partition.isrNodes());
         assertEquals(Errors.NONE.code(), partition.errorCode());
         assertEquals(Collections.emptyList(), partition.offlineReplicas());
+    }
+
+    @Test
+    void testDisklessTopicTransformedWithClientZone() {
+        Uuid topicId = Uuid.randomUuid();
+        MetadataResponseTopic topic = createTopic("diskless-topic", topicId, 1);
+
+        when(metadataView.isDisklessStorageTopic("diskless-topic")).thenReturn(true);
+        when(metadataView.getAliveBrokerNodes(OWNER_SELECTION_LISTENER)).thenReturn(List.of(
+                new Node(0, "host0", 9092, "zone-a"),
+                new Node(1, "host1", 9092, "zone-b"),
+                new Node(2, "host2", 9092, "zone-a")
+        ));
+
+        transformer.transformClusterMetadata(LISTENER, "producer,zone_id=zone-b", List.of(topic));
+
+        MetadataResponsePartition partition = topic.partitions().get(0);
+        assertEquals(1, partition.leaderId());
+        assertEquals(List.of(1), partition.replicaNodes());
+        assertEquals(List.of(1), partition.isrNodes());
     }
 
     @Test
@@ -235,6 +256,34 @@ class DisklessTopicMetadataTransformerTest {
         int leaderId = topic.partitions().get(0).leaderId();
         assertTrue(leaderId >= 0 && leaderId <= 2);
         assertNotEquals(9, leaderId);
+    }
+
+    @Test
+    void testDescribeTopicResponseUsesClientZone() {
+        Uuid topicId = Uuid.randomUuid();
+        DescribeTopicPartitionsResponseData response = new DescribeTopicPartitionsResponseData();
+        response.topics().add(
+                new DescribeTopicPartitionsResponseData.DescribeTopicPartitionsResponseTopic()
+                        .setName("diskless-topic")
+                        .setTopicId(topicId)
+                        .setPartitions(List.of(
+                                new DescribeTopicPartitionsResponseData.DescribeTopicPartitionsResponsePartition()
+                                        .setPartitionIndex(0)
+                        ))
+        );
+
+        when(metadataView.isDisklessStorageTopic("diskless-topic")).thenReturn(true);
+        when(metadataView.getAliveBrokerNodes(OWNER_SELECTION_LISTENER)).thenReturn(List.of(
+                new Node(0, "host0", 9092, "zone-a"),
+                new Node(1, "host1", 9092, "zone-b")
+        ));
+
+        transformer.transformDescribeTopicResponse(LISTENER, "consumer,zone_id=zone-a", response);
+
+        var partition = response.topics().iterator().next().partitions().iterator().next();
+        assertEquals(0, partition.leaderId());
+        assertEquals(List.of(0), partition.replicaNodes());
+        assertEquals(List.of(0), partition.isrNodes());
     }
 
     private MetadataResponseTopic createTopic(String name, Uuid topicId, int numPartitions) {

@@ -168,7 +168,7 @@ public class ShareFetchUtils {
         );
 
         return replicaManager.disklessStorageSupport()
-                .handleListOffsets(Map.of(topicIdPartition, request))
+                .handleListOffsets(Map.of(topicIdPartition, request), null)
                 .thenApply(response -> {
                     ListOffsetsPartitionResponse partitionResponse = response.get(topicIdPartition);
                     if (partitionResponse == null) {

@@ -493,7 +493,7 @@ public class SharePartitionTest {
         DisklessStorageReplicaManagerSupport disklessStorageSupport = Mockito.mock(DisklessStorageReplicaManagerSupport.class);
         Mockito.when(replicaManager.disklessStorageSupport()).thenReturn(disklessStorageSupport);
         Mockito.when(disklessStorageSupport.isDisklessStorageTopic(TOPIC_ID_PARTITION.topic())).thenReturn(true);
-        Mockito.when(disklessStorageSupport.handleListOffsets(Mockito.any())).thenReturn(CompletableFuture.completedFuture(
+        Mockito.when(disklessStorageSupport.handleListOffsets(Mockito.any(), Mockito.isNull())).thenReturn(CompletableFuture.completedFuture(
             Map.of(TOPIC_ID_PARTITION, ListOffsetsPartitionResponse.success(
                 TOPIC_ID_PARTITION,
                 42L,
@@ -511,7 +511,7 @@ public class SharePartitionTest {
         assertTrue(result.isDone());
         assertFalse(result.isCompletedExceptionally());
 
-        Mockito.verify(disklessStorageSupport).handleListOffsets(Mockito.any());
+        Mockito.verify(disklessStorageSupport).handleListOffsets(Mockito.any(), Mockito.isNull());
 
         assertEquals(SharePartitionState.ACTIVE, sharePartition.partitionState());
         assertEquals(42L, sharePartition.startOffset());

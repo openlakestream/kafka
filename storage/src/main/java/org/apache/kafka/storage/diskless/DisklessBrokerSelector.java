@@ -24,9 +24,11 @@ import org.apache.kafka.common.utils.Utils;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.StreamSupport;
 
@@ -45,22 +47,58 @@ public class DisklessBrokerSelector {
                 selectionListener, "selectionListener cannot be null");
     }
 
-    public OptionalInt selectBroker(Uuid topicId, int partitionIndex) {
+    public OptionalInt selectBrokerForZone(Uuid topicId, int partitionIndex, String zone) {
         Objects.requireNonNull(topicId, "topicId cannot be null");
 
         if (Uuid.ZERO_UUID.equals(topicId)) {
             return OptionalInt.empty();
         }
 
-        List<Node> brokers = allAliveBrokers();
+        List<Node> brokers = eligibleAliveBrokersForZone(zone);
         if (brokers.isEmpty()) {
             return OptionalInt.empty();
+        }
+
+        if (brokers.size() == 1) {
+            return OptionalInt.of(brokers.get(0).id());
         }
 
         byte[] input = (topicId + "-" + partitionIndex).getBytes(StandardCharsets.UTF_8);
         int hash = Utils.murmur2(input);
         int idx = Math.floorMod(hash, brokers.size());
         return OptionalInt.of(brokers.get(idx).id());
+    }
+
+    public String effectiveZone(String clientId) {
+        String clientZone = DisklessClientZone.get(clientId);
+        if (DisklessClientZone.NO_ZONE.equals(clientZone)) {
+            return DisklessClientZone.NO_ZONE;
+        }
+
+        return eligibleAliveBrokersForZone(clientZone).isEmpty()
+                ? DisklessClientZone.NO_ZONE
+                : clientZone;
+    }
+
+    public Set<String> activeZones() {
+        LinkedHashSet<String> zones = new LinkedHashSet<>();
+        zones.add(DisklessClientZone.NO_ZONE);
+        allAliveBrokers().stream()
+                .map(Node::rack)
+                .filter(rack -> rack != null && !rack.isBlank())
+                .forEach(zones::add);
+        return zones;
+    }
+
+    private List<Node> eligibleAliveBrokersForZone(String zone) {
+        List<Node> allAliveBrokers = allAliveBrokers();
+        if (DisklessClientZone.NO_ZONE.equals(zone)) {
+            return allAliveBrokers;
+        }
+
+        return allAliveBrokers.stream()
+                .filter(node -> Objects.equals(node.rack(), zone))
+                .toList();
     }
 
     private List<Node> allAliveBrokers() {

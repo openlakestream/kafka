@@ -177,12 +177,15 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         return metadataView.isDisklessStorageTopic(topic);
     }
 
-    public boolean isCurrentDisklessOwner(TopicIdPartition topicIdPartition) {
+    public boolean isCurrentDisklessOwner(TopicIdPartition topicIdPartition, String zone) {
         if (!enabled || topicIdPartition == null) {
             return false;
         }
 
-        OptionalInt selected = brokerSelector.selectBroker(topicIdPartition.topicId(), topicIdPartition.partition());
+        OptionalInt selected = brokerSelector.selectBrokerForZone(
+                topicIdPartition.topicId(),
+                topicIdPartition.partition(),
+                zone);
         return selected.isPresent() && selected.getAsInt() == brokerId;
     }
 
@@ -221,18 +224,25 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         Consumer<String> topicMaybeEmptied = onTopicMaybeEmptied != null ? onTopicMaybeEmptied : ignored -> { };
         Set<TopicIdPartition> trackedPartitionsToCleanup = new LinkedHashSet<>();
         Set<TopicIdPartition> trackedPartitionsToDelete = new LinkedHashSet<>();
+        Map<TopicIdPartition, Set<String>> retainedOwnedZones = new LinkedHashMap<>();
 
         for (TopicIdPartition trackedPartition : partitionsToCheck) {
             if (permanentlyDeletedPartitions.contains(trackedPartition)) {
                 trackedPartitionsToDelete.add(trackedPartition);
-            } else if (shouldCleanupTrackedPartition(trackedPartition)) {
-                trackedPartitionsToCleanup.add(trackedPartition);
+            } else {
+                Set<String> ownedZones = ownedZones(trackedPartition);
+                if (shouldCleanupTrackedPartition(trackedPartition) || ownedZones.isEmpty()) {
+                    trackedPartitionsToCleanup.add(trackedPartition);
+                } else {
+                    retainedOwnedZones.put(trackedPartition, ownedZones);
+                }
             }
         }
 
         // TODO: Since deleted partitions are only passed on the deletion delta,
         //  there may be no subsequent retries—leaving managed-ledger metadata/stream leaked.
         cleanupTrackedPartitions(trackedPartitionsToCleanup, topicMaybeEmptied);
+        cleanupRetainedProducerStates(retainedOwnedZones);
         cleanupDeletedTrackedPartitions(trackedPartitionsToDelete, topicMaybeEmptied);
 
         Set<TopicIdPartition> deletedPartitionsWithoutTrackedState =
@@ -283,6 +293,16 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         }
     }
 
+    private void cleanupRetainedProducerStates(Map<TopicIdPartition, Set<String>> retainedOwnedZones) {
+        if (ursaState == null || retainedOwnedZones.isEmpty()) {
+            return;
+        }
+
+        retainedOwnedZones.forEach((trackedPartition, ownedZones) ->
+                cleanupStep("producer-state zones", trackedPartition,
+                        () -> ursaState.cleanupNonOwnedProducerStates(trackedPartition, ownedZones, false)));
+    }
+
     /**
      * Partitions append entries by storage mode.
      */
@@ -329,14 +349,17 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
      * Handles append requests for diskless storage topics.
      */
     public CompletableFuture<Map<TopicIdPartition, PartitionResponse>> handleAppend(
-            Map<TopicIdPartition, MemoryRecords> entries) {
+            Map<TopicIdPartition, MemoryRecords> entries,
+            String clientId) {
+        String zone = brokerSelector.effectiveZone(clientId);
         return handleWithOwnership(
                 entries,
                 "append",
-                this::handleOwnedAppend,
+                ownedEntries -> handleOwnedAppend(ownedEntries, clientId),
                 (ignored, response) -> response,
                 tp -> new PartitionResponse(Errors.NOT_LEADER_OR_FOLLOWER),
-                tp -> new PartitionResponse(Errors.UNKNOWN_SERVER_ERROR)
+                tp -> new PartitionResponse(Errors.UNKNOWN_SERVER_ERROR),
+                zone
         );
     }
 
@@ -345,14 +368,17 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
      */
     public CompletableFuture<Map<TopicIdPartition, FetchPartitionData>> handleFetch(
             FetchParams params,
-            Map<TopicIdPartition, FetchRequest.PartitionData> fetchInfos) {
+            Map<TopicIdPartition, FetchRequest.PartitionData> fetchInfos,
+            String clientId) {
+        String zone = brokerSelector.effectiveZone(clientId);
         return handleWithOwnership(
                 fetchInfos,
                 "fetch",
                 ownedFetchInfos -> handleOwnedFetch(params, ownedFetchInfos),
                 (ignored, response) -> response,
                 ignored -> notLeaderFetchPartitionData(),
-                ignored -> unknownErrorFetchPartitionData()
+                ignored -> unknownErrorFetchPartitionData(),
+                zone
         );
     }
 
@@ -360,25 +386,30 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
      * Handles listOffsets requests for diskless storage topics.
      */
     public CompletableFuture<Map<TopicIdPartition, ListOffsetsPartitionResponse>> handleListOffsets(
-            Map<TopicIdPartition, ListOffsetsPartitionRequest> requests) {
+            Map<TopicIdPartition, ListOffsetsPartitionRequest> requests,
+            String clientId) {
+        String zone = brokerSelector.effectiveZone(clientId);
         return handleWithOwnership(
                 requests,
                 "listOffsets",
                 this::handleOwnedListOffsets,
                 (ignored, response) -> response,
                 tp -> ListOffsetsPartitionResponse.error(tp, Errors.NOT_LEADER_OR_FOLLOWER),
-                tp -> ListOffsetsPartitionResponse.error(tp, Errors.UNKNOWN_SERVER_ERROR)
+                tp -> ListOffsetsPartitionResponse.error(tp, Errors.UNKNOWN_SERVER_ERROR),
+                zone
         );
     }
 
     private CompletableFuture<Map<TopicIdPartition, PartitionResponse>> handleOwnedAppend(
-            Map<TopicIdPartition, MemoryRecords> entries) {
+            Map<TopicIdPartition, MemoryRecords> entries,
+            String clientId) {
 
         if (!enabled || writer == null) {
             return CompletableFuture.completedFuture(Map.of());
         }
 
-        return writer.write(entries);
+        String zone = DisklessClientZone.get(clientId);
+        return writer.write(entries, zone);
     }
 
     private CompletableFuture<Map<TopicIdPartition, FetchPartitionData>> handleOwnedFetch(
@@ -407,26 +438,15 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
             return true;
         }
 
-        boolean cleanupSucceeded = cleanupStep("writer", tp, () -> {
-            if (writer != null) {
-                writer.cleanupPartition(tp);
-            }
-        });
-        cleanupSucceeded = cleanupStep("reader", tp, () -> {
-            if (reader != null) {
-                reader.cleanupPartition(tp);
-            }
-        }) && cleanupSucceeded;
-        cleanupSucceeded = cleanupStep("storage", tp, () -> {
+        return cleanupStep("storage", tp, () -> {
             if (ursaState != null) {
                 ursaState.cleanupPartition(tp, deletePartition);
             }
-        }) && cleanupSucceeded;
-        return cleanupSucceeded;
+        });
     }
 
     private boolean deletePartitionDataInternal(TopicIdPartition tp) {
-        if (!enabled || tp == null || !isCurrentDisklessOwner(tp) || ursaState == null) {
+        if (!enabled || tp == null || !isCurrentDisklessOwner(tp, DisklessClientZone.NO_ZONE) || ursaState == null) {
             return true;
         }
         // TODO: Add retry for transient failures.
@@ -439,12 +459,13 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
             Function<Map<TopicIdPartition, V>, CompletableFuture<Map<TopicIdPartition, O>>> ownedHandler,
             BiFunction<TopicIdPartition, O, R> successResponseFactory,
             Function<TopicIdPartition, R> redirectedResponseFactory,
-            Function<TopicIdPartition, R> errorResponseFactory) {
+            Function<TopicIdPartition, R> errorResponseFactory,
+            String zone) {
         if (!enabled || entries == null || entries.isEmpty()) {
             return CompletableFuture.completedFuture(Map.of());
         }
 
-        OwnershipRouting<V, R> routing = routeByOwnership(entries, redirectedResponseFactory);
+        OwnershipRouting<V, R> routing = routeByOwnership(entries, redirectedResponseFactory, zone);
         if (routing.ownedEntries.isEmpty()) {
             return CompletableFuture.completedFuture(routing.redirectedResponses);
         }
@@ -489,12 +510,13 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
 
     private <V, R> OwnershipRouting<V, R> routeByOwnership(
             Map<TopicIdPartition, V> entries,
-            Function<TopicIdPartition, R> redirectedResponseFactory) {
+            Function<TopicIdPartition, R> redirectedResponseFactory,
+            String zone) {
         Map<TopicIdPartition, V> ownedEntries = new LinkedHashMap<>();
         Map<TopicIdPartition, R> redirectedResponses = new LinkedHashMap<>();
 
         for (Map.Entry<TopicIdPartition, V> entry : entries.entrySet()) {
-            if (isCurrentDisklessOwner(entry.getKey())) {
+            if (isCurrentDisklessOwner(entry.getKey(), zone)) {
                 ownedEntries.put(entry.getKey(), entry.getValue());
             } else {
                 redirectedResponses.put(entry.getKey(), redirectedResponseFactory.apply(entry.getKey()));
@@ -556,38 +578,37 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
 
     private Set<TopicIdPartition> partitionsNeedingReconcile() {
         Set<TopicIdPartition> partitions = new LinkedHashSet<>();
-        if (writer != null) {
-            Set<TopicIdPartition> writerPartitions = writer.snapshotPartitionsWithLocalState();
-            if (writerPartitions != null) {
-                partitions.addAll(writerPartitions);
-            }
-        }
-        if (reader != null) {
-            Set<TopicIdPartition> readerPartitions = reader.snapshotPartitionsWithLocalState();
-            if (readerPartitions != null) {
-                partitions.addAll(readerPartitions);
-            }
-        }
         if (ursaState != null) {
-            partitions.addAll(ursaState.snapshotPartitionsWithLocalState());
+            partitions.addAll(ursaState.snapshotTrackedPartitions());
         }
         return partitions;
     }
 
     private boolean shouldCleanupTrackedPartition(TopicIdPartition trackedPartition) {
-
-        // Compare against the current metadata topic ID instead of the tracked one so we
-        // can cleanup stale local state after topic deletion or same-name topic recreation.
         Uuid currentTopicId = metadataView.getTopicId(trackedPartition.topic());
         if (currentTopicId == null || Uuid.ZERO_UUID.equals(currentTopicId) || !currentTopicId.equals(trackedPartition.topicId())) {
             return true;
         }
 
-        if (!metadataView.isDisklessStorageTopic(trackedPartition.topic())) {
-            return true;
-        }
+        return !metadataView.isDisklessStorageTopic(trackedPartition.topic());
+    }
 
-        return !isCurrentDisklessOwner(trackedPartition);
+    private Set<String> ownedZones(TopicIdPartition trackedPartition) {
+        Set<String> ownedZones = new LinkedHashSet<>();
+        Set<String> activeZones = brokerSelector.activeZones();
+        if (activeZones == null || activeZones.isEmpty()) {
+            activeZones = Set.of(DisklessClientZone.NO_ZONE);
+        }
+        for (String zone : activeZones) {
+            OptionalInt selectedBroker = brokerSelector.selectBrokerForZone(
+                    trackedPartition.topicId(),
+                    trackedPartition.partition(),
+                    zone);
+            if (selectedBroker.isPresent() && selectedBroker.getAsInt() == brokerId) {
+                ownedZones.add(zone);
+            }
+        }
+        return ownedZones;
     }
 
     private FetchPartitionData notLeaderFetchPartitionData() {

@@ -33,6 +33,7 @@ import org.apache.kafka.storage.diskless.ListOffsetsPartitionResponse;
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedLedger;
+import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.pulsar.common.api.proto.MessageMetadata;
@@ -46,6 +47,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -64,6 +66,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -82,7 +85,7 @@ class UrsaManagedLedgerReaderTest {
 
         Position firstPosition = ursaPosition(/* streamId */ 1L, /* baseOffset */ 5L, /* numMessages */ 1L);
         when(ledger.getFirstPosition()).thenReturn(firstPosition);
-        when(state.getOrCreateManagedLedger(tp)).thenReturn(CompletableFuture.completedFuture(ledger));
+        attachReaderPartitionLog(state, tp, ledger);
 
         UrsaManagedLedgerReader reader = new UrsaManagedLedgerReader(state);
 
@@ -108,7 +111,7 @@ class UrsaManagedLedgerReaderTest {
 
         Position lastPosition = ursaPosition(/* streamId */ 1L, /* baseOffset */ 10L, /* numMessages */ 5L);
         when(ledger.getLastConfirmedEntry()).thenReturn(lastPosition);
-        when(state.getOrCreateManagedLedger(tp)).thenReturn(CompletableFuture.completedFuture(ledger));
+        attachReaderPartitionLog(state, tp, ledger);
 
         UrsaManagedLedgerReader reader = new UrsaManagedLedgerReader(state);
 
@@ -134,7 +137,7 @@ class UrsaManagedLedgerReaderTest {
 
         Position lastPosition = ursaPosition(/* streamId */ 1L, /* baseOffset */ 10L, /* numMessages */ 5L);
         when(ledger.getLastConfirmedEntry()).thenReturn(lastPosition);
-        when(state.getOrCreateManagedLedger(tp)).thenReturn(CompletableFuture.completedFuture(ledger));
+        attachReaderPartitionLog(state, tp, ledger);
 
         UrsaManagedLedgerReader reader = new UrsaManagedLedgerReader(state);
 
@@ -153,6 +156,40 @@ class UrsaManagedLedgerReaderTest {
     }
 
     @Test
+    void testFetchInvalidatesPartitionLogWhenManagedLedgerIsNotFound() throws Exception {
+        TopicIdPartition tp = createTestPartition();
+
+        UrsaStorageState state = mock(UrsaStorageState.class);
+        ManagedLedger ledger = mock(ManagedLedger.class);
+        when(ledger.getLastConfirmedEntry()).thenThrow(
+                new CompletionException(new ManagedLedgerException.ManagedLedgerNotFoundException("missing")));
+
+        UrsaPartitionLog partitionLog = new UrsaPartitionLog(
+                tp,
+                state,
+                new DisklessLogMetrics(),
+                CompletableFuture.completedFuture(ledger),
+                null,
+                0L,
+                0,
+                null);
+        when(state.getOrCreatePartitionLog(tp)).thenReturn(partitionLog);
+
+        UrsaManagedLedgerReader reader = new UrsaManagedLedgerReader(state);
+
+        FetchParams params = createFetchParams();
+        FetchRequest.PartitionData partitionData = new FetchRequest.PartitionData(
+                Uuid.ZERO_UUID, /* fetchOffset */ 0L, 0, /* maxBytes */ 1024 * 1024, Optional.empty());
+        Map<TopicIdPartition, FetchPartitionData> responses =
+                reader.fetch(params, Map.of(tp, partitionData)).get();
+
+        FetchPartitionData response = responses.get(tp);
+        assertNotNull(response);
+        assertEquals(Errors.UNKNOWN_TOPIC_OR_PARTITION, response.error);
+        verify(state).removePartitionLog(eq(tp), same(partitionLog));
+    }
+
+    @Test
     void testFetchReusesNonDurableCursorsFromPoolWithQueueing() throws Exception {
         TopicIdPartition tp = createTestPartition();
 
@@ -162,7 +199,7 @@ class UrsaManagedLedgerReaderTest {
         long streamId = 1L;
         when(ledger.getFirstPosition()).thenReturn(ursaPosition(streamId, /* baseOffset */ 0L, /* numMessages */ 1L));
         when(ledger.getLastConfirmedEntry()).thenReturn(ursaPosition(streamId, /* baseOffset */ 100L, /* numMessages */ 1L));
-        when(state.getOrCreateManagedLedger(tp)).thenReturn(CompletableFuture.completedFuture(ledger));
+        attachReaderPartitionLog(state, tp, ledger);
 
         AtomicInteger resetCalls = new AtomicInteger(0);
         AtomicReference<Position> lastResetPosition = new AtomicReference<>();
@@ -277,8 +314,7 @@ class UrsaManagedLedgerReaderTest {
         when(ledger.getName()).thenReturn("test-ledger");
         when(ledger.getNumberOfEntries()).thenReturn(1L);
         when(ledger.newNonDurableCursor(eq(firstPosition), anyString())).thenReturn(cursor);
-
-        when(state.getOrCreateManagedLedger(tp)).thenReturn(CompletableFuture.completedFuture(ledger));
+        attachReaderPartitionLog(state, tp, ledger);
 
         doAnswer(invocation -> {
             AsyncCallbacks.ReadEntriesCallback callback = invocation.getArgument(2);
@@ -312,8 +348,7 @@ class UrsaManagedLedgerReaderTest {
         when(ledger.getLastConfirmedEntry()).thenReturn(lastPosition);
         when(ledger.getName()).thenReturn("test-ledger");
         when(ledger.newNonDurableCursor(eq(lastPosition), anyString())).thenReturn(cursor);
-
-        when(state.getOrCreateManagedLedger(tp)).thenReturn(CompletableFuture.completedFuture(ledger));
+        attachReaderPartitionLog(state, tp, ledger);
 
         doAnswer(invocation -> {
             AsyncCallbacks.ReadEntriesCallback callback = invocation.getArgument(2);
@@ -392,6 +427,22 @@ class UrsaManagedLedgerReaderTest {
         when(entry.getDataBuffer()).thenReturn(encoded);
         doAnswer(invocation -> encoded.release()).when(entry).release();
         return entry;
+    }
+
+    private static void attachReaderPartitionLog(
+            UrsaStorageState state,
+            TopicIdPartition tp,
+            ManagedLedger ledger) {
+        UrsaPartitionLog partitionLog = new UrsaPartitionLog(
+                tp,
+                state,
+                new DisklessLogMetrics(),
+                CompletableFuture.completedFuture(ledger),
+                null,
+                0L,
+                0,
+                null);
+        when(state.getOrCreatePartitionLog(tp)).thenReturn(partitionLog);
     }
 
     private static final class ReadCompletion {

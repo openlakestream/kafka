@@ -19,6 +19,7 @@ package org.apache.kafka.storage.diskless.idempotent;
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.RecordBatch;
+import org.apache.kafka.storage.diskless.DisklessClientZone;
 import org.apache.kafka.storage.diskless.handlers.KafkaEntryFormatter;
 
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
@@ -179,6 +180,7 @@ public class ProducerStateManager implements Closeable {
     private final TopicIdPartition topicIdPartition;
     private final Supplier<AsyncOxiaClient> oxiaClientSupplier;
     private final Supplier<CompletableFuture<ManagedLedger>> managedLedgerSupplier;
+    private final String zone;
     private final long snapshotIntervalMs;
     private final int snapshotRecordThreshold;
     private final ScheduledExecutorService scheduler;
@@ -200,6 +202,7 @@ public class ProducerStateManager implements Closeable {
             Supplier<AsyncOxiaClient> oxiaClientSupplier,
             Supplier<CompletableFuture<ManagedLedger>> managedLedgerSupplier) {
         this(topicIdPartition, oxiaClientSupplier, managedLedgerSupplier,
+            DisklessClientZone.NO_ZONE,
             DEFAULT_SNAPSHOT_INTERVAL_MS, DEFAULT_SNAPSHOT_RECORD_THRESHOLD,
             new ScheduledThreadPoolExecutor(1, runnable -> {
                 Thread thread = new Thread(runnable, "producer-state-manager-snapshot");
@@ -212,10 +215,12 @@ public class ProducerStateManager implements Closeable {
             TopicIdPartition topicIdPartition,
             Supplier<AsyncOxiaClient> oxiaClientSupplier,
             Supplier<CompletableFuture<ManagedLedger>> managedLedgerSupplier,
+            String zone,
             long snapshotIntervalMs,
             int snapshotRecordThreshold,
             ScheduledExecutorService scheduler) {
         this(topicIdPartition, oxiaClientSupplier, managedLedgerSupplier,
+            zone,
             snapshotIntervalMs, snapshotRecordThreshold, scheduler, false);
     }
 
@@ -223,6 +228,7 @@ public class ProducerStateManager implements Closeable {
             TopicIdPartition topicIdPartition,
             Supplier<AsyncOxiaClient> oxiaClientSupplier,
             Supplier<CompletableFuture<ManagedLedger>> managedLedgerSupplier,
+            String zone,
             long snapshotIntervalMs,
             int snapshotRecordThreshold,
             ScheduledExecutorService scheduler,
@@ -230,6 +236,7 @@ public class ProducerStateManager implements Closeable {
         this.topicIdPartition = Objects.requireNonNull(topicIdPartition, "topicIdPartition must not be null");
         this.oxiaClientSupplier = Objects.requireNonNull(oxiaClientSupplier, "oxiaClientSupplier must not be null");
         this.managedLedgerSupplier = Objects.requireNonNull(managedLedgerSupplier, "managedLedgerSupplier must not be null");
+        this.zone = DisklessClientZone.normalize(zone);
         this.snapshotIntervalMs = snapshotIntervalMs;
         this.snapshotRecordThreshold = snapshotRecordThreshold;
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler must not be null");
@@ -448,41 +455,14 @@ public class ProducerStateManager implements Closeable {
     }
 
     private CompletableFuture<Void> loadSnapshot() {
-        synchronized (this) {
-            producers.clear();
-            bypassedProducerIdsAfterSkippedRecovery.clear();
-            nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
-        }
+        clearRecoveredStateLocked();
 
         AsyncOxiaClient client = oxiaClientSupplier.get();
         if (client == null) {
             return CompletableFuture.completedFuture(null);
         }
 
-        return client.get(snapshotKey())
-            .thenAcceptAsync(getResult -> {
-                if (getResult == null || getResult.value() == null || getResult.value().length == 0) {
-                    return;
-                }
-                try {
-                    Map<Long, ProducerStateEntry> snapshot = ProducerStateSerDes.deserialize(getResult.value());
-                    synchronized (this) {
-                        restoreFromSnapshotLocked(snapshot);
-                    }
-                } catch (Exception parseError) {
-                    // Old format or corrupted snapshot: ignore and overwrite by later snapshots.
-                    log.warn("[{}] Ignoring producer snapshot due to parse failure", topicIdPartition, parseError);
-                    synchronized (this) {
-                        producers.clear();
-                        bypassedProducerIdsAfterSkippedRecovery.clear();
-                        nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
-                    }
-                }
-            })
-            .exceptionally(error -> {
-                log.warn("[{}] Failed to load producer snapshot", topicIdPartition, error);
-                return null;
-            });
+        return loadSnapshotFromKey(client, snapshotKey()).thenAccept(ignored -> { });
     }
 
     private CompletableFuture<Void> replayFromManagedLedger() {
@@ -862,9 +842,7 @@ public class ProducerStateManager implements Closeable {
     }
 
     private void restoreFromSnapshotLocked(Map<Long, ProducerStateEntry> snapshotProducers) {
-        producers.clear();
-        bypassedProducerIdsAfterSkippedRecovery.clear();
-        nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
+        clearRecoveredStateLocked();
         producers.putAll(snapshotProducers);
         for (ProducerStateEntry stateEntry : snapshotProducers.values()) {
             for (BatchMetadata batchMetadata : stateEntry.batchMetadata()) {
@@ -890,6 +868,37 @@ public class ProducerStateManager implements Closeable {
         );
         CompletableFuture<Long> offsetFuture = CompletableFuture.completedFuture(baseOffset);
         stateEntry.appendBatch(producerEpoch, new BatchMetadata(firstSequence, lastSequence, offsetFuture, timestamp));
+    }
+
+    private CompletableFuture<Boolean> loadSnapshotFromKey(
+            AsyncOxiaClient client,
+            String snapshotKey) {
+        return client.get(snapshotKey)
+            .handle((getResult, error) -> {
+                if (error != null) {
+                    log.warn("[{}] Failed to load producer snapshot from key {}",
+                            topicIdPartition,
+                            snapshotKey,
+                            error);
+                    return false;
+                }
+                if (getResult == null || getResult.value() == null || getResult.value().length == 0) {
+                    return false;
+                }
+                try {
+                    Map<Long, ProducerStateEntry> snapshot = ProducerStateSerDes.deserialize(getResult.value());
+                    synchronized (this) {
+                        restoreFromSnapshotLocked(snapshot);
+                    }
+                    return true;
+                } catch (Exception parseError) {
+                    log.warn("[{}] Ignoring producer snapshot due to parse failure",
+                            topicIdPartition,
+                            parseError);
+                    clearRecoveredStateLocked();
+                    return false;
+                }
+            });
     }
 
     private CompletableFuture<Void> deleteSnapshotFromOxia() {
@@ -930,7 +939,14 @@ public class ProducerStateManager implements Closeable {
     }
 
     private String snapshotKey() {
-        return ProducerStateSnapshotKeys.snapshotKey(topicIdPartition.topicId().toString(), topicIdPartition.partition());
+        return ProducerStateSnapshotKeys.snapshotKey(topicIdPartition.topicId().toString(),
+                topicIdPartition.partition(), zone);
+    }
+
+    private synchronized void clearRecoveredStateLocked() {
+        producers.clear();
+        bypassedProducerIdsAfterSkippedRecovery.clear();
+        nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
     }
 
     private static void safeRelease(Entry entry) {
