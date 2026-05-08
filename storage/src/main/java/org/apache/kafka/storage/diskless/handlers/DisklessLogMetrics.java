@@ -91,6 +91,7 @@ final class DisklessLogMetrics {
         LinkedHashMap<String, String> tags = new LinkedHashMap<>();
         tags.put("topic", topicPartition.topic());
         tags.put("partition", String.valueOf(topicPartition.partition()));
+        tags.put("storage", "diskless");
         return tags;
     }
 
