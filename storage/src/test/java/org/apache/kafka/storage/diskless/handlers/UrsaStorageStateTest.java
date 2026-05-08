@@ -248,6 +248,9 @@ class UrsaStorageStateTest {
             assertEquals(1234L, jmxGaugeLongValue(LogMetricNames.SIZE, tp.topicPartition()));
             assertEquals(5L, jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
             assertEquals(42L, jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
+            assertTrue(hasDisklessLogMetric(LogMetricNames.SIZE, tp.topicPartition()));
+            assertTrue(hasDisklessLogMetric(LogMetricNames.LOG_START_OFFSET, tp.topicPartition()));
+            assertTrue(hasDisklessLogMetric(LogMetricNames.LOG_END_OFFSET, tp.topicPartition()));
         }
     }
 
@@ -419,13 +422,61 @@ class UrsaStorageStateTest {
     }
 
     @Test
-    void testDisklessLogMetricsSkipWhenMetricAlreadyExists() throws Exception {
+    void testDisklessLogMetricsCoexistWithClassicLogMetrics() throws Exception {
         TopicPartition topicPartition = new TopicPartition("metric-conflict-topic-" + Uuid.randomUuid(), 0);
         TopicIdPartition tp = new TopicIdPartition(Uuid.randomUuid(), topicPartition);
 
         Map<String, String> tags = new LinkedHashMap<>();
         tags.put("topic", topicPartition.topic());
         tags.put("partition", String.valueOf(topicPartition.partition()));
+        KafkaMetricsGroup externalMetricsGroup = new KafkaMetricsGroup(LOG_METRIC_GROUP, LOG_METRIC_TYPE);
+        externalMetricsGroup.newGauge(LogMetricNames.SIZE, () -> 777L, tags);
+        externalMetricsGroup.newGauge(LogMetricNames.LOG_START_OFFSET, () -> 11L, tags);
+        externalMetricsGroup.newGauge(LogMetricNames.LOG_END_OFFSET, () -> 22L, tags);
+
+        ProducerStateManager producerStateManager = mock(ProducerStateManager.class);
+        when(producerStateManager.cleanup(false)).thenReturn(CompletableFuture.completedFuture(null));
+
+        ManagedLedgerFactory managedLedgerFactory = mock(ManagedLedgerFactory.class);
+        ManagedLedger managedLedger = mock(ManagedLedger.class);
+        when(managedLedger.getTotalSize()).thenReturn(1234L);
+        doAnswer(invocation -> {
+            AsyncCallbacks.OpenLedgerCallback callback = invocation.getArgument(2);
+            callback.openLedgerComplete(managedLedger, invocation.getArgument(3));
+            return null;
+        }).when(managedLedgerFactory).asyncOpen(anyString(), any(ManagedLedgerConfig.class), any(), any(), any());
+
+        try (UrsaStorageState state = new UrsaStorageState(
+                Time.SYSTEM,
+                1,
+                mock(UrsaStorageConfig.class),
+                mock(BrokerTopicStats.class),
+                managedLedgerFactory)) {
+            assertEquals(777L, classicJmxGaugeLongValue(LogMetricNames.SIZE, topicPartition));
+            assertEquals(11L, classicJmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, topicPartition));
+            assertEquals(22L, classicJmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, topicPartition));
+            assertNull(jmxGaugeLongValue(LogMetricNames.SIZE, topicPartition));
+
+            state.getOrCreatePartitionLog(tp);
+            assertEquals(1234L, jmxGaugeLongValue(LogMetricNames.SIZE, topicPartition));
+            assertEquals(0L, jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, topicPartition));
+            assertEquals(0L, jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, topicPartition));
+            assertEquals(777L, classicJmxGaugeLongValue(LogMetricNames.SIZE, topicPartition));
+            assertTrue(hasDisklessLogMetric(LogMetricNames.SIZE, topicPartition));
+            assertTrue(hasClassicLogMetric(LogMetricNames.SIZE, topicPartition));
+        } finally {
+            externalMetricsGroup.removeMetric(LogMetricNames.SIZE, tags);
+            externalMetricsGroup.removeMetric(LogMetricNames.LOG_START_OFFSET, tags);
+            externalMetricsGroup.removeMetric(LogMetricNames.LOG_END_OFFSET, tags);
+        }
+    }
+
+    @Test
+    void testDisklessLogMetricsSkipWhenDisklessMetricAlreadyExists() throws Exception {
+        TopicPartition topicPartition = new TopicPartition("metric-diskless-conflict-topic-" + Uuid.randomUuid(), 0);
+        TopicIdPartition tp = new TopicIdPartition(Uuid.randomUuid(), topicPartition);
+
+        Map<String, String> tags = disklessLogMetricTags(topicPartition);
         KafkaMetricsGroup externalMetricsGroup = new KafkaMetricsGroup(LOG_METRIC_GROUP, LOG_METRIC_TYPE);
         externalMetricsGroup.newGauge(LogMetricNames.SIZE, () -> 777L, tags);
         externalMetricsGroup.newGauge(LogMetricNames.LOG_START_OFFSET, () -> 11L, tags);
@@ -457,6 +508,7 @@ class UrsaStorageStateTest {
             assertEquals(777L, jmxGaugeLongValue(LogMetricNames.SIZE, topicPartition));
             assertEquals(11L, jmxGaugeLongValue(LogMetricNames.LOG_START_OFFSET, topicPartition));
             assertEquals(22L, jmxGaugeLongValue(LogMetricNames.LOG_END_OFFSET, topicPartition));
+            assertTrue(hasDisklessLogMetric(LogMetricNames.SIZE, topicPartition));
         } finally {
             externalMetricsGroup.removeMetric(LogMetricNames.SIZE, tags);
             externalMetricsGroup.removeMetric(LogMetricNames.LOG_START_OFFSET, tags);
@@ -464,16 +516,63 @@ class UrsaStorageStateTest {
         }
     }
 
-    private static Long jmxGaugeLongValue(String metricName, TopicPartition topicPartition) {
-        String suffix = "type=Log,name=" + metricName
-                + ",topic=" + topicPartition.topic()
-                + ",partition=" + topicPartition.partition();
+    private static Map<String, String> disklessLogMetricTags(TopicPartition topicPartition) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put("topic", topicPartition.topic());
+        tags.put("partition", String.valueOf(topicPartition.partition()));
+        tags.put("storage", "diskless");
+        return tags;
+    }
+
+    private static boolean hasDisklessLogMetric(String metricName, TopicPartition topicPartition) {
+        return hasLogMetric(metricName, topicPartition, true);
+    }
+
+    private static boolean hasClassicLogMetric(String metricName, TopicPartition topicPartition) {
+        return hasLogMetric(metricName, topicPartition, false);
+    }
+
+    private static boolean hasLogMetric(String metricName, TopicPartition topicPartition, boolean diskless) {
+        String storageTag = ",storage=diskless";
         for (var entry : KafkaYammerMetrics.defaultRegistry().allMetrics().entrySet()) {
             var name = entry.getKey();
             if (!LOG_METRIC_GROUP.equals(name.getGroup()) || !LOG_METRIC_TYPE.equals(name.getType())) {
                 continue;
             }
-            if (!name.getMBeanName().endsWith(suffix)) {
+            String mBeanName = name.getMBeanName();
+            if (!mBeanName.contains("type=Log,name=" + metricName)
+                    || !mBeanName.contains(",topic=" + topicPartition.topic())
+                    || !mBeanName.contains(",partition=" + topicPartition.partition())) {
+                continue;
+            }
+            if (diskless == mBeanName.contains(storageTag)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Long jmxGaugeLongValue(String metricName, TopicPartition topicPartition) {
+        return jmxGaugeLongValue(metricName, topicPartition, true);
+    }
+
+    private static Long classicJmxGaugeLongValue(String metricName, TopicPartition topicPartition) {
+        return jmxGaugeLongValue(metricName, topicPartition, false);
+    }
+
+    private static Long jmxGaugeLongValue(String metricName, TopicPartition topicPartition, boolean diskless) {
+        for (var entry : KafkaYammerMetrics.defaultRegistry().allMetrics().entrySet()) {
+            var name = entry.getKey();
+            if (!LOG_METRIC_GROUP.equals(name.getGroup()) || !LOG_METRIC_TYPE.equals(name.getType())) {
+                continue;
+            }
+            String mBeanName = name.getMBeanName();
+            if (!mBeanName.contains("type=Log,name=" + metricName)
+                    || !mBeanName.contains(",topic=" + topicPartition.topic())
+                    || !mBeanName.contains(",partition=" + topicPartition.partition())) {
+                continue;
+            }
+            if (diskless != mBeanName.contains(",storage=diskless")) {
                 continue;
             }
             Object metric = entry.getValue();
