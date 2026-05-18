@@ -56,8 +56,7 @@ public class FakeKafkaConfigSchema {
         SYNONYMS.put("min.insync.replicas",
             List.of(new ConfigSynonym("min.insync.replicas")));
         SYNONYMS.put("ursa.storage.enable",
-            List.of(new ConfigSynonym("ursa.storage.enable"),
-                new ConfigSynonym("ursa.storage.topic.default.enable")));
+            List.of(new ConfigSynonym("ursa.storage.topic.default.enable")));
     }
 
     public static final KafkaConfigSchema INSTANCE = new KafkaConfigSchema(CONFIGS, SYNONYMS);

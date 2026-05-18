@@ -136,6 +136,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
                         .setNumControllerNodes(1)
                         .build()))
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG, "true")
+                .setConfigProp(ServerLogConfigs.URSA_STORAGE_TOPIC_DEFAULT_ENABLE_CONFIG, "false")
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG, oxiaServiceAddress)
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG, "LOCAL")
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_PATH_CONFIG, storagePath.toString())
@@ -609,6 +610,32 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
     @Nested
     @DisplayName("Topic Config Mutation Tests")
     class TopicConfigMutationTests {
+
+        @Test
+        @DisplayName("Topic default disabled keeps implicit topics on classic storage")
+        void testTopicDefaultDisabledKeepsImplicitTopicOnClassicStorage() throws Exception {
+            String topicName = uniqueTopicName("classic-default-topic");
+
+            try (Admin admin = Admin.create(cluster.clientProperties())) {
+                NewTopic classicTopic = new NewTopic(topicName, 1, (short) 1);
+                admin.createTopics(Collections.singleton(classicTopic))
+                        .all().get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                waitForTopicReady(admin, topicName, 1);
+
+                ConfigResource topicResource = new ConfigResource(ConfigResource.Type.TOPIC, topicName);
+                ConfigEntry ursaStorageEnable = admin.describeConfigs(Collections.singleton(topicResource))
+                        .all()
+                        .get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                        .get(topicResource)
+                        .get(TopicConfig.URSA_STORAGE_ENABLE_CONFIG);
+
+                assertNotNull(ursaStorageEnable);
+                assertEquals("false", ursaStorageEnable.value());
+            }
+
+            var broker = cluster.brokers().values().iterator().next();
+            assertFalse(broker.replicaManager().disklessStorageSupport().isDisklessStorageTopic(topicName));
+        }
 
         @ParameterizedTest(name = "Cannot alter ursa.storage.enable to {0}")
         @ValueSource(booleans = {false, true})
