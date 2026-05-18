@@ -109,6 +109,38 @@ public class DisklessTopicDefaultsTest {
             .get(TopicConfig.URSA_STORAGE_ENABLE_CONFIG));
     }
 
+    @Test
+    public void testCreateTopicWithSystemEnabledAndTopicDefaultDisabledUsesClassicStorage() {
+        ReplicationControlTestContext ctx = new ReplicationControlTestContext.Builder().
+            setDisklessStorageSystemEnabled(true).
+            setStaticConfig("ursa.storage.enable", "true").
+            setStaticConfig("ursa.storage.topic.default.enable", "false").
+            build();
+        ctx.registerBrokers(0, 1, 2);
+        ctx.unfenceBrokers(0, 1, 2);
+
+        CreateTopicsRequestData request = new CreateTopicsRequestData();
+        CreatableTopic topic = new CreatableTopic().setName("classic-topic-default").
+            setNumPartitions(2).setReplicationFactor((short) -1);
+        request.topics().add(topic);
+
+        ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
+        ControllerResult<CreateTopicsResponseData> result = ctx.replicationControl.createTopics(requestContext, request,
+            Set.of("classic-topic-default"));
+        CreatableTopicResult topicResult = result.response().topics().find("classic-topic-default");
+        assertNotNull(topicResult);
+        assertEquals(NONE.code(), topicResult.errorCode());
+        assertEquals(3, topicResult.replicationFactor());
+
+        ctx.replay(result.records());
+        assertEquals("false", ctx.configurationControl.getTopicConfig(
+            "classic-topic-default",
+            TopicConfig.URSA_STORAGE_ENABLE_CONFIG).value());
+        assertEquals(null, ctx.configurationControl.getConfigs(
+            new ConfigResource(ConfigResource.Type.TOPIC, "classic-topic-default"))
+            .get(TopicConfig.URSA_STORAGE_ENABLE_CONFIG));
+    }
+
     // The following code is copied from `ReplicationControlManagerTest`. Don't reuse that class to avoid conflicts
     // when merging code from the upstream Apache Kafka code base.
     private static final class ReplicationControlTestContext {
