@@ -60,11 +60,18 @@
     <allow class="com.fasterxml.jackson.annotation.JsonProperty" />
     <allow class="com.fasterxml.jackson.annotation.JsonPropertyOrder" />
     <allow class="com.fasterxml.jackson.annotation.JsonIgnoreProperties" />
+    <allow class="org.testcontainers.utility.DockerImageName"/>
   </subpackage>
 
   <subpackage name="server">
     <allow pkg="kafka" />
     <allow pkg="org.apache.kafka" />
+    <allow pkg="io.oxia"/>
+    <allow pkg="com.google.common" />
+    <allow pkg="io.streamnative" />
+    <allow pkg="org.awaitility" />
+    <allow pkg="org.testcontainers.utility" />
+    <allow class="org.apache.commons.lang3.RandomStringUtils" />
   </subpackage>
 
   <subpackage name="admin">

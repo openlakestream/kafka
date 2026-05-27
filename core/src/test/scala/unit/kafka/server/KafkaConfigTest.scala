@@ -915,6 +915,7 @@ class KafkaConfigTest {
         // Ursa storage configs: many are plain strings, so do not treat "not_a_number" as invalid.
         case ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG => // ignore string
         case ServerLogConfigs.PULSAR_OXIA_SERVICE_URL_CONFIG => // ignore string
+        case ServerLogConfigs.INTERCEPTOR_CLASS_NAME_CONFIG => // ignore string
         case ServerLogConfigs.URSA_OXIA_SERVICE_URL_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_NAMESPACE_CONFIG => // ignore string

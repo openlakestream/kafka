@@ -114,6 +114,7 @@ ext {
   commitId = determineCommitId()
 
   ursaStorageVersion = '4.2.0.7'
+  oxiaClientVersion = '0.7.4'
 
   // Closure to exclude ursa-storage and pulsar dependencies from test classpath.
   // These dependencies significantly slow down ClassGraph.scan() during plugin discovery
@@ -151,10 +152,14 @@ ext {
       options.compilerArgs << "-Xlint:-serial"
       options.compilerArgs << "-Xlint:-try"
       options.compilerArgs << "-Werror"
-      if (userKeepAliveMode == KeepAliveMode.SESSION){
-        // Suppress warning triggered under keepAliveMode=SESSION during joint compilation
-        // Unexpected javac output: warning: [path] bad path element ".../core/build/classes/java/main": no such file or directory
-        options.compilerArgs << "-Xlint:-path"
+      // Suppress javac path warnings that can be triggered by non-standard archive extensions (e.g. .nar)
+      // in the classpath, which are harmless but become errors under -Werror.
+      options.compilerArgs << "-Xlint:-path"
+      // Suppress this-escape warning for calling overridable methods in constructors.
+      // This is intentional for testability (allowing test subclasses to override initialization).
+      // this-escape lint was introduced in newer JDKs and is not recognized by older compilers.
+      if (JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_21)) {
+        options.compilerArgs << "-Xlint:-this-escape"
       }
     }
   }
@@ -1115,7 +1120,7 @@ project(':server') {
     testImplementation project(':storage:storage-api').sourceSets.test.output
     testImplementation project(':server-common').sourceSets.test.output
     testImplementation 'io.streamnative.oxia:oxia-testcontainers:0.5.1'
-    testImplementation 'io.github.oxia-db:oxia-client-api:0.7.0'
+    testImplementation "io.github.oxia-db:oxia-client-api:$oxiaClientVersion"
     testImplementation 'org.testcontainers:testcontainers:1.21.4'
     testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
     testImplementation 'org.testcontainers:localstack:1.21.4'
@@ -1210,6 +1215,7 @@ project(':core') {
     // To prevent a UniqueResourceException due the same resource existing in both
     // org.apache.directory.api/api-all and org.apache.directory.api/api-ldap-schema-data
     testImplementation.exclude module: 'api-ldap-schema-data'
+    testImplementation.extendsFrom compileOnly
     releaseOnly
   }
 
@@ -1236,7 +1242,15 @@ project(':core') {
     implementation project(':server')
     implementation project(':coordinator-common')
     implementation project(':share-coordinator')
+    implementation("io.streamnative:ursa-storage-common:$ursaStorageVersion") {
+      transitive = false
+    }
+    implementation("io.streamnative:ursa-storage-core:$ursaStorageVersion") {
+      transitive = false
+    }
+    implementation "io.github.oxia-db:oxia-client-api:$oxiaClientVersion"
 
+    implementation libs.commonsLang
     implementation libs.argparse4j
     implementation libs.jacksonDatabind
     implementation libs.jacksonDataformatCsv
@@ -1250,6 +1264,7 @@ project(':core') {
     implementation libs.scalaLogging
     implementation libs.slf4jApi
     implementation libs.re2j
+    implementation libs.guava
 
     testImplementation project(':clients').sourceSets.test.output
     testImplementation project(':group-coordinator').sourceSets.test.output
@@ -1263,6 +1278,12 @@ project(':core') {
     testImplementation project(':test-common:test-common-runtime')
     testImplementation project(':test-common:test-common-internal-api')
     testImplementation project(':test-common:test-common-util')
+    testImplementation 'io.streamnative.oxia:oxia-testcontainers:0.5.1'
+    testImplementation 'org.testcontainers:testcontainers:1.21.4'
+    testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
+    testImplementation 'org.awaitility:awaitility:4.2.0'
+    testImplementation "io.github.oxia-db:oxia-client-api:$oxiaClientVersion"
+    testImplementation "io.github.oxia-db:oxia-client:$oxiaClientVersion"
     testImplementation libs.bcpkix
     testImplementation libs.mockitoCore
     testImplementation(libs.apacheda) {
@@ -2514,7 +2535,7 @@ project(':storage') {
       // Avoid pulling the broker dependency graph (Jetty/Jersey, etc.) into Kafka's binary distribution.
       transitive = false
     }
-    implementation 'io.github.oxia-db:oxia-client-api:0.7.0'
+    implementation "io.github.oxia-db:oxia-client-api:$oxiaClientVersion"
     implementation 'io.netty:netty-buffer:4.1.115.Final'
     implementation 'io.opentelemetry:opentelemetry-sdk:1.56.0'
     implementation 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:1.56.0'
@@ -2536,7 +2557,7 @@ project(':storage') {
     testImplementation libs.junitJupiter
     testImplementation libs.mockitoCore
     testImplementation libs.bcpkix
-    testImplementation 'io.github.oxia-db:oxia-client-api:0.7.0'
+    testImplementation "io.github.oxia-db:oxia-client-api:$oxiaClientVersion"
     testImplementation testLog4j2Libs
 
     testRuntimeOnly runtimeTestLibs
