@@ -64,3 +64,6 @@ kafka.Kafka
 __pycache__
 /*/bin/
 /*/*/bin/
+
+.java-version
+.vscode/

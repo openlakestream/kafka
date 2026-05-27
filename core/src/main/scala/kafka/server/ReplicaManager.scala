@@ -48,7 +48,7 @@ import org.apache.kafka.coordinator.transaction.{AddPartitionsToTxnConfig, Trans
 import org.apache.kafka.image.{LocalReplicaChanges, MetadataImage, TopicsDelta}
 import org.apache.kafka.logger.StateChangeLogger
 import org.apache.kafka.metadata.LeaderConstants.NO_LEADER
-import org.apache.kafka.metadata.MetadataCache
+import org.apache.kafka.metadata.{ConfigRepository, MetadataCache}
 import org.apache.kafka.server.purgatory.DelayedProduce.ProducePartitionStatus
 import org.apache.kafka.server.LogAppendResult.LogAppendSummary
 import org.apache.kafka.server.common.{DirectoryEventHandler, RequestLocal, StopPartition, TransactionVersion}
@@ -209,6 +209,7 @@ class ReplicaManager(val config: KafkaConfig,
     new DelayedOperationPurgatory[DelayedShareFetch](
       shareFetchPurgatoryName, delayedShareFetchTimer, config.brokerId,
       config.shareGroupConfig.shareFetchPurgatoryPurgeIntervalRequests))
+  private[server] val interceptor: ReplicaManagerInterceptor = createInterceptor()
 
   /* epoch of the controller that last changed the leader */
   protected val localBrokerId = config.brokerId
@@ -256,6 +257,13 @@ class ReplicaManager(val config: KafkaConfig,
   }
 
   def producerIdCount: Int = onlinePartitionsIterator.map(_.producerIdCount).sum
+
+  protected def createInterceptor(): ReplicaManagerInterceptor = {
+    Utils.newParameterizedInstance[ReplicaManagerInterceptor](
+      config.replicaManagerInterceptorClassName,
+      classOf[KafkaConfig], config,
+      classOf[ConfigRepository], metadataCache)
+  }
 
   val isrExpandRate: Meter = metricsGroup.newMeter(IsrExpandsPerSecMetricName, "expands", TimeUnit.SECONDS)
   val isrShrinkRate: Meter = metricsGroup.newMeter(IsrShrinksPerSecMetricName, "shrinks", TimeUnit.SECONDS)
@@ -698,7 +706,7 @@ class ReplicaManager(val config: KafkaConfig,
     val classicEntries = partitionedEntries.classic().asScala.toMap
 
     // Handle diskless storage entries asynchronously
-    val disklessResponsesFuture: CompletableFuture[util.Map[TopicIdPartition, PartitionResponse]] = 
+    val disklessResponsesFuture: CompletableFuture[util.Map[TopicIdPartition, PartitionResponse]] =
       if (disklessEntries.nonEmpty) {
         debug(s"Diskless storage append path: ${disklessEntries.size} partitions")
         disklessStorageSupport.handleAppend(disklessEntries.asJava, clientId)
@@ -1557,8 +1565,11 @@ class ReplicaManager(val config: KafkaConfig,
         try {
           val partition = getPartitionOrException(topicIdPartition)
           val info = partition.appendRecordsToLeader(records, origin, requiredAcks, requestLocal,
-            verificationGuards.getOrElse(topicIdPartition.topicPartition(), VerificationGuard.SENTINEL), transactionVersion)
+              verificationGuards.getOrElse(topicIdPartition.topicPartition(), VerificationGuard.SENTINEL), transactionVersion)
           val numAppendedMessages = info.numMessages
+          if (partition.isLeader) {
+            interceptor.onAppend(records, info, partition)
+          }
 
           // update stats for successfully appended bytes and messages as bytesInRate and messageInRate
           brokerTopicStats.topicStats(topicIdPartition.topic).bytesInRate.mark(records.sizeInBytes)
@@ -2620,6 +2631,7 @@ class ReplicaManager(val config: KafkaConfig,
     removeAllTopicMetrics()
     addPartitionsToTxnManager.foreach(_.shutdown())
     disklessStorageSupport.close()
+    interceptor.close()
     info("Shut down completely")
   }
 

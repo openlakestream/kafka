@@ -213,7 +213,7 @@ jobs:
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
       - name: Check generated documentation
-        # Check if there are any empty files under ./site-docs/generated, If any empty files are found, print an error 
+        # Check if there are any empty files under ./site-docs/generated, If any empty files are found, print an error
         # message and list the empty files
         env:
           SNBOT_GITHUB_TOKEN: ${{ secrets.SNBOT_GITHUB_TOKEN }}

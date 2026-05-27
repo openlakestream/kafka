@@ -36,3 +36,15 @@ Configuration:
 
       - name: org.apache.kafka
         level: WARN
+
+      - name: kafka.server.UrsaSDTInterceptor
+        level: INFO
+        additivity: false
+        AppenderRef:
+          - ref: STDOUT
+
+      - name: kafka.server.ursa.sdt.TopicCompactionTaskPublisher
+        level: INFO
+        additivity: false
+        AppenderRef:
+          - ref: STDOUT

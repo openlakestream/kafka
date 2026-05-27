@@ -343,6 +343,7 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _], enforceProv
 
   /** Diskless Storage Configurations **/
   val ursaStorageEnable: Boolean = getBoolean(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG)
+  val replicaManagerInterceptorClassName = getString(ServerLogConfigs.INTERCEPTOR_CLASS_NAME_CONFIG)
 
   override def addReconfigurable(reconfigurable: Reconfigurable): Unit = {
     dynamicConfig.addReconfigurable(reconfigurable)

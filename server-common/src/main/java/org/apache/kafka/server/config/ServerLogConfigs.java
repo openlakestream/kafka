@@ -190,6 +190,14 @@ public class ServerLogConfigs {
             "Enable diskless storage for topics by default when no topic-level override is provided. " +
                     "Internal topics remain on classic storage.";
 
+    public static final String INTERCEPTOR_CLASS_NAME_CONFIG = "kafka.server.interceptor.class.name";
+    public static final String INTERCEPTOR_CLASS_NAME_DEFAULT = "kafka.server.DefaultInterceptor";
+    public static final String INTERCEPTOR_CLASS_NAME_DOC =
+        "The fully qualified class name of the interceptor implementation. The class must implement " +
+        "<code>kafka.server.ReplicaManagerInterceptor</code> and expose a public constructor accepting " +
+        "<code>kafka.server.KafkaConfig</code> and <code>org.apache.kafka.metadata.ConfigRepository</code>.";
+
+
     // Deprecated (do not use annotation to pass checkstyle check)
     public static final String URSA_STORAGE_OXIA_SERVICE_URL_CONFIG = "ursa.storage.oxia.service.url";
     public static final String URSA_STORAGE_OXIA_SERVICE_URL_DEFAULT = "localhost:6648";
