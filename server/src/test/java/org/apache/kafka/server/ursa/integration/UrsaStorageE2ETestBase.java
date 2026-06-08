@@ -34,6 +34,7 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.test.KafkaClusterTestKit;
 import org.apache.kafka.network.SocketServerConfigs;
+import org.apache.kafka.server.config.ServerLogConfigs;
 import org.apache.kafka.test.TestUtils;
 
 import org.slf4j.Logger;
@@ -50,6 +51,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -72,6 +74,8 @@ public abstract class UrsaStorageE2ETestBase {
     protected static final int MAX_REQUEST_SIZE = 10485760; // 10MB
     protected static final int REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION =
             SocketServerConfigs.SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_DEFAULT;
+    private static final String DISKLESS_URSA_TEST_CLASS_PATH_PROPERTY =
+            "ursa.storage.diskless.ursa.test.class.path";
 
     /**
      * Creates a standard Kafka producer with byte array serializers.
@@ -131,7 +135,16 @@ public abstract class UrsaStorageE2ETestBase {
                 .setConfigProp(SocketServerConfigs.SOCKET_SERVER_ENABLE_REQUEST_PIPELINING_CONFIG, "true")
                 .setConfigProp(
                         SocketServerConfigs.SOCKET_SERVER_REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_CONFIG,
-                        String.valueOf(REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION));
+                        String.valueOf(REQUEST_PIPELINING_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION))
+                .setConfigProp(
+                        ServerLogConfigs.URSA_STORAGE_CLASS_PATH_CONFIG,
+                        disklessUrsaTestClassPath());
+    }
+
+    private static String disklessUrsaTestClassPath() {
+        return Objects.requireNonNull(
+                System.getProperty(DISKLESS_URSA_TEST_CLASS_PATH_PROPERTY),
+                DISKLESS_URSA_TEST_CLASS_PATH_PROPERTY + " must be set by the Gradle test task");
     }
 
     /**

@@ -12,7 +12,7 @@ This file provides guidance to AI coding agents (Codex CLI, OpenCode, Claude Cod
 
 ## Project Overview
 
-Fork of Apache Kafka (4.3.0-SNAPSHOT) with **Diskless Storage** via **StreamNative Ursa**. When enabled, Kafka brokers become stateless — message durability is offloaded to Ursa's distributed storage layer and producer state to **Oxia** (a distributed KV store). The primary goal is to maintain compatibility with upstream Kafka while adding the Ursa storage bypass layer.
+Fork of Apache Kafka with **Diskless Storage** via **StreamNative Ursa**. When enabled, Kafka brokers become stateless — message durability is offloaded to Ursa's distributed storage layer and producer state to **Oxia** (a distributed KV store). The primary goal is to maintain compatibility with upstream Kafka while adding the Ursa storage bypass layer.
 
 Design document: `docs/SNIP-diskless-storage-with-ursa-integration.md`
 
@@ -23,7 +23,7 @@ Design document: `docs/SNIP-diskless-storage-with-ursa-integration.md`
 ./gradlew jar
 
 # Compile check (fast feedback loop)
-./gradlew :clients:compileJava :core:compileScala :storage:compileJava :server:compileJava
+./gradlew :clients:compileJava :core:compileScala :storage:compileJava :storage:storage-diskless-api:compileJava :storage:storage-diskless-ursa:compileJava :server:compileJava
 
 # Run all tests
 ./gradlew test
@@ -31,6 +31,9 @@ Design document: `docs/SNIP-diskless-storage-with-ursa-integration.md`
 # Run a specific test class
 ./gradlew :core:test --tests "kafka.network.SocketServerTest"
 ./gradlew :server:test --tests "org.apache.kafka.server.ursa.integration.UrsaStorageE2ETest"
+./gradlew :storage:storage-diskless-api:test --tests "org.apache.kafka.storage.diskless.DisklessStorageEngineLoaderTest"
+./gradlew :storage:storage-diskless-ursa:test --tests "org.apache.kafka.storage.diskless.handlers.UrsaStorageStateTest"
+./gradlew :core:core-sdt-ursa:test --tests "kafka.server.ursa.sdt.UrsaSDTInterceptorTest"
 
 # Run a specific test method
 ./gradlew :core:test --tests "kafka.api.ProducerFailureHandlingTest.testCannotSendToInternalTopic"
@@ -43,6 +46,8 @@ Design document: `docs/SNIP-diskless-storage-with-ursa-integration.md`
 
 # Checkstyle / SpotBugs / Spotless (run automatically with test)
 ./gradlew :storage:checkstyleMain
+./gradlew :storage:storage-diskless-api:checkstyleMain
+./gradlew :storage:storage-diskless-ursa:checkstyleMain
 ./gradlew :core:checkstyleMain
 ./gradlew spotlessCheck        # import order check
 ./gradlew spotlessApply        # auto-fix import order
@@ -72,26 +77,45 @@ KafkaApis → ReplicaManager → DisklessStorageReplicaManagerSupport
 
 | Module | Language | Ursa Role |
 |--------|----------|-----------|
-| `storage/` | Java | Diskless storage core: Writer, Reader, ProducerStateStore, config |
+| `storage/` | Java | Upstream Kafka storage code plus shared storage internals |
+| `storage/diskless-api/` | Java | Generic diskless SPI/common classes used by broker code |
+| `storage/diskless-ursa/` | Java | Ursa implementation: ManagedLedger writer/reader, Oxia store, producer state |
 | `core/` | Scala | Broker: `ReplicaManager`, `KafkaApis`, `SocketServer`, `BrokerServer` |
+| `core/sdt-ursa/` | Java | Ursa SDT interceptor implementation and compaction task publisher |
 | `server/` | Java | Server configs (`SocketServerConfigs`), Ursa E2E integration tests |
-| `clients/` | Java | Network layer: `KafkaChannel`, `NetworkReceive`, `Selector` |
+| `clients/` | Java | Network layer plus generic plugin classloader utilities |
 
 ### Key Source Files
 
-**Diskless storage** (`storage/src/main/java/org/apache/kafka/storage/diskless/`):
+**Diskless API/common** (`storage/diskless-api/src/main/java/org/apache/kafka/storage/diskless/`):
 - `DisklessStorageReplicaManagerSupport.java` — Entry point; partitions requests between diskless and classic paths
+- `DisklessStorageEngine.java` — Generic engine SPI implemented by Ursa
+- `DisklessStorageEngineLoader.java` — Loads the implementation through the isolated Ursa classpath
+- `DisklessMetadataStore.java` / `DisklessMetadataStoreLoader.java` — Generic metadata-store SPI and loader
+- `DisklessClassLoaderRegistry.java` — Shares plugin classloader instances by classpath and parent until all leases close
+- `handlers/UrsaStorageConfig.java` — Configuration holder shared by broker-side code and the Ursa implementation
+
+**Ursa implementation** (`storage/diskless-ursa/src/main/java/org/apache/kafka/storage/diskless/`):
+- `handlers/UrsaStorageEngineImpl.java` — Diskless storage engine implementation backed by Ursa
 - `handlers/UrsaManagedLedgerWriter.java` — Write path (async append via ManagedLedger)
 - `handlers/UrsaManagedLedgerReader.java` — Read path (Fetch + ListOffsets)
 - `handlers/UrsaStorageState.java` — Stream IDs, offset tracking, shared state
-- `handlers/UrsaStorageConfig.java` — Configuration holder
-- `idempotent/UrsaProducerStateStore.java` — Producer state persistence to Oxia
+- `OxiaDisklessMetadataStore.java` — Producer/topic metadata persistence through Oxia
+- `idempotent/ProducerStateManager.java` — Producer state tracking backed by Oxia snapshots
+
+**Plugin classloading**:
+- `clients/src/main/java/org/apache/kafka/common/utils/KafkaPluginClassLoader.java` — Child-first plugin-private loading with parent-first Kafka/logging/Scala shared APIs
+- `server-common/src/main/java/org/apache/kafka/server/util/KafkaPluginClassPaths.java` — Resolves configured classpaths or `$KAFKA_HOME/<runtime-dir>/*` defaults
 
 **Broker integration** (`core/src/main/scala/kafka/server/`):
 - `ReplicaManager.scala` — Calls `DisklessStorageReplicaManagerSupport` for diskless topics
 - `KafkaApis.scala` — Request handling, async produce/fetch for diskless
 - `BrokerServer.scala` — Initializes diskless storage support
 - `ReplicaFetcherThread.scala` — Skips fetching for diskless partitions
+
+**Ursa SDT interceptor** (`core/sdt-ursa/src/main/java/kafka/server/ursa/sdt/`):
+- `UrsaSDTInterceptor.java` — ReplicaManager interceptor implementation for Ursa SDT
+- `TopicCompactionTaskPublisher.java` — Publishes compaction tasks
 
 **Network / Pipelining** (`core/src/main/scala/kafka/network/`):
 - `SocketServer.scala` — Request pipelining support (`socket.server.enable.request.pipelining`)
@@ -114,21 +138,25 @@ KafkaApis → ReplicaManager → DisklessStorageReplicaManagerSupport
 ## Critical Patterns
 
 ### Ursa Dependencies
-The `storage` module depends on `io.streamnative:ursa-storage-core`, `ursa-storage-ml`, `managed-ledger`, and `io.github.oxia-db:oxia-client-api`. These are excluded from most test classpaths via `excludeUrsaStorageDeps` (defined in root `build.gradle`) because they slow down ClassGraph scanning.
+Keep Ursa implementation dependencies out of Kafka's main classpath. Ursa, Oxia, AWS SDK, ManagedLedger, Pulsar, and lakehouse dependencies belong in the isolated `storage:storage-diskless-ursa` and `core:core-sdt-ursa` runtimes, not in `storage` or `core`.
+
+Release tarballs package those isolated runtime jars under `./ursa-storage/`. Kafka, Scala, SLF4J, Log4j, and other platform jars are provided by `./libs/` and should not be duplicated into `./ursa-storage/` unless the dependency is intentionally private to the Ursa runtime. The `KafkaPluginClassLoader` loads plugin-private classes child-first while keeping Kafka/logging/Scala API packages parent-first.
+
+`ursa.storage.class.path` is the shared config used by diskless storage and Ursa SDT tests to point at this runtime classpath. In production, the default is `$KAFKA_HOME/ursa-storage/*`.
 
 ### Isolated CI Tests
 Ursa integration tests (`org/apache/kafka/server/ursa/integration/**`, `org/apache/kafka/storage/diskless/**`) are isolated from the main test suite. Use `-Pkafka.ci.isolated.tests=only` to run them, or `=exclude` to skip them.
 
 ### Verify License After Dependency Changes
-When adding, removing, or upgrading dependencies in `build.gradle`, the binary distribution's `LICENSE-binary` file must be kept in sync. `LICENSE-binary` lists every third-party jar bundled under `./libs` in the release tarball, grouped by license type (Apache 2.0, MIT, BSD, etc.). Run the verification script to check for mismatches:
+When adding, removing, or upgrading dependencies in `build.gradle`, the binary distribution's `LICENSE-binary` file must be kept in sync. `LICENSE-binary` lists every third-party jar bundled under `./libs` and `./ursa-storage` in the release tarball, grouped by license type (Apache 2.0, MIT, BSD, etc.). Run the verification script to check for mismatches:
 ```bash
-# Full check: builds releaseTarGz, extracts tarball, compares libs/ against LICENSE-binary
+# Full check: builds releaseTarGz, extracts tarball, compares bundled jar directories against LICENSE-binary
 python committer-tools/verify_license.py
 
 # Skip the build if you already have a tarball from a previous build
 python committer-tools/verify_license.py --skip-build
 ```
-The script reports jars missing from `LICENSE-binary` (need to add) and stale entries in `LICENSE-binary` no longer in `./libs` (need to remove). If adding a dependency with a non-Apache license, also add the license text to the `licenses/` directory and reference it in the appropriate section of `LICENSE-binary`.
+The script reports jars missing from `LICENSE-binary` (need to add) and stale entries in `LICENSE-binary` no longer bundled under `./libs` or `./ursa-storage` (need to remove). If adding a dependency with a non-Apache license, also add the license text to the `licenses/` directory and reference it in the appropriate section of `LICENSE-binary`.
 
 ## Docker Demo
 

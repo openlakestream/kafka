@@ -37,7 +37,7 @@ Configuration:
       - name: org.apache.kafka
         level: WARN
 
-      - name: kafka.server.UrsaSDTInterceptor
+      - name: kafka.server.ursa.sdt.UrsaSDTInterceptor
         level: INFO
         additivity: false
         AppenderRef:

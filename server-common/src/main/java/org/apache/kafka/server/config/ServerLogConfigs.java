@@ -197,6 +197,11 @@ public class ServerLogConfigs {
         "<code>kafka.server.ReplicaManagerInterceptor</code> and expose a public constructor accepting " +
         "<code>kafka.server.KafkaConfig</code> and <code>org.apache.kafka.metadata.ConfigRepository</code>.";
 
+    public static final String URSA_STORAGE_CLASS_PATH_CONFIG = "ursa.storage.class.path";
+    public static final String URSA_STORAGE_CLASS_PATH_DEFAULT = "";
+    public static final String URSA_STORAGE_CLASS_PATH_DOC =
+            "Optional classpath for the Ursa diskless storage runtime. If unset, brokers load jars from " +
+                    "<code>$KAFKA_HOME/ursa-storage/*</code>.";
 
     // Deprecated (do not use annotation to pass checkstyle check)
     public static final String URSA_STORAGE_OXIA_SERVICE_URL_CONFIG = "ursa.storage.oxia.service.url";
