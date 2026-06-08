@@ -53,7 +53,7 @@ import org.apache.kafka.server.purgatory.DelayedProduce.ProducePartitionStatus
 import org.apache.kafka.server.LogAppendResult.LogAppendSummary
 import org.apache.kafka.server.common.{DirectoryEventHandler, RequestLocal, StopPartition, TransactionVersion}
 import org.apache.kafka.server.log.remote.TopicPartitionLog
-import org.apache.kafka.server.config.ReplicationConfigs
+import org.apache.kafka.server.config.{ReplicationConfigs, ServerLogConfigs}
 import org.apache.kafka.server.log.remote.storage.RemoteLogManager
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
 import org.apache.kafka.server.network.BrokerEndPoint
@@ -258,10 +258,11 @@ class ReplicaManager(val config: KafkaConfig,
   def producerIdCount: Int = onlinePartitionsIterator.map(_.producerIdCount).sum
 
   protected def createInterceptor(): ReplicaManagerInterceptor = {
-    Utils.newParameterizedInstance[ReplicaManagerInterceptor](
+    ClassLoaderAwareReplicaManagerInterceptor.newInstance(
       config.replicaManagerInterceptorClassName,
-      classOf[KafkaConfig], config,
-      classOf[ConfigRepository], metadataCache)
+      config,
+      metadataCache,
+      config.getString(ServerLogConfigs.URSA_STORAGE_CLASS_PATH_CONFIG))
   }
 
   val isrExpandRate: Meter = metricsGroup.newMeter(IsrExpandsPerSecMetricName, "expands", TimeUnit.SECONDS)

@@ -195,6 +195,9 @@ public class LogConfig extends AbstractConfig {
             .define(ServerLogConfigs.INTERCEPTOR_CLASS_NAME_CONFIG, STRING,
                     ServerLogConfigs.INTERCEPTOR_CLASS_NAME_DEFAULT,
                     new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.INTERCEPTOR_CLASS_NAME_DOC)
+            .define(ServerLogConfigs.URSA_STORAGE_CLASS_PATH_CONFIG, STRING,
+                    ServerLogConfigs.URSA_STORAGE_CLASS_PATH_DEFAULT, LOW,
+                    ServerLogConfigs.URSA_STORAGE_CLASS_PATH_DOC)
             .define(ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG, STRING, ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_DEFAULT,
                     new ConfigDef.NonEmptyString(), LOW, ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_DOC)
             .define(ServerLogConfigs.PULSAR_OXIA_SERVICE_URL_CONFIG, STRING, ServerLogConfigs.PULSAR_OXIA_SERVICE_URL_DEFAULT,

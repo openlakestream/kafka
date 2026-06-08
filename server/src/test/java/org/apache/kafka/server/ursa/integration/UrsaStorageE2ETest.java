@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 package org.apache.kafka.server.ursa.integration;
+
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.ConfigEntry;
@@ -50,6 +51,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.testcontainers.utility.DockerImageName;
 
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -118,11 +120,17 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
                 log.info("Kafka cluster stopped");
             } catch (Exception e) {
                 log.warn("Failed to close KafkaClusterTestKit cleanly", e);
+            } finally {
+                cluster = null;
             }
         }
         if (oxiaContainer != null) {
-            oxiaContainer.stop();
-            log.info("Oxia container stopped");
+            try {
+                oxiaContainer.stop();
+                log.info("Oxia container stopped");
+            } finally {
+                oxiaContainer = null;
+            }
         }
     }
 
@@ -1067,10 +1075,11 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
 
     private static void forceTrimForTopicPartition(Object ursaStorageState,
                                                    TopicIdPartition topicIdPartition) throws Exception {
-        var getOrCreatePartitionLogMethod = ursaStorageState.getClass()
+        Object state = unwrapUrsaStorageState(ursaStorageState);
+        var getOrCreatePartitionLogMethod = state.getClass()
                 .getDeclaredMethod("getOrCreatePartitionLog", TopicIdPartition.class);
         getOrCreatePartitionLogMethod.setAccessible(true);
-        Object partitionLog = getOrCreatePartitionLogMethod.invoke(ursaStorageState, topicIdPartition);
+        Object partitionLog = getOrCreatePartitionLogMethod.invoke(state, topicIdPartition);
 
         var initializedMethod = partitionLog.getClass().getDeclaredMethod("initialized");
         initializedMethod.setAccessible(true);
@@ -1083,5 +1092,25 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
                 .getMethod("trimConsumedLedgersInBackground", CompletableFuture.class);
         trimMethod.invoke(managedLedger, trimFuture);
         trimFuture.get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    private static Object unwrapUrsaStorageState(Object ursaStateOrEngine) throws Exception {
+        try {
+            ursaStateOrEngine.getClass().getDeclaredMethod("getOrCreatePartitionLog", TopicIdPartition.class);
+            return ursaStateOrEngine;
+        } catch (NoSuchMethodException ignored) {
+            Object engine = ursaStateOrEngine;
+            try {
+                Field delegateField = engine.getClass().getDeclaredField("delegate");
+                delegateField.setAccessible(true);
+                engine = delegateField.get(engine);
+            } catch (NoSuchFieldException ignoredDelegate) {
+                // The object is already the concrete engine.
+            }
+
+            Field stateField = engine.getClass().getDeclaredField("state");
+            stateField.setAccessible(true);
+            return stateField.get(engine);
+        }
     }
 }

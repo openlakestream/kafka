@@ -25,6 +25,7 @@
     <!-- common library dependencies -->
     <allow pkg="java" />
     <allow pkg="javax.management" />
+    <allow pkg="javax.tools" />
     <allow pkg="org.slf4j" />
     <allow pkg="org.junit" />
     <allow pkg="org.hamcrest" />

@@ -52,7 +52,7 @@ import org.apache.kafka.server.policy.{AlterConfigPolicy, CreateTopicPolicy}
 import org.apache.kafka.server.util.{Deadline, FutureUtils}
 import org.apache.kafka.server.NodeToControllerChannelManagerImpl
 import org.apache.kafka.server.RaftControllerNodeProvider
-import org.apache.kafka.storage.diskless.{DefaultOxiaStore, UrsaPartitionedTopicsMetadataSync}
+import org.apache.kafka.storage.diskless.{DisklessMetadataStoreLoader, UrsaPartitionedTopicsMetadataSync}
 import org.apache.kafka.storage.diskless.handlers.UrsaStorageConfig
 
 import java.util
@@ -269,7 +269,7 @@ class ControllerServer(
               val ursaConfig = UrsaStorageConfig.fromConfigs(config.props.asInstanceOf[util.Map[String, _]])
               ursaOxiaSync = new UrsaPartitionedTopicsMetadataSync(
                 (msg: String, cause: Throwable) => sharedServer.metadataPublishingFaultHandler.handleFault(msg, cause),
-                new DefaultOxiaStore(ursaConfig.getPulsarOxiaServiceUrl))
+                DisklessMetadataStoreLoader.load(ursaConfig.getPulsarOxiaServiceUrl, ursaConfig.getClassPath))
               Optional.of[DisklessTopicPreCommitHandler](
                 (topicName: String, partitions: Int, configs: util.Map[String, String]) => {
                 ursaOxiaSync.upsertPartitionedTopicMetadataSync(topicName, partitions, configs, 3000)

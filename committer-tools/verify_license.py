@@ -40,6 +40,10 @@ import argparse
 LICENSE_DEP_PATTERN = re.compile(
     r"^\s*-\s*([A-Za-z0-9_.+-]+-(?:[0-9]+\.[^\s,]+|[0-9]+))", re.MULTILINE
 )
+SECTION_TITLES = {
+    "./libs": "Additional bundled dependencies present in ./libs.",
+    "./ursa-storage": "Additional bundled dependencies present in ./ursa-storage.",
+}
 
 def run_gradlew(project_dir):
     print("Running './gradlew clean releaseTarGz'")
@@ -80,6 +84,16 @@ def get_libs_set(libs_dir):
 def get_license_deps(license_text):
     return set(LICENSE_DEP_PATTERN.findall(license_text))
 
+def get_license_section_deps(license_text, section_title):
+    pattern = re.compile(
+        r"^-{10,}\n"
+        + re.escape(section_title)
+        + r"\n(?P<body>.*?)(?=\n(?:-{10,}|={10,})\n)",
+        re.MULTILINE | re.DOTALL,
+    )
+    match = pattern.search(license_text)
+    return None if match is None else get_license_deps(match.group("body"))
+
 def main():
     # Argument parser
     parser = argparse.ArgumentParser(description="Whether to skip executing ReleaseTarGz.")
@@ -108,47 +122,72 @@ def main():
         extracted = os.path.join(tmp_dir, extracted_dirs[0])
         print("Tarball extracted to:", extracted)
         
-        # Locate the LICENSE file and libs directory.
+        # Locate the LICENSE file and bundled jar directories.
         license_path = os.path.join(extracted, "LICENSE")
         libs_dir = os.path.join(extracted, "libs")
+        ursa_storage_dir = os.path.join(extracted, "ursa-storage")
         if not os.path.exists(license_path) or not os.path.exists(libs_dir):
             print("Error: LICENSE file or libs directory not found in the extracted project.")
             sys.exit(1)
+        bundled_jar_dirs = [("./libs", libs_dir)]
+        if os.path.isdir(ursa_storage_dir):
+            bundled_jar_dirs.append(("./ursa-storage", ursa_storage_dir))
         
         with open(license_path, "r", encoding="utf-8") as f:
             license_text = f.read()
-        
-        # Get dependency sets.
-        libs = get_libs_set(libs_dir)
-        license_deps = get_license_deps(license_text)
 
-        print("\nDependencies from libs (extracted from jar names):")
-        for dep in sorted(libs):
-            print(" -", dep)
-        
-        print("\nDependencies extracted from LICENSE file:")
-        for dep in sorted(license_deps):
-            print(" -", dep)
-        
-        # Compare the sets.
-        missing_in_license = libs - license_deps
-        extra_in_license = license_deps - libs
+        failed = False
+        verified_labels = set()
+        for label, bundled_jar_dir in bundled_jar_dirs:
+            verified_labels.add(label)
+            bundled_deps = get_libs_set(bundled_jar_dir)
+            license_deps = get_license_section_deps(license_text, SECTION_TITLES[label])
 
-        if missing_in_license:
-            print("\nThe following libs (from ./libs) are missing in the LICENSE file. These should be added to the LICENSE-binary file:")
-            for dep in sorted(missing_in_license):
+            print(f"\nDependencies from {label} (extracted from jar names):")
+            for dep in sorted(bundled_deps):
                 print(" -", dep)
-        else:
-            print("\nAll libs from ./libs are present in the LICENSE file.")
-        
-        if extra_in_license:
-            print("\nThe following entries are in the LICENSE file but not present in ./libs. These should be removed from the LICENSE-binary file:")
-            for dep in sorted(extra_in_license):
-                print(" -", dep)
-        else:
-            print("\nNo extra dependencies in the LICENSE file.")
 
-        if missing_in_license or extra_in_license:
+            if license_deps is None:
+                print(f"\nMissing LICENSE section: {SECTION_TITLES[label]}")
+                failed = True
+                continue
+
+            print(f"\nDependencies extracted from LICENSE section for {label}:")
+            for dep in sorted(license_deps):
+                print(" -", dep)
+
+            missing_in_license = bundled_deps - license_deps
+            extra_in_license = license_deps - bundled_deps
+
+            if missing_in_license:
+                print(f"\nThe following bundled jars from {label} are missing in the LICENSE file. "
+                      "These should be added to the LICENSE-binary file:")
+                for dep in sorted(missing_in_license):
+                    print(" -", dep)
+            else:
+                print(f"\nAll bundled jars from {label} are present in the LICENSE file.")
+
+            if extra_in_license:
+                print(f"\nThe following entries are in the LICENSE section for {label} but not present in {label}. "
+                      "These should be removed from the LICENSE-binary file:")
+                for dep in sorted(extra_in_license):
+                    print(" -", dep)
+            else:
+                print(f"\nNo extra dependencies in the LICENSE section for {label}.")
+
+            failed = failed or bool(missing_in_license) or bool(extra_in_license)
+
+        for label, section_title in SECTION_TITLES.items():
+            if label not in verified_labels:
+                license_deps = get_license_section_deps(license_text, section_title)
+                if license_deps:
+                    print(f"\nThe LICENSE section for {label} exists, but {label} was not bundled. "
+                          "These entries should be removed from the LICENSE-binary file:")
+                    for dep in sorted(license_deps):
+                        print(" -", dep)
+                    failed = True
+
+        if failed:
             sys.exit(1)
 
 if __name__ == "__main__":

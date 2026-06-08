@@ -119,15 +119,26 @@ public class UrsaStorageS3E2ETest extends UrsaStorageE2ETestBase {
                 log.info("Kafka cluster stopped");
             } catch (Exception e) {
                 log.warn("Failed to close KafkaClusterTestKit cleanly", e);
+            } finally {
+                cluster = null;
             }
         }
         if (localStackContainer != null) {
-            localStackContainer.stop();
-            log.info("LocalStack container stopped");
+            try {
+                localStackContainer.stop();
+                log.info("LocalStack container stopped");
+            } finally {
+                localStackContainer = null;
+                s3Endpoint = null;
+            }
         }
         if (oxiaContainer != null) {
-            oxiaContainer.stop();
-            log.info("Oxia container stopped");
+            try {
+                oxiaContainer.stop();
+                log.info("Oxia container stopped");
+            } finally {
+                oxiaContainer = null;
+            }
         }
     }
 

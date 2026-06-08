@@ -115,6 +115,7 @@ ext {
 
   ursaStorageVersion = '4.2.0.10'
   oxiaClientVersion = '0.7.4'
+  hessianLiteVersion = '4.0.4'
 
   // Closure to exclude ursa-storage and pulsar dependencies from test classpath.
   // These dependencies significantly slow down ClassGraph.scan() during plugin discovery
@@ -1117,6 +1118,7 @@ project(':server') {
     testImplementation testLog4j2Libs
     testImplementation project(':test-common:test-common-internal-api')
     testImplementation project(':test-common:test-common-runtime')
+    testImplementation project(':storage:storage-diskless-api')
     testImplementation project(':storage:storage-api').sourceSets.test.output
     testImplementation project(':server-common').sourceSets.test.output
     testImplementation 'io.streamnative.oxia:oxia-testcontainers:0.5.1'
@@ -1187,6 +1189,85 @@ project(':server') {
   }
 }
 
+def kafkaRuntimeProvidedJarPatterns = [
+  'kafka-clients*',
+  'kafka-coordinator-common*',
+  'kafka-group-coordinator*',
+  'kafka-metadata*',
+  'kafka-raft*',
+  'kafka-server*',
+  'kafka-share-coordinator*',
+  'kafka-storage*',
+  'kafka-tools-api*',
+  'kafka-transaction-coordinator*',
+  'kafka_*.jar',
+  'log4j-*',
+  'metrics-core-2.*',
+  'reload4j-*',
+  'scala-library-*',
+  'scala-reflect-*',
+  'scala-logging_*',
+  'slf4j-*'
+]
+
+def registerIsolatedUrsaRuntimeClasspathSync = { Project runtimeProject, String taskName, String outputDirectory, List<String> additionalExcludes = [] ->
+  def providedJarPatterns = kafkaRuntimeProvidedJarPatterns
+  runtimeProject.tasks.register(taskName, Sync) {
+    from(runtimeProject.configurations.runtimeClasspath) {
+      exclude additionalExcludes
+      exclude providedJarPatterns
+    }
+    into(runtimeProject.layout.buildDirectory.dir(outputDirectory))
+  }
+}
+
+def isolatedRuntimeClasspathWildcard(Project runtimeProject, String outputDirectory) {
+  "${runtimeProject.layout.buildDirectory.dir(outputDirectory).get().asFile.absolutePath}${File.separator}*"
+}
+
+def syncStorageDisklessUrsaRuntimeClasspath = registerIsolatedUrsaRuntimeClasspathSync(
+  project(':storage:storage-diskless-ursa'),
+  'syncDisklessUrsaRuntimeClasspath',
+  'diskless-ursa-runtime-classpath'
+)
+
+def syncCoreSdtUrsaRuntimeClasspath = registerIsolatedUrsaRuntimeClasspathSync(
+  project(':core:core-sdt-ursa'),
+  'syncCoreSdtUrsaRuntimeClasspath',
+  'core-sdt-ursa-runtime-classpath'
+)
+
+def syncCoreSdtUrsaTestRuntimeClasspath = registerIsolatedUrsaRuntimeClasspathSync(
+  project(':core:core-sdt-ursa'),
+  'syncCoreSdtUrsaTestRuntimeClasspath',
+  'core-sdt-ursa-test-runtime-classpath',
+  ['hessian-lite-*']
+)
+
+def isolatedUrsaRuntimeFileNames = providers.provider {
+  [
+    project(':storage:storage-diskless-ursa'),
+    project(':core:core-sdt-ursa')
+  ].collectMany { isolatedProject ->
+    isolatedProject.configurations.runtimeClasspath.incoming.artifacts.artifacts.findAll { artifact ->
+      def component = artifact.id.componentIdentifier
+      component instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier
+          && (component.group == 'io.streamnative' || component.group == 'io.github.oxia-db')
+    }.collect { artifact -> artifact.file.name }
+  }.toSet()
+}
+
+project(':server').tasks.named('test') {
+  dependsOn project(':storage:storage-diskless-ursa').tasks.named('classes')
+  dependsOn syncStorageDisklessUrsaRuntimeClasspath
+  systemProperty(
+    "ursa.storage.diskless.ursa.test.class.path",
+    project(':storage:storage-diskless-ursa').sourceSets.main.output.classesDirs.asPath
+      + File.pathSeparator
+      + isolatedRuntimeClasspathWildcard(project(':storage:storage-diskless-ursa'), 'diskless-ursa-runtime-classpath')
+  )
+}
+
 project(':core') {
   apply plugin: 'scala'
 
@@ -1239,16 +1320,10 @@ project(':core') {
     implementation project(':tools:tools-api')
     implementation project(':raft')
     implementation project(':storage')
+    implementation project(':storage:storage-diskless-api')
     implementation project(':server')
     implementation project(':coordinator-common')
     implementation project(':share-coordinator')
-    implementation("io.streamnative:ursa-storage-common:$ursaStorageVersion") {
-      transitive = false
-    }
-    implementation("io.streamnative:ursa-storage-core:$ursaStorageVersion") {
-      transitive = false
-    }
-    implementation "io.github.oxia-db:oxia-client-api:$oxiaClientVersion"
 
     implementation libs.commonsLang
     implementation libs.argparse4j
@@ -1431,6 +1506,7 @@ project(':core') {
   }
 
   tasks.create(name: "releaseTarGz", dependsOn: configurations.archives.artifacts, type: Tar) {
+    def kafkaLibFileNames = new LinkedHashSet<String>()
     into "kafka_${versions.baseScala}-${archiveVersion.get()}"
     compression = Compression.GZIP
     from(project.file("$rootDir/bin")) { into "bin/" }
@@ -1472,6 +1548,19 @@ project(':core') {
     from(project(':streams:test-utils').configurations.runtimeClasspath) { into("libs/") }
     from(project(':streams:examples').jar) { into("libs/") }
     from(project(':streams:examples').configurations.runtimeClasspath) { into("libs/") }
+    from(project(':core:core-sdt-ursa').jar) { into("ursa-storage/") }
+    from(syncCoreSdtUrsaRuntimeClasspath) { into("ursa-storage/") }
+    from(project(':storage:storage-diskless-ursa').jar) { into("ursa-storage/") }
+    from(syncStorageDisklessUrsaRuntimeClasspath) { into("ursa-storage/") }
+    eachFile { fileCopyDetails ->
+      if (fileCopyDetails.path.contains('/libs/')) {
+        kafkaLibFileNames.add(fileCopyDetails.file.name)
+      } else if (fileCopyDetails.path.contains('/ursa-storage/')
+          && kafkaLibFileNames.contains(fileCopyDetails.file.name)
+          && !isolatedUrsaRuntimeFileNames.get().contains(fileCopyDetails.file.name)) {
+        fileCopyDetails.exclude()
+      }
+    }
     duplicatesStrategy 'exclude'
   }
 
@@ -1527,6 +1616,69 @@ project(':core') {
         srcDirs = ["src/test/java", "src/test/scala"]
       }
     }
+  }
+}
+
+project(':core:core-sdt-ursa') {
+  base {
+    archivesName = "kafka-core-sdt-ursa"
+  }
+
+  dependencies {
+    implementation project(':core')
+    implementation project(':metadata')
+    implementation project(':server')
+    implementation project(':server-common')
+    implementation project(':storage')
+    implementation libs.commonsLang
+    implementation libs.guava
+    implementation libs.slf4jApi
+    implementation("io.streamnative:ursa-storage-common:$ursaStorageVersion") {
+      transitive = false
+    }
+    implementation("io.streamnative:ursa-storage-core:$ursaStorageVersion") {
+      transitive = false
+    }
+    implementation "io.github.oxia-db:oxia-client-api:$oxiaClientVersion"
+    runtimeOnly "io.github.oxia-db:oxia-client:$oxiaClientVersion"
+    runtimeOnly "org.apache.dubbo:hessian-lite:$hessianLiteVersion"
+    runtimeOnly("io.streamnative:pulsar-common:$ursaStorageVersion") {
+      exclude group: 'io.streamnative', module: 'pulsar-client-original'
+      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
+    }
+
+    testImplementation project(':clients').sourceSets.test.output
+    testImplementation project(':server-common').sourceSets.test.output
+    testImplementation project(':test-common:test-common-internal-api')
+    testImplementation project(':test-common:test-common-runtime')
+    testImplementation libs.commonsLang
+    testImplementation libs.junitJupiter
+    testImplementation libs.mockitoCore
+    testImplementation testLog4j2Libs
+    testImplementation 'io.streamnative.oxia:oxia-testcontainers:0.5.1'
+    testImplementation 'org.testcontainers:testcontainers:1.21.4'
+    testImplementation 'org.testcontainers:junit-jupiter:1.21.4'
+    testImplementation 'org.awaitility:awaitility:4.2.0'
+
+    testRuntimeOnly runtimeTestLibs
+  }
+
+  tasks.named('test') {
+    dependsOn syncCoreSdtUrsaTestRuntimeClasspath
+    systemProperty(
+      "ursa.sdt.test.class.path",
+      sourceSets.main.output.classesDirs.asPath
+        + File.pathSeparator
+        + isolatedRuntimeClasspathWildcard(project(':core:core-sdt-ursa'), 'core-sdt-ursa-test-runtime-classpath')
+    )
+  }
+
+  javadoc {
+    enabled = false
+  }
+
+  checkstyle {
+    configProperties = checkstyleConfigProperties("import-control-core.xml")
   }
 }
 
@@ -2505,41 +2657,6 @@ project(':storage') {
     implementation libs.slf4jApi
     implementation libs.jacksonDatabind
     implementation libs.metrics
-    implementation("io.streamnative:ursa-storage-core:$ursaStorageVersion") {
-      exclude group: 'io.streamnative', module: 'pulsar-broker'
-      exclude group: 'io.streamnative', module: 'pulsar-client-original'
-      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
-    }
-    implementation("io.streamnative:ursa-storage-ml:$ursaStorageVersion") {
-      exclude group: 'io.streamnative', module: 'pulsar-broker'
-      exclude group: 'io.streamnative', module: 'pulsar-client-original'
-      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
-    }
-    // Required at runtime for parquet reads when `-Dursa.externalReaderFactoryClass=...LakehouseReaderFactory` is set
-    // (e.g. `docker-compose-localstack-compaction.yml`).
-    runtimeOnly("io.streamnative:ursa-storage-lakehouse:$ursaStorageVersion") {
-      // Reuse the project's Kafka client classes to avoid version conflicts.
-      exclude group: 'org.apache.kafka', module: 'kafka-clients'
-      // Avoid pulling in StreamNative Pulsar broker/client artifacts that are unused in this build.
-      exclude group: 'io.streamnative', module: 'pulsar-broker'
-      exclude group: 'io.streamnative', module: 'pulsar-client-original'
-      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
-    }
-    implementation("io.streamnative:managed-ledger:$ursaStorageVersion")
-    implementation("io.streamnative:pulsar-broker-common:$ursaStorageVersion") {
-      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
-      exclude group: 'io.streamnative', module: 'pulsar-client-original'
-    }
-    implementation("io.streamnative:pulsar-broker:$ursaStorageVersion") {
-      // Only used for a small set of API types (e.g. ManagedLedgerStorage / BookKeeperClientFactory).
-      // Avoid pulling the broker dependency graph (Jetty/Jersey, etc.) into Kafka's binary distribution.
-      transitive = false
-    }
-    implementation "io.github.oxia-db:oxia-client-api:$oxiaClientVersion"
-    implementation 'io.netty:netty-buffer:4.1.115.Final'
-    implementation 'io.opentelemetry:opentelemetry-sdk:1.56.0'
-    implementation 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:1.56.0'
-
     testImplementation project(':clients')
     testImplementation project(':clients').sourceSets.test.output
     testImplementation project(':core')
@@ -2557,7 +2674,6 @@ project(':storage') {
     testImplementation libs.junitJupiter
     testImplementation libs.mockitoCore
     testImplementation libs.bcpkix
-    testImplementation "io.github.oxia-db:oxia-client-api:$oxiaClientVersion"
     testImplementation testLog4j2Libs
 
     testRuntimeOnly runtimeTestLibs
@@ -2641,6 +2757,111 @@ project(':storage') {
 
   clean.doFirst {
     delete "${layout.buildDirectory.get().asFile.path}/kafka/"
+  }
+
+  javadoc {
+    enabled = false
+  }
+
+  checkstyle {
+    configProperties = checkstyleConfigProperties("import-control-storage.xml")
+  }
+}
+
+project(':storage:storage-diskless-api') {
+  base {
+    archivesName = "kafka-storage-diskless-api"
+  }
+
+  dependencies {
+    implementation project(':clients')
+    implementation project(':server-common')
+    implementation project(':storage')
+    implementation project(':storage:storage-api')
+    implementation libs.jacksonDatabind
+    implementation libs.slf4jApi
+
+    testImplementation project(':clients').sourceSets.test.output
+    testImplementation project(':core')
+    testImplementation project(':core').sourceSets.test.output
+    testImplementation project(':server')
+    testImplementation project(':server-common').sourceSets.test.output
+    testImplementation project(':test-common:test-common-internal-api')
+    testImplementation project(':test-common:test-common-runtime')
+    testImplementation project(':test-common:test-common-util')
+    testImplementation libs.junitJupiter
+    testImplementation libs.mockitoCore
+    testImplementation testLog4j2Libs
+
+    testRuntimeOnly runtimeTestLibs
+  }
+
+  javadoc {
+    enabled = false
+  }
+
+  checkstyle {
+    configProperties = checkstyleConfigProperties("import-control-storage.xml")
+  }
+}
+
+project(':storage:storage-diskless-ursa') {
+  base {
+    archivesName = "kafka-storage-diskless-ursa"
+  }
+
+  dependencies {
+    implementation project(':clients')
+    implementation project(':server-common')
+    implementation project(':storage')
+    implementation project(':storage:storage-diskless-api')
+    implementation project(':storage:storage-api')
+    implementation libs.jacksonDatabind
+    implementation libs.metrics
+    implementation libs.slf4jApi
+    implementation("io.streamnative:ursa-storage-core:$ursaStorageVersion") {
+      exclude group: 'io.streamnative', module: 'pulsar-broker'
+      exclude group: 'io.streamnative', module: 'pulsar-client-original'
+      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
+    }
+    implementation("io.streamnative:ursa-storage-ml:$ursaStorageVersion") {
+      exclude group: 'io.streamnative', module: 'pulsar-broker'
+      exclude group: 'io.streamnative', module: 'pulsar-client-original'
+      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
+    }
+    // Required at runtime for parquet reads when `-Dursa.externalReaderFactoryClass=...LakehouseReaderFactory` is set
+    // (e.g. `docker-compose-localstack-compaction.yml`).
+    runtimeOnly("io.streamnative:ursa-storage-lakehouse:$ursaStorageVersion") {
+      // Reuse the project's Kafka client classes to avoid version conflicts.
+      exclude group: 'org.apache.kafka', module: 'kafka-clients'
+      // Kafka still uses SLF4J 1.7; the SLF4J 2.x Log4j bridge requires SLF4JServiceProvider.
+      exclude group: 'org.apache.logging.log4j', module: 'log4j-slf4j2-impl'
+      // Avoid pulling in StreamNative Pulsar broker/client artifacts that are unused in this build.
+      exclude group: 'io.streamnative', module: 'pulsar-broker'
+      exclude group: 'io.streamnative', module: 'pulsar-client-original'
+      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
+    }
+    implementation("io.streamnative:managed-ledger:$ursaStorageVersion")
+    implementation("io.streamnative:pulsar-broker-common:$ursaStorageVersion") {
+      exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
+      exclude group: 'io.streamnative', module: 'pulsar-client-original'
+    }
+    implementation("io.streamnative:pulsar-broker:$ursaStorageVersion") {
+      // Only used for a small set of API types (e.g. ManagedLedgerStorage / BookKeeperClientFactory).
+      // Avoid pulling the broker dependency graph (Jetty/Jersey, etc.) into Kafka's binary distribution.
+      transitive = false
+    }
+    implementation "io.github.oxia-db:oxia-client-api:$oxiaClientVersion"
+    implementation 'io.netty:netty-buffer:4.1.115.Final'
+    implementation 'io.opentelemetry:opentelemetry-sdk:1.56.0'
+    implementation 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:1.56.0'
+
+    testImplementation project(':clients').sourceSets.test.output
+    testImplementation libs.junitJupiter
+    testImplementation libs.mockitoCore
+    testImplementation testLog4j2Libs
+
+    testRuntimeOnly runtimeTestLibs
   }
 
   javadoc {
