@@ -16,7 +16,9 @@
  */
 package org.apache.kafka.common.utils;
 
+import java.io.IOException;
 import java.net.URL;
+import java.util.Enumeration;
 
 /**
  * A class loader for isolated Kafka plugin runtimes.
@@ -25,6 +27,8 @@ import java.net.URL;
  * parent-first according to {@link KafkaPluginClassLoaderUtils#shouldLoadInIsolation(String)}.
  */
 public class KafkaPluginClassLoader extends ChildFirstClassLoader {
+    private static final String SERVICES_RESOURCE_PREFIX = "META-INF/services/";
+
     /**
      * @param classPath Class path string
      * @param parent    The parent classloader. If the required class / resource cannot be found in the given classPath,
@@ -78,5 +82,16 @@ public class KafkaPluginClassLoader extends ChildFirstClassLoader {
     public URL getResource(String name) {
         URL resource = findResource(name);
         return resource == null ? super.getResource(name) : resource;
+    }
+
+    @Override
+    public Enumeration<URL> getResources(String name) throws IOException {
+        if (name.startsWith(SERVICES_RESOURCE_PREFIX)) {
+            String serviceClassName = name.substring(SERVICES_RESOURCE_PREFIX.length());
+            if (!serviceClassName.isEmpty() && KafkaPluginClassLoaderUtils.shouldLoadInIsolation(serviceClassName)) {
+                return findResources(name);
+            }
+        }
+        return super.getResources(name);
     }
 }
