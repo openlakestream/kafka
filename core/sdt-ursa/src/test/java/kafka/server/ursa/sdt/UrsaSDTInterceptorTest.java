@@ -26,6 +26,7 @@ import org.apache.kafka.metadata.ConfigRepository;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -38,6 +39,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -89,5 +91,128 @@ class UrsaSDTInterceptorTest {
             eq(TimeUnit.SECONDS)
         );
         verify(firstScheduledFuture, atLeastOnce()).cancel(false);
+    }
+
+    @Test
+    void shouldSkipDefaultInternalTopicsOnAppend() {
+        var defaultInternalTopics = List.of(
+            "__consumer_offsets",
+            "sn.system.__kafka_aliveness",
+            "strimzi.cruisecontrol.metrics",
+            "strimzi.cruisecontrol.modeltrainingsamples",
+            "strimzi.cruisecontrol.partitionmetricsamples"
+        );
+
+        for (var internalTopic : defaultInternalTopics) {
+            var clusterConfig = mock(KafkaConfig.class);
+            var topicConfigRepository = mock(ConfigRepository.class);
+            var compactionManager = mock(CompactionManager.class);
+            var executor = mock(ScheduledExecutorService.class);
+            var partition = mock(Partition.class);
+            var properties = new Properties();
+            properties.put("clusterTailCompactDataVisibilityIntervalInSeconds", "1");
+
+            doReturn(properties).when(clusterConfig).props();
+            when(partition.topic()).thenReturn(internalTopic);
+
+            var interceptor = new UrsaSDTInterceptor(
+                clusterConfig,
+                topicConfigRepository,
+                executor,
+                null,
+                compactionManager);
+
+            interceptor.onAppend(null, null, partition);
+
+            verify(executor, never()).scheduleAtFixedRate(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.any()
+            );
+        }
+    }
+
+    @Test
+    void shouldSkipExtraInternalTopicsOnAppend() {
+        var clusterConfig = mock(KafkaConfig.class);
+        var topicConfigRepository = mock(ConfigRepository.class);
+        var compactionManager = mock(CompactionManager.class);
+        var executor = mock(ScheduledExecutorService.class);
+        var partition = mock(Partition.class);
+        var properties = new Properties();
+        properties.put("clusterTailCompactDataVisibilityIntervalInSeconds", "1");
+        properties.put(UrsaSDTInterceptor.EXTRA_INTERNAL_TOPICS_CONFIG, "my.extra.topic, another.extra.topic");
+
+        doReturn(properties).when(clusterConfig).props();
+        when(partition.topic()).thenReturn("my.extra.topic");
+
+        var interceptor = new UrsaSDTInterceptor(
+            clusterConfig,
+            topicConfigRepository,
+            executor,
+            null,
+            compactionManager);
+
+        interceptor.onAppend(null, null, partition);
+
+        verify(executor, never()).scheduleAtFixedRate(
+            org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.anyLong(),
+            org.mockito.ArgumentMatchers.anyLong(),
+            org.mockito.ArgumentMatchers.any()
+        );
+
+        // also verify the second extra topic is skipped
+        when(partition.topic()).thenReturn("another.extra.topic");
+        interceptor.onAppend(null, null, partition);
+
+        verify(executor, never()).scheduleAtFixedRate(
+            org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.anyLong(),
+            org.mockito.ArgumentMatchers.anyLong(),
+            org.mockito.ArgumentMatchers.any()
+        );
+    }
+
+    @Test
+    void shouldProcessNonInternalTopicOnAppend() {
+        var clusterConfig = mock(KafkaConfig.class);
+        var topicConfigRepository = mock(ConfigRepository.class);
+        var compactionManager = mock(CompactionManager.class);
+        var executor = mock(ScheduledExecutorService.class);
+        var partition = mock(Partition.class);
+        @SuppressWarnings("unchecked")
+        ScheduledFuture<?> scheduledFuture = mock(ScheduledFuture.class);
+        var properties = new Properties();
+        properties.put("clusterTailCompactDataVisibilityIntervalInSeconds", "1");
+
+        doReturn(properties).when(clusterConfig).props();
+        when(partition.topic()).thenReturn("regular-topic");
+        when(partition.partitionId()).thenReturn(0);
+        when(partition.topicId()).thenReturn(Option.apply(Uuid.randomUuid()));
+        when(partition.isLeader()).thenReturn(false);
+        doReturn(scheduledFuture).when(executor).scheduleAtFixedRate(
+            org.mockito.ArgumentMatchers.any(),
+            eq(1L),
+            eq(1L),
+            eq(TimeUnit.SECONDS)
+        );
+
+        var interceptor = new UrsaSDTInterceptor(
+            clusterConfig,
+            topicConfigRepository,
+            executor,
+            null,
+            compactionManager);
+
+        interceptor.onAppend(null, null, partition);
+
+        verify(executor, times(1)).scheduleAtFixedRate(
+            org.mockito.ArgumentMatchers.any(),
+            eq(1L),
+            eq(1L),
+            eq(TimeUnit.SECONDS)
+        );
     }
 }
