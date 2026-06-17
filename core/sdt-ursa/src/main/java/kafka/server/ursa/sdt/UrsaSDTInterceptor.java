@@ -33,6 +33,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
@@ -56,6 +58,15 @@ public class UrsaSDTInterceptor implements ReplicaManagerInterceptor {
 
     private static final Logger log = LoggerFactory.getLogger(UrsaSDTInterceptor.class);
     public static final String PUBLISHER_BROKER_ID_PROPERTY = "publisherBrokerId";
+    public static final String EXTRA_INTERNAL_TOPICS_CONFIG = "ursaExtraInternalTopics";
+
+    private static final Set<String> DEFAULT_INTERNAL_TOPICS = Set.of(
+        "__consumer_offsets",
+        "sn.system.__kafka_aliveness",
+        "strimzi.cruisecontrol.metrics",
+        "strimzi.cruisecontrol.modeltrainingsamples",
+        "strimzi.cruisecontrol.partitionmetricsamples"
+    );
 
     private final KafkaConfig clusterConfig;
     private final ConfigRepository topicConfigRepository;
@@ -67,7 +78,7 @@ public class UrsaSDTInterceptor implements ReplicaManagerInterceptor {
 
     private Cache<String, TopicCompactionTaskPublisher> compactionTaskPublisherCache;
 
-    private final Set<String> internalTopics = Set.of("__consumer_offsets", "sn.system.__kafka_aliveness");
+    private final Set<String> internalTopics;
 
     public UrsaSDTInterceptor(KafkaConfig clusterConfig, ConfigRepository topicConfigRepository) {
         this(clusterConfig, topicConfigRepository, null, null, null);
@@ -85,6 +96,7 @@ public class UrsaSDTInterceptor implements ReplicaManagerInterceptor {
         this.clusterDynamicConfigs = new DynamicConfigs("default", properties, false);
         this.publishTaskCheckInterval = Long.parseLong(clusterDynamicConfigs
             .getProperty("clusterTailCompactDataVisibilityIntervalInSeconds").orElse("180"));
+        this.internalTopics = buildInternalTopics(clusterConfig);
         this.compactionTaskPublisherCache = createPublisherCache();
         this.scheduledExecutorService = scheduledExecutorService == null
             ? Executors.newScheduledThreadPool(getUrsaCompactionTaskPublisherThreadNum())
@@ -96,6 +108,20 @@ public class UrsaSDTInterceptor implements ReplicaManagerInterceptor {
             this.oxiaClient = oxiaClient;
             this.compactionManager = compactionManager;
         }
+    }
+
+    private static Set<String> buildInternalTopics(KafkaConfig clusterConfig) {
+        var topics = new HashSet<>(DEFAULT_INTERNAL_TOPICS);
+        var extraTopicsValue = Optional.ofNullable(clusterConfig.props().get(EXTRA_INTERNAL_TOPICS_CONFIG))
+            .map(Object::toString)
+            .orElse("");
+        if (!extraTopicsValue.isBlank()) {
+            Arrays.stream(extraTopicsValue.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .forEach(topics::add);
+        }
+        return Set.copyOf(topics);
     }
 
     private Cache<String, TopicCompactionTaskPublisher> createPublisherCache() {
