@@ -50,9 +50,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 class DisklessStateReconcilerPublisherTest {
@@ -71,6 +73,7 @@ class DisklessStateReconcilerPublisherTest {
         );
 
         verify(support).reconcileTrackedPartitions(eq(Collections.emptySet()), same(callback));
+        verify(support, never()).deleteTopicConfig(any());
     }
 
     @Test
@@ -89,11 +92,13 @@ class DisklessStateReconcilerPublisherTest {
 
         publisher.onMetadataUpdate(delta, MetadataImage.EMPTY, mock(LoaderManifest.class));
 
-        verify(support).reconcileTrackedPartitions(eq(Set.of(
+        Set<TopicIdPartition> deletedPartitions = Set.of(
                 new TopicIdPartition(topicId, new TopicPartition(topicName, 0)),
                 new TopicIdPartition(topicId, new TopicPartition(topicName, 1)),
                 new TopicIdPartition(topicId, new TopicPartition(topicName, 2))
-        )), same(callback));
+        );
+        verify(support).reconcileTrackedPartitions(eq(deletedPartitions), same(callback));
+        verify(support).deleteTopicConfig(topicName);
     }
 
     @Test
@@ -112,6 +117,7 @@ class DisklessStateReconcilerPublisherTest {
         publisher.onMetadataUpdate(delta, MetadataImage.EMPTY, mock(LoaderManifest.class));
 
         verify(support).reconcileTrackedPartitions(eq(Collections.emptySet()), same(callback));
+        verify(support, never()).deleteTopicConfig(any());
     }
 
     private static MetadataImage metadataImage(String topicName, Uuid topicId, int partitions, boolean disklessEnabled) {

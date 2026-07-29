@@ -109,6 +109,10 @@ class TopicConfigHandler(private val replicaManager: ReplicaManager,
   def processConfigChanges(topic: String, topicConfig: Properties): Unit = {
     updateLogConfig(topic, topicConfig)
 
+    if (replicaManager.disklessStorageSupport.isDisklessStorageTopic(topic)) {
+      replicaManager.disklessStorageSupport.updateTopicConfig(topic, topicConfig)
+    }
+
     def updateThrottledList(prop: String, quotaManager: ReplicationQuotaManager): Unit = {
       if (topicConfig.containsKey(prop) && topicConfig.getProperty(prop).nonEmpty) {
         val partitions = parseThrottledPartitions(topicConfig, kafkaConfig.brokerId, prop)

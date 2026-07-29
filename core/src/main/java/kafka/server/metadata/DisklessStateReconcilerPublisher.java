@@ -31,6 +31,7 @@ import org.apache.kafka.storage.diskless.DisklessStorageReplicaManagerSupport;
 
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -62,7 +63,14 @@ public class DisklessStateReconcilerPublisher implements MetadataPublisher {
             MetadataImage newImage,
             LoaderManifest manifest
     ) {
-        disklessStorageSupport.reconcileTrackedPartitions(deletedDisklessPartitions(delta), onTopicMaybeEmptied);
+        Set<TopicIdPartition> deletedPartitions = deletedDisklessPartitions(delta);
+        disklessStorageSupport.reconcileTrackedPartitions(deletedPartitions, onTopicMaybeEmptied);
+
+        Set<String> deletedTopics = new LinkedHashSet<>();
+        for (TopicIdPartition deletedPartition : deletedPartitions) {
+            deletedTopics.add(deletedPartition.topic());
+        }
+        deletedTopics.forEach(disklessStorageSupport::deleteTopicConfig);
     }
 
     private Set<TopicIdPartition> deletedDisklessPartitions(MetadataDelta delta) {

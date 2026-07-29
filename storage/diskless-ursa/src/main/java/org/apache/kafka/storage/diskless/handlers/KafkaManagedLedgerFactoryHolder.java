@@ -25,6 +25,8 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 import io.opentelemetry.sdk.OpenTelemetrySdk;
 import io.opentelemetry.sdk.autoconfigure.AutoConfiguredOpenTelemetrySdk;
@@ -50,6 +52,7 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
     private final PersistentStorageWalManagedLedgerStorage managedLedgerStorage;
     private final AsyncOxiaClient oxiaClient;
     private final OpenTelemetrySdk openTelemetrySdk;
+    private final Map<String, Map<String, String>> dummyTopicConfigs = new ConcurrentHashMap<>();
 
     private KafkaManagedLedgerFactoryHolder(
             ManagedLedgerFactory managedLedgerFactory,
@@ -68,6 +71,22 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
 
     AsyncOxiaClient oxiaClient() {
         return oxiaClient;
+    }
+
+    CompletableFuture<Void> asyncUpdateTopicConfig(String mlName, Map<String, String> topicConfig) {
+        // TODO: Delegate to StorageWalManagedLedgerFactory.asyncUpdateTopicConfig once the Ursa change is released.
+        dummyTopicConfigs.put(mlName, Map.copyOf(topicConfig));
+        return CompletableFuture.completedFuture(null);
+    }
+
+    CompletableFuture<Void> asyncDeleteTopicConfig(String mlName) {
+        // TODO: Delegate to StorageWalManagedLedgerFactory.asyncDeleteTopicConfig once the Ursa change is released.
+        dummyTopicConfigs.remove(mlName);
+        return CompletableFuture.completedFuture(null);
+    }
+
+    Map<String, String> dummyTopicConfig(String mlName) {
+        return dummyTopicConfigs.getOrDefault(mlName, Map.of());
     }
 
     static ServiceConfiguration createServiceConfiguration(UrsaStorageConfig config) {

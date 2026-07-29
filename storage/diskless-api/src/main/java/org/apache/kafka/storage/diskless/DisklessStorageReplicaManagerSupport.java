@@ -45,6 +45,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiFunction;
@@ -153,6 +154,29 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
      */
     public boolean isEnabled() {
         return enabled;
+    }
+
+    /**
+     * Updates the topic configuration in the diskless storage backend.
+     * This is called when topic configs change (e.g., alter configs).
+     */
+    public void updateTopicConfig(String topic, Properties config) {
+        if (!enabled || engine == null) {
+            return;
+        }
+        Map<String, String> configMap = new LinkedHashMap<>();
+        config.forEach((k, v) -> configMap.put(k.toString(), v.toString()));
+        engine.updateTopicConfig(topic, configMap);
+    }
+
+    /**
+     * Deletes the topic configuration after the topic has been deleted.
+     */
+    public void deleteTopicConfig(String topic) {
+        if (!enabled || engine == null || topic == null) {
+            return;
+        }
+        engine.deleteTopicConfig(topic);
     }
 
     /**

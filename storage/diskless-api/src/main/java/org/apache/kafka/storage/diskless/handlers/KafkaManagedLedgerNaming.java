@@ -41,7 +41,11 @@ public final class KafkaManagedLedgerNaming {
      * <p>The Oxia metadata key will be {@code /managed-ledgers/ + name}.
      */
     public static String managedLedgerName(TopicIdPartition tp) {
-        return TENANT + "/" + NAMESPACE + "/" + DOMAIN + "/" + tp.topic() + "-partition-" + tp.partition();
+        return managedLedgerName(tp.topic(), tp.partition());
+    }
+
+    public static String managedLedgerName(String topic, int partition) {
+        return TENANT + "/" + NAMESPACE + "/" + DOMAIN + "/" + topic + "-partition-" + partition;
     }
 
     /**

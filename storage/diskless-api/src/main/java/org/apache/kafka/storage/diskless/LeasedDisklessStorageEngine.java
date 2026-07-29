@@ -74,6 +74,22 @@ final class LeasedDisklessStorageEngine implements DisklessStorageEngine {
     }
 
     @Override
+    public void updateTopicConfig(String topic, Map<String, String> config) {
+        callWithClassLoader(() -> {
+            delegate.updateTopicConfig(topic, config);
+            return null;
+        });
+    }
+
+    @Override
+    public void deleteTopicConfig(String topic) {
+        callWithClassLoader(() -> {
+            delegate.deleteTopicConfig(topic);
+            return null;
+        });
+    }
+
+    @Override
     public Set<TopicIdPartition> snapshotTrackedPartitions() {
         return callWithClassLoader(delegate::snapshotTrackedPartitions);
     }

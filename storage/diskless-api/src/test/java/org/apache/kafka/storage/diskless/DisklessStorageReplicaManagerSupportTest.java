@@ -42,6 +42,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -62,6 +63,39 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class DisklessStorageReplicaManagerSupportTest {
+
+    @Test
+    void testUpdateTopicConfigForwardsStringMapToEngine() throws Exception {
+        DisklessStorageEngine engine = mock(DisklessStorageEngine.class);
+        DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
+        DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
+        Properties config = new Properties();
+        config.setProperty("retention.ms", "1000");
+        config.setProperty("retention.bytes", "2048");
+
+        try (DisklessStorageReplicaManagerSupport support =
+                     new DisklessStorageReplicaManagerSupport(metadataView, 1, selector, engine)) {
+            support.updateTopicConfig("diskless-topic", config);
+
+            verify(engine).updateTopicConfig("diskless-topic", Map.of(
+                    "retention.ms", "1000",
+                    "retention.bytes", "2048"));
+        }
+    }
+
+    @Test
+    void testDeleteTopicConfigForwardsTopicToEngine() throws Exception {
+        DisklessStorageEngine engine = mock(DisklessStorageEngine.class);
+        DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
+        DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
+
+        try (DisklessStorageReplicaManagerSupport support =
+                     new DisklessStorageReplicaManagerSupport(metadataView, 1, selector, engine)) {
+            support.deleteTopicConfig("diskless-topic");
+
+            verify(engine).deleteTopicConfig("diskless-topic");
+        }
+    }
 
     @Test
     void testHandleAppendRedirectsNonOwnerWithoutCallingWriter() {
