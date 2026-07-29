@@ -41,9 +41,11 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -57,6 +59,7 @@ import io.oxia.client.api.AsyncOxiaClient;
 public class UrsaStorageState implements DisklessStorageStateOperations {
 
     private static final Logger log = LoggerFactory.getLogger(UrsaStorageState.class);
+    private static final long TOPIC_CONFIG_UPDATE_TIMEOUT_SECONDS = 30;
 
     private final Time time;
     private final int brokerId;
@@ -153,6 +156,42 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
 
     public BrokerTopicStats brokerTopicStats() {
         return brokerTopicStats;
+    }
+
+    public void updateTopicConfig(String topic, Map<String, String> topicConfig) {
+        try {
+            updateTopicConfigAsync(topic, topicConfig).get(TOPIC_CONFIG_UPDATE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while updating topic config for " + topic, e);
+        } catch (ExecutionException e) {
+            throw new RuntimeException("Failed to update topic config for " + topic, e.getCause());
+        } catch (TimeoutException e) {
+            throw new RuntimeException("Timed out after " + TOPIC_CONFIG_UPDATE_TIMEOUT_SECONDS
+                    + " seconds while updating topic config for " + topic, e);
+        }
+    }
+
+    private CompletableFuture<Void> updateTopicConfigAsync(String topic, Map<String, String> topicConfig) {
+        if (topic == null || topicConfig == null || managedLedgerFactoryHolder == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Map<String, String> configSnapshot = Map.copyOf(topicConfig);
+        String mlName = KafkaManagedLedgerNaming.managedLedgerName(topic, 0);
+        return managedLedgerFactoryHolder.asyncUpdateTopicConfig(mlName, configSnapshot)
+                .whenComplete((ignored, error) -> {
+                    if (error != null) {
+                        log.warn("Failed to update topic config for managed ledger {}", mlName, error);
+                    }
+                });
+    }
+
+    public void deleteTopicConfig(String topic) {
+        if (topic == null || managedLedgerFactoryHolder == null) {
+            return;
+        }
+        String mlName = KafkaManagedLedgerNaming.managedLedgerName(topic, 0);
+        managedLedgerFactoryHolder.asyncDeleteTopicConfig(mlName).join();
     }
 
     UrsaPartitionLog getOrCreatePartitionLog(TopicIdPartition tp) {
@@ -458,20 +497,28 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
         String name = KafkaManagedLedgerNaming.managedLedgerName(tp);
         ManagedLedgerConfig mlConfig = new ManagedLedgerConfig().setCreateIfMissing(true);
 
-        CompletableFuture<ManagedLedger> openFuture = new CompletableFuture<>();
-        managedLedgerFactory.asyncOpen(name, mlConfig, new AsyncCallbacks.OpenLedgerCallback() {
-            @Override
-            public void openLedgerComplete(ManagedLedger ledger, Object ctx) {
-                openFuture.complete(ledger);
-            }
+        Map<String, String> topicConfig = topicConfigSupplier != null
+                ? topicConfigSupplier.apply(tp.topic())
+                : null;
+        CompletableFuture<Void> updateConfigFuture = topicConfig != null
+                ? updateTopicConfigAsync(tp.topic(), topicConfig)
+                : CompletableFuture.completedFuture(null);
 
-            @Override
-            public void openLedgerFailed(ManagedLedgerException exception, Object ctx) {
-                openFuture.completeExceptionally(exception);
-            }
-        }, null, null);
+        return updateConfigFuture.thenCompose(ignored -> {
+            CompletableFuture<ManagedLedger> openFuture = new CompletableFuture<>();
+            managedLedgerFactory.asyncOpen(name, mlConfig, new AsyncCallbacks.OpenLedgerCallback() {
+                @Override
+                public void openLedgerComplete(ManagedLedger ledger, Object ctx) {
+                    openFuture.complete(ledger);
+                }
 
-        return openFuture.thenApply(managedLedger -> applyRetentionConfig(tp, managedLedger));
+                @Override
+                public void openLedgerFailed(ManagedLedgerException exception, Object ctx) {
+                    openFuture.completeExceptionally(exception);
+                }
+            }, null, null);
+            return openFuture;
+        }).thenApply(managedLedger -> applyRetentionConfig(tp, managedLedger));
     }
 
 }

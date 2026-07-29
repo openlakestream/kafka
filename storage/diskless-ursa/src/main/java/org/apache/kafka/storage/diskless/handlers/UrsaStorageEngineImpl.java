@@ -103,6 +103,16 @@ public class UrsaStorageEngineImpl implements DisklessStorageEngine {
     }
 
     @Override
+    public void updateTopicConfig(String topic, Map<String, String> config) {
+        state.updateTopicConfig(topic, config);
+    }
+
+    @Override
+    public void deleteTopicConfig(String topic) {
+        state.deleteTopicConfig(topic);
+    }
+
+    @Override
     public void close() throws IOException {
         reader.close();
         writer.close();

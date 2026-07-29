@@ -36,6 +36,14 @@ class KafkaManagedLedgerNamingTest {
     }
 
     @Test
+    void testManagedLedgerNameFromTopicAndPartition() {
+        assertEquals(
+                "public/default/persistent/test-topic-partition-0",
+                KafkaManagedLedgerNaming.managedLedgerName("test-topic", 0)
+        );
+    }
+
+    @Test
     void testManagedLedgerMetadataPath() {
         TopicIdPartition tp = new TopicIdPartition(Uuid.randomUuid(), new TopicPartition("test-topic", 0));
         assertEquals(

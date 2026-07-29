@@ -16,5 +16,13 @@
  */
 package org.apache.kafka.storage.diskless;
 
+import java.util.Map;
+
 public interface DisklessStorageEngine extends Reader, Writer, DisklessStorageStateOperations {
+
+    default void updateTopicConfig(String topic, Map<String, String> config) {
+    }
+
+    default void deleteTopicConfig(String topic) {
+    }
 }

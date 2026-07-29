@@ -668,6 +668,56 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
             assertCannotAlterUrsaStorageEnable(topicName, newUrsaStorageEnabled);
         }
 
+        @Test
+        @DisplayName("Topic config updates forward the complete config snapshot to Ursa storage")
+        void testTopicConfigUpdateForwardsCompleteSnapshotToUrsaStorage() throws Exception {
+            String topicName = uniqueTopicName("topic-config-update");
+            createDisklessTopic(cluster, topicName);
+            waitForTopicReady(cluster, topicName, 1);
+
+            ConfigResource topicResource = new ConfigResource(ConfigResource.Type.TOPIC, topicName);
+            try (Admin admin = Admin.create(cluster.clientProperties())) {
+                setTopicConfig(admin, topicResource, TopicConfig.RETENTION_MS_CONFIG, "60000");
+                waitForUrsaTopicConfig(topicName, Map.of(
+                        TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true",
+                        TopicConfig.RETENTION_MS_CONFIG, "60000"));
+
+                setTopicConfig(admin, topicResource, TopicConfig.RETENTION_BYTES_CONFIG, "1048576");
+                waitForUrsaTopicConfig(topicName, Map.of(
+                        TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true",
+                        TopicConfig.RETENTION_MS_CONFIG, "60000",
+                        TopicConfig.RETENTION_BYTES_CONFIG, "1048576"));
+            }
+        }
+
+        private void setTopicConfig(
+                Admin admin,
+                ConfigResource topicResource,
+                String configName,
+                String configValue
+        ) throws Exception {
+            AlterConfigOp operation = new AlterConfigOp(
+                    new ConfigEntry(configName, configValue),
+                    AlterConfigOp.OpType.SET);
+            admin.incrementalAlterConfigs(Map.of(topicResource, List.of(operation)))
+                    .all()
+                    .get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        }
+
+        private void waitForUrsaTopicConfig(String topicName, Map<String, String> expectedConfig)
+                throws InterruptedException {
+            TestUtils.waitForCondition(() -> {
+                try {
+                    var broker = cluster.brokers().values().iterator().next();
+                    Map<String, String> actualConfig = getUrsaTopicConfig(
+                            broker.replicaManager().disklessStorageSupport().getUrsaState(), topicName);
+                    return expectedConfig.equals(actualConfig);
+                } catch (Exception e) {
+                    return false;
+                }
+            }, 30_000, 100, () -> "Timed out waiting for Ursa topic config " + expectedConfig);
+        }
+
         private void assertCannotAlterUrsaStorageEnable(String topicName, boolean newUrsaStorageEnabled) throws Exception {
             try (Admin admin = Admin.create(cluster.clientProperties())) {
                 ConfigResource topicResource = new ConfigResource(ConfigResource.Type.TOPIC, topicName);
@@ -1112,5 +1162,18 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
             stateField.setAccessible(true);
             return stateField.get(engine);
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, String> getUrsaTopicConfig(Object ursaStateOrEngine, String topicName) throws Exception {
+        Object state = unwrapUrsaStorageState(ursaStateOrEngine);
+        Field holderField = state.getClass().getDeclaredField("managedLedgerFactoryHolder");
+        holderField.setAccessible(true);
+        Object holder = holderField.get(state);
+
+        var topicConfigMethod = holder.getClass().getDeclaredMethod("dummyTopicConfig", String.class);
+        topicConfigMethod.setAccessible(true);
+        String managedLedgerName = "public/default/persistent/" + topicName + "-partition-0";
+        return (Map<String, String>) topicConfigMethod.invoke(holder, managedLedgerName);
     }
 }
