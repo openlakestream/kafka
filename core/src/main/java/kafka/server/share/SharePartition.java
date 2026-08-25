@@ -631,34 +631,48 @@ public class SharePartition implements AutoCloseable {
         }
 
         var partitionDataStartOffset = result.topicsData().get(0).partitions().get(0).startOffset();
-        startOffsetDuringInitializationDiskless(partitionDataStartOffset)
-                .whenComplete((startOffset, ex) -> {
-                    lock.writeLock().lock();
-                    Throwable throwable = null;
-                    try {
-                        if (ex != null) {
-                            log.error("[Diskless] Failed to compute the start offset during initialization for share "
-                                    + "partition: {}-{}.", groupId, topicIdPartition, ex);
-                            throwable = ex;
-                            return;
-                        }
-                        this.startOffset = startOffset;
-                        throwable = completeInitializationDiskless(result);
-                    } catch (Exception e) {
-                        throwable = e;
-                    } finally {
-                        boolean isFailed = throwable != null;
-                        if (isFailed) {
-                            partitionState = SharePartitionState.FAILED;
-                        }
-                        lock.writeLock().unlock();
-                        if (isFailed) {
-                            future.completeExceptionally(throwable);
-                        } else {
-                            future.complete(null);
-                        }
-                    }
-                });
+        CompletableFuture<Long> startOffsetFuture;
+        try {
+            startOffsetFuture = startOffsetDuringInitializationDiskless(partitionDataStartOffset);
+        } catch (Exception e) {
+            log.error("[Diskless] Failed to compute the start offset during initialization for share "
+                    + "partition: {}-{}.", groupId, topicIdPartition, e);
+            lock.writeLock().lock();
+            try {
+                partitionState = SharePartitionState.FAILED;
+            } finally {
+                lock.writeLock().unlock();
+            }
+            future.completeExceptionally(e);
+            return;
+        }
+        startOffsetFuture.whenComplete((startOffset, ex) -> {
+            lock.writeLock().lock();
+            Throwable throwable = null;
+            try {
+                if (ex != null) {
+                    log.error("[Diskless] Failed to compute the start offset during initialization for share "
+                            + "partition: {}-{}.", groupId, topicIdPartition, ex);
+                    throwable = ex;
+                    return;
+                }
+                this.startOffset = startOffset;
+                throwable = completeInitializationDiskless(result);
+            } catch (Exception e) {
+                throwable = e;
+            } finally {
+                boolean isFailed = throwable != null;
+                if (isFailed) {
+                    partitionState = SharePartitionState.FAILED;
+                }
+                lock.writeLock().unlock();
+                if (isFailed) {
+                    future.completeExceptionally(throwable);
+                } else {
+                    future.complete(null);
+                }
+            }
+        });
     }
 
     private Throwable verifyShareGroupState(ReadShareGroupStateResult result, Throwable exception) {
@@ -3351,12 +3365,9 @@ public class SharePartition implements AutoCloseable {
         if (partitionDataStartOffset != PartitionFactory.UNINITIALIZED_START_OFFSET) {
             return CompletableFuture.completedFuture(partitionDataStartOffset);
         }
-        ShareGroupAutoOffsetResetStrategy offsetResetStrategy;
-        if (groupConfigManager.groupConfig(groupId).isPresent()) {
-            offsetResetStrategy = groupConfigManager.groupConfig(groupId).get().shareAutoOffsetReset();
-        } else {
-            offsetResetStrategy = GroupConfig.defaultShareAutoOffsetReset();
-        }
+        ShareGroupAutoOffsetResetStrategy offsetResetStrategy = groupConfigManager.groupConfig(groupId)
+                .map(GroupConfig::shareAutoOffsetReset)
+                .orElseGet(GroupConfig::defaultShareAutoOffsetReset);
 
         long timestampToSearch = switch (offsetResetStrategy.type()) {
             case LATEST -> ListOffsetsRequest.LATEST_TIMESTAMP;

@@ -3752,7 +3752,7 @@ public class ReplicationControlManagerTest {
 
         ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
         ControllerResult<CreateTopicsResponseData> result =
-            ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"));
+            ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"), false);
 
         CreatableTopicResult topicResult = result.response().topics().find("diskless-topic");
         assertNotNull(topicResult);
@@ -3788,7 +3788,7 @@ public class ReplicationControlManagerTest {
 
         ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
         ControllerResult<CreateTopicsResponseData> result =
-            ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"));
+            ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"), false);
 
         CreatableTopicResult topicResult = result.response().topics().find("diskless-topic");
         assertNotNull(topicResult);
@@ -3814,7 +3814,7 @@ public class ReplicationControlManagerTest {
 
         ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
         ControllerResult<CreateTopicsResponseData> result =
-            ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"));
+            ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"), false);
 
         CreatableTopicResult topicResult = result.response().topics().find("diskless-topic");
         assertNotNull(topicResult);
@@ -3854,7 +3854,7 @@ public class ReplicationControlManagerTest {
         request.topics().add(topic);
 
         ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
-        ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"));
+        ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"), false);
 
         assertEquals(1, policyReplicationFactor.get());
     }
@@ -3876,7 +3876,7 @@ public class ReplicationControlManagerTest {
 
         ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
         ControllerResult<CreateTopicsResponseData> result =
-            ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"));
+            ctx.replicationControl.createTopics(requestContext, request, Set.of("diskless-topic"), false);
 
         CreatableTopicResult topicResult = result.response().topics().find("diskless-topic");
         assertNotNull(topicResult);
@@ -3893,7 +3893,7 @@ public class ReplicationControlManagerTest {
             setName(URSA_STORAGE_ENABLE_CONFIG).setValue("true"));
         request.topics().add(topic);
         ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
-        return ctx.replicationControl.createTopics(requestContext, request, Set.of(name));
+        return ctx.replicationControl.createTopics(requestContext, request, Set.of(name), false);
     }
 
     @Test
@@ -3978,7 +3978,8 @@ public class ReplicationControlManagerTest {
             setName(URSA_STORAGE_ENABLE_CONFIG).setValue("true"));
         request.topics().add(topic);
         ControllerResult<CreateTopicsResponseData> result =
-            ctx.replicationControl.createTopics(anonymousContextFor(ApiKeys.CREATE_TOPICS), request, Set.of("diskless-topic"));
+            ctx.replicationControl.createTopics(
+                anonymousContextFor(ApiKeys.CREATE_TOPICS), request, Set.of("diskless-topic"), false);
 
         assertEquals(NONE.code(), result.response().topics().find("diskless-topic").errorCode());
         assertTrue(result.records().isEmpty(), "validate-only should produce no records");

@@ -512,12 +512,53 @@ public class SharePartitionTest {
         assertFalse(result.isCompletedExceptionally());
 
         Mockito.verify(disklessStorageSupport).handleListOffsets(Mockito.any(), Mockito.isNull());
+        Mockito.verify(groupConfigManager).groupConfig(GROUP_ID);
 
         assertEquals(SharePartitionState.ACTIVE, sharePartition.partitionState());
         assertEquals(42L, sharePartition.startOffset());
         assertEquals(42L, sharePartition.endOffset());
         assertEquals(PartitionFactory.DEFAULT_STATE_EPOCH, sharePartition.stateEpoch());
         assertEquals(0, sharePartition.deliveryCompleteCount());
+    }
+
+    @Test
+    public void testMaybeInitializeDisklessSynchronousOffsetResetFailureCompletesFuture() {
+        Persister persister = Mockito.mock(Persister.class);
+        ReadShareGroupStateResult readShareGroupStateResult = Mockito.mock(ReadShareGroupStateResult.class);
+        Mockito.when(readShareGroupStateResult.topicsData()).thenReturn(List.of(
+            new TopicData<>(TOPIC_ID_PARTITION.topicId(), List.of(
+                PartitionFactory.newPartitionAllData(
+                    0, PartitionFactory.DEFAULT_STATE_EPOCH,
+                    PartitionFactory.UNINITIALIZED_START_OFFSET,
+                    PartitionFactory.DEFAULT_ERROR_CODE,
+                    PartitionFactory.DEFAULT_ERR_MESSAGE,
+                    List.of())))));
+        Mockito.when(persister.readState(Mockito.any()))
+            .thenReturn(CompletableFuture.completedFuture(readShareGroupStateResult));
+
+        GroupConfigManager groupConfigManager = Mockito.mock(GroupConfigManager.class);
+        Mockito.when(groupConfigManager.groupConfig(GROUP_ID))
+            .thenThrow(new IllegalStateException("group config unavailable"));
+
+        ReplicaManager replicaManager = Mockito.mock(ReplicaManager.class);
+        DisklessStorageReplicaManagerSupport disklessStorageSupport = Mockito.mock(DisklessStorageReplicaManagerSupport.class);
+        Mockito.when(replicaManager.disklessStorageSupport()).thenReturn(disklessStorageSupport);
+        Mockito.when(disklessStorageSupport.isDisklessStorageTopic(TOPIC_ID_PARTITION.topic())).thenReturn(true);
+
+        SharePartition sharePartition = SharePartitionBuilder.builder()
+            .withPersister(persister)
+            .withGroupConfigManager(groupConfigManager)
+            .withReplicaManager(replicaManager)
+            .build();
+
+        CompletableFuture<Void> result = sharePartition.maybeInitialize();
+
+        assertTrue(result.isDone());
+        assertTrue(result.isCompletedExceptionally());
+        assertFutureThrows(IllegalStateException.class, result);
+        assertEquals(SharePartitionState.FAILED, sharePartition.partitionState());
+        Mockito.verify(groupConfigManager).groupConfig(GROUP_ID);
+        Mockito.verify(disklessStorageSupport, Mockito.never()).handleListOffsets(Mockito.any(), Mockito.any());
     }
 
     @Test

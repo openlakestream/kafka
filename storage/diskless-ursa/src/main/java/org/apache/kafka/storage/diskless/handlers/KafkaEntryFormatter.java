@@ -16,10 +16,10 @@
  */
 package org.apache.kafka.storage.diskless.handlers;
 
-import org.apache.kafka.common.record.ControlRecordType;
-import org.apache.kafka.common.record.MemoryRecords;
-import org.apache.kafka.common.record.Record;
-import org.apache.kafka.common.record.RecordBatch;
+import org.apache.kafka.common.record.internal.ControlRecordType;
+import org.apache.kafka.common.record.internal.MemoryRecords;
+import org.apache.kafka.common.record.internal.Record;
+import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.storage.diskless.handlers.RecordAnalyzer.RecordAnalysisResult;
 
 import org.apache.pulsar.common.api.proto.MarkerType;

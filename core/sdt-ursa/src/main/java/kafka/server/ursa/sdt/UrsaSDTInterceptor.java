@@ -21,7 +21,7 @@ import kafka.cluster.Partition;
 import kafka.server.KafkaConfig;
 import kafka.server.ReplicaManagerInterceptor;
 
-import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.metadata.ConfigRepository;
 import org.apache.kafka.server.config.ServerLogConfigs;
 import org.apache.kafka.storage.internals.log.LogAppendInfo;

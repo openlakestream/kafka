@@ -16,8 +16,12 @@
  */
 package org.apache.kafka.storage.diskless.handlers;
 
+import org.apache.kafka.storage.diskless.OxiaServiceUrl;
+
 import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.apache.pulsar.broker.ServiceConfiguration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -26,17 +30,21 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 import io.opentelemetry.sdk.OpenTelemetrySdk;
 import io.opentelemetry.sdk.autoconfigure.AutoConfiguredOpenTelemetrySdk;
 import io.oxia.client.api.AsyncOxiaClient;
 import io.streamnative.ursa.mledger.PersistentStorageWalManagedLedgerStorage;
+import io.streamnative.ursa.mledger.StorageWalManagedLedgerFactory;
 
 /**
  * Holds a {@link ManagedLedgerFactory} instance backed by Ursa's StorageWalManagedLedger.
  */
 final class KafkaManagedLedgerFactoryHolder implements Closeable {
+
+    private static final Logger log = LoggerFactory.getLogger(KafkaManagedLedgerFactoryHolder.class);
+    private static final long OXIA_CONNECT_TIMEOUT_SECONDS = 10;
 
     public static final String EXTERNAL_READER_FACTORY_CLASS_PROP = "externalReaderFactoryClass";
     public static final String LEGACY_SYSTEM_EXTERNAL_READER_FACTORY_CLASS_PROP = "ursa.externalReaderFactoryClass";
@@ -49,17 +57,25 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
     private static final String SERVICE_NAME = "kafka-diskless-storage";
 
     private final ManagedLedgerFactory managedLedgerFactory;
+    private final StorageWalManagedLedgerFactory topicConfigManagedLedgerFactory;
     private final PersistentStorageWalManagedLedgerStorage managedLedgerStorage;
     private final AsyncOxiaClient oxiaClient;
     private final OpenTelemetrySdk openTelemetrySdk;
-    private final Map<String, Map<String, String>> dummyTopicConfigs = new ConcurrentHashMap<>();
 
-    private KafkaManagedLedgerFactoryHolder(
+    KafkaManagedLedgerFactoryHolder(
             ManagedLedgerFactory managedLedgerFactory,
             PersistentStorageWalManagedLedgerStorage managedLedgerStorage,
             AsyncOxiaClient oxiaClient,
             OpenTelemetrySdk openTelemetrySdk) {
         this.managedLedgerFactory = managedLedgerFactory;
+        if (managedLedgerFactory instanceof StorageWalManagedLedgerFactory storageWalManagedLedgerFactory) {
+            this.topicConfigManagedLedgerFactory = storageWalManagedLedgerFactory;
+        } else {
+            this.topicConfigManagedLedgerFactory = null;
+            log.warn("Topic config update is not allowed because managed ledger factory {} is not a "
+                            + "StorageWalManagedLedgerFactory; topic config update and delete calls will be skipped",
+                    managedLedgerFactory.getClass().getName());
+        }
         this.managedLedgerStorage = managedLedgerStorage;
         this.oxiaClient = oxiaClient;
         this.openTelemetrySdk = openTelemetrySdk;
@@ -74,19 +90,17 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
     }
 
     CompletableFuture<Void> asyncUpdateTopicConfig(String mlName, Map<String, String> topicConfig) {
-        // TODO: Delegate to StorageWalManagedLedgerFactory.asyncUpdateTopicConfig once the Ursa change is released.
-        dummyTopicConfigs.put(mlName, Map.copyOf(topicConfig));
-        return CompletableFuture.completedFuture(null);
+        if (topicConfigManagedLedgerFactory == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return topicConfigManagedLedgerFactory.asyncUpdateTopicConfig(mlName, topicConfig);
     }
 
     CompletableFuture<Void> asyncDeleteTopicConfig(String mlName) {
-        // TODO: Delegate to StorageWalManagedLedgerFactory.asyncDeleteTopicConfig once the Ursa change is released.
-        dummyTopicConfigs.remove(mlName);
-        return CompletableFuture.completedFuture(null);
-    }
-
-    Map<String, String> dummyTopicConfig(String mlName) {
-        return dummyTopicConfigs.getOrDefault(mlName, Map.of());
+        if (topicConfigManagedLedgerFactory == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return topicConfigManagedLedgerFactory.asyncDeleteTopicConfig(mlName);
     }
 
     static ServiceConfiguration createServiceConfiguration(UrsaStorageConfig config) {
@@ -101,6 +115,8 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
 
     static KafkaManagedLedgerFactoryHolder create(UrsaStorageConfig config) throws Exception {
         PersistentStorageWalManagedLedgerStorage managedLedgerStorage = null;
+        AsyncOxiaClient oxiaClient = null;
+        CompletableFuture<AsyncOxiaClient> oxiaClientFuture = null;
         OpenTelemetrySdk openTelemetrySdk = null;
 
         try {
@@ -110,12 +126,10 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
             ManagedLedgerFactory managedLedgerFactory =
                     managedLedgerStorage.getDefaultStorageClass().getManagedLedgerFactory();
 
-            AsyncOxiaClient oxiaClient = managedLedgerStorage.getUrsaStorage() != null
-                    ? managedLedgerStorage.getUrsaStorage().getOxiaClient()
-                    : null;
-            if (oxiaClient == null) {
-                throw new IllegalStateException("UrsaStorage oxia client is not initialized");
-            }
+            // Ursa main no longer exposes its internal Oxia client. This client is owned by this holder and
+            // remains available to Kafka's producer-state integration.
+            oxiaClientFuture = new OxiaServiceUrl(config.getUrsaOxiaServiceUrl()).client();
+            oxiaClient = oxiaClientFuture.get(OXIA_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
 
             return new KafkaManagedLedgerFactoryHolder(
                     managedLedgerFactory, managedLedgerStorage, oxiaClient, openTelemetrySdk);
@@ -126,10 +140,35 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
                 }
             } catch (Exception ignored) {
             }
+            closeOxiaClientAfterFailedCreate(oxiaClient, oxiaClientFuture, e);
             if (openTelemetrySdk != null) {
                 openTelemetrySdk.close();
             }
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             throw e;
+        }
+    }
+
+    static void closeOxiaClientAfterFailedCreate(
+            AsyncOxiaClient oxiaClient,
+            CompletableFuture<AsyncOxiaClient> oxiaClientFuture,
+            Exception createFailure) {
+        if (oxiaClient != null) {
+            try {
+                oxiaClient.close();
+            } catch (Exception closeFailure) {
+                createFailure.addSuppressed(closeFailure);
+            }
+        } else if (oxiaClientFuture != null) {
+            oxiaClientFuture.thenAccept(client -> {
+                try {
+                    client.close();
+                } catch (Exception closeFailure) {
+                    log.warn("Failed to close Oxia client that completed after holder creation failed", closeFailure);
+                }
+            });
         }
     }
 
@@ -261,16 +300,38 @@ final class KafkaManagedLedgerFactoryHolder implements Closeable {
 
     @Override
     public void close() throws IOException {
+        IOException failure = null;
         try {
             if (managedLedgerStorage != null) {
                 managedLedgerStorage.close();
             }
         } catch (Exception e) {
-            throw new IOException(e);
-        } finally {
+            failure = new IOException(e);
+        }
+        try {
+            if (oxiaClient != null) {
+                oxiaClient.close();
+            }
+        } catch (Exception e) {
+            if (failure == null) {
+                failure = new IOException(e);
+            } else {
+                failure.addSuppressed(e);
+            }
+        }
+        try {
             if (openTelemetrySdk != null) {
                 openTelemetrySdk.close();
             }
+        } catch (Exception e) {
+            if (failure == null) {
+                failure = new IOException(e);
+            } else {
+                failure.addSuppressed(e);
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 }

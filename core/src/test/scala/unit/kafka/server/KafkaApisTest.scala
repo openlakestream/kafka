@@ -106,7 +106,7 @@ import org.apache.kafka.server.share.context.{FinalContext, ShareSessionContext}
 import org.apache.kafka.server.share.session.{ShareSession, ShareSessionKey}
 import org.apache.kafka.server.storage.log.{FetchParams, FetchPartitionData}
 import org.apache.kafka.server.util.ServerTestUtils
-import org.apache.kafka.server.util.{FutureUtils, MockTime}
+import org.apache.kafka.server.util.MockTime
 import org.apache.kafka.storage.diskless.DisklessBrokerSelector
 import org.apache.kafka.storage.internals.log.{AppendOrigin, LogConfig, RecordValidationStats, UnifiedLog}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
@@ -5103,9 +5103,13 @@ class KafkaApisTest extends Logging {
       Optional.empty()))
     val fetchDataBuilder = util.Map.of(tidp.topicPartition(), new FetchRequest.PartitionData(topicId, 0, 0, 1000,
       Optional.empty()))
-    val fetchMetadata = new JFetchMetadata(0, 0)
-    val fetchContext = new FullFetchContext(time, new FetchSessionCacheShard(1000, 100),
-      fetchMetadata, fetchData, true, false)
+    val fetchContext = new FullFetchContext(
+      time,
+      new FetchSessionCacheShard(1000, 100, Int.MaxValue, 0),
+      fetchData,
+      true,
+      false
+    )
     when(fetchManager.newContext(
       any[Short],
       any[JFetchMetadata],

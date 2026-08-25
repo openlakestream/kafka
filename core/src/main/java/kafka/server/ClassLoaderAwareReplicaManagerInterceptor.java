@@ -19,7 +19,7 @@ package kafka.server;
 import kafka.cluster.Partition;
 
 import org.apache.kafka.common.KafkaException;
-import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.utils.KafkaPluginClassLoader;
 import org.apache.kafka.metadata.ConfigRepository;
 import org.apache.kafka.server.util.KafkaPluginClassPaths;

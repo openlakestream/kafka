@@ -17,7 +17,7 @@
 package org.apache.kafka.storage.diskless;
 
 import org.apache.kafka.common.TopicIdPartition;
-import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.requests.ProduceResponse;
 import org.apache.kafka.common.utils.KafkaPluginClassLoader;
@@ -54,7 +54,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DisklessStorageEngineLoaderTest {
 
-    private static final String SERVICE_RESOURCE = "META-INF/services/example.Service";
+    private static final String SHARED_RESOURCE = "shared-resource.txt";
     private static final String PLUGIN_RESOURCE = "plugin-only-resource.txt";
     private static final String TCCL_ENGINE_CLASS = "plugin.TcclDisklessStorageEngine";
     private static final String TCCL_METADATA_STORE_CLASS = "plugin.TcclDisklessMetadataStore";
@@ -64,17 +64,17 @@ class DisklessStorageEngineLoaderTest {
 
     @Test
     void testKafkaPluginClassLoaderUsesChildResourceBeforeParentResource() throws Exception {
-        Path parentDir = writeResource("parent", SERVICE_RESOURCE, "parent.Provider");
-        Path childDir = writeResource("child", SERVICE_RESOURCE, "child.Provider");
+        Path parentDir = writeResource("parent", SHARED_RESOURCE, "parent.Provider");
+        Path childDir = writeResource("child", SHARED_RESOURCE, "child.Provider");
 
         try (URLClassLoader parent = new URLClassLoader(new URL[] {parentDir.toUri().toURL()}, null);
              KafkaPluginClassLoader loader =
                      new KafkaPluginClassLoader(new URL[] {childDir.toUri().toURL()}, parent)) {
-            URL resource = loader.getResource(SERVICE_RESOURCE);
+            URL resource = loader.getResource(SHARED_RESOURCE);
             assertNotNull(resource);
             assertEquals("child.Provider", Files.readString(Path.of(resource.toURI())));
 
-            List<URL> resources = Collections.list(loader.getResources(SERVICE_RESOURCE));
+            List<URL> resources = Collections.list(loader.getResources(SHARED_RESOURCE));
             assertEquals(2, resources.size());
             assertEquals("child.Provider", Files.readString(Path.of(resources.get(0).toURI())));
             assertEquals("parent.Provider", Files.readString(Path.of(resources.get(1).toURI())));
@@ -83,17 +83,17 @@ class DisklessStorageEngineLoaderTest {
 
     @Test
     void testKafkaPluginClassLoaderFallsBackToParentResource() throws Exception {
-        Path parentDir = writeResource("parent", SERVICE_RESOURCE, "parent.Provider");
+        Path parentDir = writeResource("parent", SHARED_RESOURCE, "parent.Provider");
         Path childDir = Files.createDirectory(tempDir.resolve("child"));
 
         try (URLClassLoader parent = new URLClassLoader(new URL[] {parentDir.toUri().toURL()}, null);
              KafkaPluginClassLoader loader =
                      new KafkaPluginClassLoader(new URL[] {childDir.toUri().toURL()}, parent)) {
-            URL resource = loader.getResource(SERVICE_RESOURCE);
+            URL resource = loader.getResource(SHARED_RESOURCE);
             assertNotNull(resource);
             assertEquals("parent.Provider", Files.readString(Path.of(resource.toURI())));
 
-            List<URL> resources = Collections.list(loader.getResources(SERVICE_RESOURCE));
+            List<URL> resources = Collections.list(loader.getResources(SHARED_RESOURCE));
             assertEquals(1, resources.size());
             assertEquals("parent.Provider", Files.readString(Path.of(resources.get(0).toURI())));
         }
@@ -313,7 +313,7 @@ class DisklessStorageEngineLoaderTest {
                 package plugin;
 
                 import org.apache.kafka.common.TopicIdPartition;
-                import org.apache.kafka.common.record.MemoryRecords;
+                import org.apache.kafka.common.record.internal.MemoryRecords;
                 import org.apache.kafka.common.requests.FetchRequest;
                 import org.apache.kafka.common.requests.ProduceResponse;
                 import org.apache.kafka.common.utils.Time;

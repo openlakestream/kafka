@@ -48,7 +48,7 @@ import org.apache.kafka.coordinator.transaction.{AddPartitionsToTxnConfig, Trans
 import org.apache.kafka.image.{LocalReplicaChanges, MetadataImage, TopicsDelta}
 import org.apache.kafka.logger.StateChangeLogger
 import org.apache.kafka.metadata.LeaderConstants.NO_LEADER
-import org.apache.kafka.metadata.{ConfigRepository, MetadataCache}
+import org.apache.kafka.metadata.MetadataCache
 import org.apache.kafka.server.purgatory.DelayedProduce.ProducePartitionStatus
 import org.apache.kafka.server.LogAppendResult.LogAppendSummary
 import org.apache.kafka.server.common.{DirectoryEventHandler, RequestLocal, StopPartition, TransactionVersion}
@@ -678,7 +678,7 @@ class ReplicaManager(val config: KafkaConfig,
                     internalTopicsAllowed: Boolean,
                     origin: AppendOrigin,
                     entriesPerPartition: Map[TopicIdPartition, MemoryRecords],
-                    responseCallback: Map[TopicIdPartition, PartitionResponse] => Unit,
+                    responseCallback: util.Map[TopicIdPartition, PartitionResponse] => Unit,
                     recordValidationStatsCallback: Map[TopicIdPartition, RecordValidationStats] => Unit,
                     requestLocal: RequestLocal,
                     verificationGuards: Map[TopicPartition, VerificationGuard],
@@ -689,9 +689,9 @@ class ReplicaManager(val config: KafkaConfig,
       return
     }
 
-    val responseCallbackOnRequestThread: Map[TopicIdPartition, PartitionResponse] => Unit =
+    val responseCallbackOnRequestThread: util.Map[TopicIdPartition, PartitionResponse] => Unit =
       try {
-        KafkaRequestHandler.wrapAsyncCallback[Map[TopicIdPartition, PartitionResponse]](
+        KafkaRequestHandler.wrapAsyncCallback[util.Map[TopicIdPartition, PartitionResponse]](
           (_, responses) => responseCallback(responses),
           requestLocal
         )
@@ -716,7 +716,8 @@ class ReplicaManager(val config: KafkaConfig,
       }
 
     // Callback wrapper to combine diskless and classic results
-    def classicResponseCallback(classicResult: Map[TopicIdPartition, PartitionResponse]): Unit = {
+    def classicResponseCallback(classicResult: util.Map[TopicIdPartition, PartitionResponse]): Unit = {
+      val classicResultScala = classicResult.asScala
       disklessResponsesFuture.whenComplete { case (result, e) =>
         val disklessResult: Map[TopicIdPartition, PartitionResponse] = if (result != null) result.asScala.toMap else {
           error("Diskless storage append future failed", e)
@@ -727,15 +728,15 @@ class ReplicaManager(val config: KafkaConfig,
 
         // Preserve the original request order (as much as the input Map provides).
         val combinedSeq = requestOrder.map { tp =>
-          tp -> disklessResult.getOrElse(tp, classicResult.getOrElse(tp, new PartitionResponse(Errors.UNKNOWN_SERVER_ERROR)))
+          tp -> disklessResult.getOrElse(tp, classicResultScala.getOrElse(tp, new PartitionResponse(Errors.UNKNOWN_SERVER_ERROR)))
         }
-        responseCallbackOnRequestThread(immutable.ListMap.from(combinedSeq))
+        responseCallbackOnRequestThread(immutable.ListMap.from(combinedSeq).asJava)
       }
     }
 
     // If only diskless entries exist, no need for classic path
     if (classicEntries.isEmpty) {
-      classicResponseCallback(Map.empty)
+      classicResponseCallback(util.Map.of())
       return
     }
 

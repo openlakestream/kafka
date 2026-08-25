@@ -47,7 +47,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -90,7 +89,7 @@ public class UrsaStorageS3MultiBrokerE2ETest extends AbstractUrsaStorageS3MultiB
             String topicName = uniqueTopicName("s3-multi-broker-topic");
             int numRecords = 50;
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 createDisklessTopicWithAdmin(admin, topicName, 1, (short) 1);
                 waitForPartitionLeadership(admin, topicName, 0, null);
             }
@@ -130,7 +129,7 @@ public class UrsaStorageS3MultiBrokerE2ETest extends AbstractUrsaStorageS3MultiB
             int numPartitions = 3;
             int recordsPerPartition = 20;
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 createDisklessTopicWithAdmin(admin, topicName, numPartitions, (short) 1);
 
                 for (int p = 0; p < numPartitions; p++) {
@@ -195,7 +194,7 @@ public class UrsaStorageS3MultiBrokerE2ETest extends AbstractUrsaStorageS3MultiB
             String topicName = uniqueTopicName("s3-metadata-transformer-failover-topic");
             int numRecords = 30;
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 createDisklessTopicWithAdmin(admin, topicName, 1, (short) 1);
                 waitForPartitionLeadership(admin, topicName, 0, null);
             }
@@ -212,7 +211,7 @@ public class UrsaStorageS3MultiBrokerE2ETest extends AbstractUrsaStorageS3MultiB
             }
 
             int originalLeader;
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 originalLeader = leaderId(admin, topicName, 0);
             }
             log.info("Original leader for partition 0: broker {}", originalLeader);
@@ -261,7 +260,7 @@ public class UrsaStorageS3MultiBrokerE2ETest extends AbstractUrsaStorageS3MultiB
             TopicPartition topicPartition;
             TopicIdPartition topicIdPartition;
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 createDisklessTopicWithAdmin(admin, topicName, numPartitions, (short) 1);
                 for (int partition = 0; partition < numPartitions; partition++) {
                     waitForPartitionLeadership(admin, topicName, partition, null);
@@ -287,11 +286,8 @@ public class UrsaStorageS3MultiBrokerE2ETest extends AbstractUrsaStorageS3MultiB
 
             try {
                 String survivingBootstrap = getSurvivingBrokersBootstrap(candidate.brokerToShutdown);
-                Properties adminProps = new Properties();
-                adminProps.putAll(cluster.clientProperties());
-                adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, survivingBootstrap);
-
-                try (Admin survivingAdmin = Admin.create(adminProps)) {
+                try (Admin survivingAdmin = cluster.admin(Map.of(
+                        AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, survivingBootstrap))) {
                     waitForPartitionLeadership(
                             survivingAdmin,
                             topicName,
@@ -330,7 +326,7 @@ public class UrsaStorageS3MultiBrokerE2ETest extends AbstractUrsaStorageS3MultiB
                 allBrokerIds.add(brokerId);
             }
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 createDisklessTopicWithAdmin(admin, topicName, 1, (short) 1);
                 waitForPartitionLeadership(admin, topicName, 0, null);
 
@@ -355,11 +351,8 @@ public class UrsaStorageS3MultiBrokerE2ETest extends AbstractUrsaStorageS3MultiB
 
                 String survivingBootstrap = getSurvivingBrokersBootstrap(originalOwnerBrokerId);
                 int failoverOwnerBrokerId;
-                Properties adminProps = new Properties();
-                adminProps.putAll(cluster.clientProperties());
-                adminProps.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, survivingBootstrap);
-
-                try (Admin survivingAdmin = Admin.create(adminProps)) {
+                try (Admin survivingAdmin = cluster.admin(Map.of(
+                        AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, survivingBootstrap))) {
                     waitForPartitionLeadership(survivingAdmin, topicName, 0, null);
                     failoverOwnerBrokerId = leaderId(survivingAdmin, topicName, 0);
                 }
@@ -376,7 +369,7 @@ public class UrsaStorageS3MultiBrokerE2ETest extends AbstractUrsaStorageS3MultiB
                 cluster.waitForReadyBrokers();
                 waitForAllBrokersRunning();
 
-                try (Admin admin = Admin.create(cluster.clientProperties())) {
+                try (Admin admin = cluster.admin()) {
                     waitForPartitionLeadership(admin, topicName, 0, originalOwnerBrokerId);
                 }
 
@@ -403,7 +396,7 @@ public class UrsaStorageS3MultiBrokerE2ETest extends AbstractUrsaStorageS3MultiB
             int leaderId;
             int nonOwnerBrokerId;
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 createDisklessTopicWithAdmin(admin, topicName, 1, (short) 1);
                 waitForPartitionLeadership(admin, topicName, 0, null);
 
@@ -465,7 +458,7 @@ public class UrsaStorageS3MultiBrokerE2ETest extends AbstractUrsaStorageS3MultiB
             int numPartitions = 3;
             int numRecords = 30;
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 Map<String, String> topicConfigs = new HashMap<>();
                 topicConfigs.put(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true");
 

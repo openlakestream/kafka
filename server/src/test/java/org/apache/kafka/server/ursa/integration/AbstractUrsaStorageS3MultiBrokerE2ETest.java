@@ -270,11 +270,10 @@ abstract class AbstractUrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETes
     }
 
     protected Admin createAdminWithClientId(String bootstrapServers, String clientId) {
-        Properties props = new Properties();
-        props.putAll(cluster.clientProperties());
+        Map<String, Object> props = new HashMap<>();
         props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         props.put(AdminClientConfig.CLIENT_ID_CONFIG, clientId);
-        return Admin.create(props);
+        return cluster.admin(props);
     }
 
     protected void createDisklessTopicWithAdmin(Admin admin, String topicName, int partitions, short replicationFactor)
@@ -556,7 +555,7 @@ abstract class AbstractUrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETes
             TopicPartition topicPartition,
             int partition
     ) throws Exception {
-        try (Admin admin = Admin.create(cluster.clientProperties())) {
+        try (Admin admin = cluster.admin()) {
             createDisklessTopicWithAdmin(admin, topicName, 1, (short) 1);
             waitForPartitionLeadership(admin, topicName, partition, null);
 
