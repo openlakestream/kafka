@@ -113,9 +113,37 @@ ext {
 
   commitId = determineCommitId()
 
-  ursaStorageVersion = '4.2.0.10'
-  oxiaClientVersion = '0.7.4'
+  ursaStorageVersion = '5.0.0-M1-SNAPSHOT'
+  ursaPulsarVersion = '4.2.1.11'
+  ursaOpenTelemetryVersion = '1.62.0'
+  oxiaClientVersion = '0.9.4'
   hessianLiteVersion = '4.0.4'
+
+  // The SDT and diskless storage modules are packaged into one child-first plugin classpath.
+  // Resolve shared libraries to one version so older jars cannot shadow the latest Oxia runtime.
+  ursaPluginAlignedDependencies = [
+    "io.github.oxia-db:oxia-client:$oxiaClientVersion",
+    "io.github.oxia-db:oxia-client-api:$oxiaClientVersion",
+    'io.grpc:grpc-api:1.76.2',
+    'io.grpc:grpc-context:1.76.2',
+    'io.grpc:grpc-core:1.76.2',
+    'io.grpc:grpc-googleapis:1.76.2',
+    'io.grpc:grpc-grpclb:1.76.2',
+    'io.grpc:grpc-inprocess:1.76.2',
+    'io.grpc:grpc-netty-shaded:1.76.2',
+    'io.grpc:grpc-opentelemetry:1.76.2',
+    'io.grpc:grpc-protobuf:1.76.2',
+    'io.grpc:grpc-protobuf-lite:1.76.2',
+    'io.grpc:grpc-rls:1.76.2',
+    'io.grpc:grpc-services:1.76.2',
+    'io.grpc:grpc-stub:1.76.2',
+    'io.grpc:grpc-util:1.76.2',
+    'com.google.protobuf:protobuf-java:4.34.0',
+    'com.fasterxml.jackson.dataformat:jackson-dataformat-csv:2.21.5',
+    'com.fasterxml.jackson.datatype:jackson-datatype-jdk8:2.21.5',
+    'com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.21.5',
+    'com.fasterxml.jackson.module:jackson-module-parameter-names:2.21.5'
+  ]
 
   // Closure to exclude ursa-storage and pulsar dependencies from test classpath.
   // These dependencies significantly slow down ClassGraph.scan() during plugin discovery
@@ -124,7 +152,10 @@ ext {
     configuration.exclude group: 'io.streamnative', module: 'ursa-storage-core'
     configuration.exclude group: 'io.streamnative', module: 'ursa-storage-common'
     configuration.exclude group: 'io.streamnative', module: 'ursa-storage-lakehouse'
+    configuration.exclude group: 'io.streamnative', module: 'ursa-storage-lakestream'
+    configuration.exclude group: 'io.streamnative', module: 'ursa-storage-materialization'
     configuration.exclude group: 'io.streamnative', module: 'ursa-storage-ml'
+    configuration.exclude group: 'io.streamnative', module: 'lakestream-api'
     configuration.exclude group: 'io.streamnative', module: 'pulsar-broker-common'
     configuration.exclude group: 'io.streamnative', module: 'pulsar-common'
     configuration.exclude group: 'io.streamnative', module: 'pulsar-metadata'
@@ -195,7 +226,13 @@ ext {
 allprojects {
 
   repositories {
-    mavenLocal()
+    mavenLocal {
+      // SpotBugs publishes a POM-packaged module alongside its executable JAR. If a local
+      // Maven repository contains only the POM, Gradle can omit the engine JAR.
+      content {
+        excludeGroup 'com.github.spotbugs'
+      }
+    }
     mavenCentral()
 
     // Resolve StreamNative snapshots from GitHub Packages (used by storage module).
@@ -240,6 +277,7 @@ allprojects {
           libs.scalaLibrary,
           libs.scalaReflect,
           libs.jacksonAnnotations,
+          libs.jacksonDataformatYaml,
           libs.commonsLang,
 
           // Force log4j2 version to avoid conflicts with transitive dependencies from bookkeeper
@@ -273,16 +311,16 @@ allprojects {
           'org.apache.bookkeeper:bookkeeper-tools-framework:4.17.3',
           'org.apache.bookkeeper:http-server:4.17.3',
 
-          'io.opentelemetry:opentelemetry-api:1.56.0',
-          'io.opentelemetry:opentelemetry-common:1.56.0',
-          'io.opentelemetry:opentelemetry-context:1.56.0',
-          'io.opentelemetry:opentelemetry-sdk:1.56.0',
-          'io.opentelemetry:opentelemetry-sdk-common:1.56.0',
-          'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:1.56.0',
-          'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:1.56.0',
-          'io.opentelemetry:opentelemetry-sdk-logs:1.56.0',
-          'io.opentelemetry:opentelemetry-sdk-metrics:1.56.0',
-          'io.opentelemetry:opentelemetry-sdk-trace:1.56.0',
+          "io.opentelemetry:opentelemetry-api:$ursaOpenTelemetryVersion",
+          "io.opentelemetry:opentelemetry-common:$ursaOpenTelemetryVersion",
+          "io.opentelemetry:opentelemetry-context:$ursaOpenTelemetryVersion",
+          "io.opentelemetry:opentelemetry-sdk:$ursaOpenTelemetryVersion",
+          "io.opentelemetry:opentelemetry-sdk-common:$ursaOpenTelemetryVersion",
+          "io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:$ursaOpenTelemetryVersion",
+          "io.opentelemetry:opentelemetry-sdk-extension-autoconfigure-spi:$ursaOpenTelemetryVersion",
+          "io.opentelemetry:opentelemetry-sdk-logs:$ursaOpenTelemetryVersion",
+          "io.opentelemetry:opentelemetry-sdk-metrics:$ursaOpenTelemetryVersion",
+          "io.opentelemetry:opentelemetry-sdk-trace:$ursaOpenTelemetryVersion",
 
           // Avoid multiple versions of the same jar being bundled in ./libs.
           'com.google.errorprone:error_prone_annotations:2.45.0'
@@ -1128,7 +1166,7 @@ project(':server') {
     testImplementation 'org.testcontainers:localstack:1.21.4'
     testImplementation 'org.awaitility:awaitility:4.2.0'
     // Needed by `PulsarStorageConfig` (depends on `PulsarConfiguration` interface).
-    testImplementation "io.streamnative:pulsar-broker-common:$ursaStorageVersion"
+    testImplementation "io.streamnative:pulsar-broker-common:$ursaPulsarVersion"
     testImplementation("io.streamnative:ursa-storage-core:$ursaStorageVersion") {
       exclude group: 'io.streamnative', module: 'pulsar-broker'
       exclude group: 'io.streamnative', module: 'pulsar-client-original'
@@ -1624,6 +1662,10 @@ project(':core:core-sdt-ursa') {
     archivesName = "kafka-core-sdt-ursa"
   }
 
+  configurations.configureEach {
+    resolutionStrategy.force(*ursaPluginAlignedDependencies)
+  }
+
   dependencies {
     implementation project(':core')
     implementation project(':metadata')
@@ -1642,7 +1684,7 @@ project(':core:core-sdt-ursa') {
     implementation "io.github.oxia-db:oxia-client-api:$oxiaClientVersion"
     runtimeOnly "io.github.oxia-db:oxia-client:$oxiaClientVersion"
     runtimeOnly "org.apache.dubbo:hessian-lite:$hessianLiteVersion"
-    runtimeOnly("io.streamnative:pulsar-common:$ursaStorageVersion") {
+    runtimeOnly("io.streamnative:pulsar-common:$ursaPulsarVersion") {
       exclude group: 'io.streamnative', module: 'pulsar-client-original'
       exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
     }
@@ -2810,6 +2852,10 @@ project(':storage:storage-diskless-ursa') {
     archivesName = "kafka-storage-diskless-ursa"
   }
 
+  configurations.configureEach {
+    resolutionStrategy.force(*ursaPluginAlignedDependencies)
+  }
+
   dependencies {
     implementation project(':clients')
     implementation project(':server-common')
@@ -2841,20 +2887,20 @@ project(':storage:storage-diskless-ursa') {
       exclude group: 'io.streamnative', module: 'pulsar-client-original'
       exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
     }
-    implementation("io.streamnative:managed-ledger:$ursaStorageVersion")
-    implementation("io.streamnative:pulsar-broker-common:$ursaStorageVersion") {
+    implementation("io.streamnative:managed-ledger:$ursaPulsarVersion")
+    implementation("io.streamnative:pulsar-broker-common:$ursaPulsarVersion") {
       exclude group: 'io.streamnative', module: 'bouncy-castle-bc'
       exclude group: 'io.streamnative', module: 'pulsar-client-original'
     }
-    implementation("io.streamnative:pulsar-broker:$ursaStorageVersion") {
+    implementation("io.streamnative:pulsar-broker:$ursaPulsarVersion") {
       // Only used for a small set of API types (e.g. ManagedLedgerStorage / BookKeeperClientFactory).
       // Avoid pulling the broker dependency graph (Jetty/Jersey, etc.) into Kafka's binary distribution.
       transitive = false
     }
     implementation "io.github.oxia-db:oxia-client-api:$oxiaClientVersion"
-    implementation 'io.netty:netty-buffer:4.1.115.Final'
-    implementation 'io.opentelemetry:opentelemetry-sdk:1.56.0'
-    implementation 'io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:1.56.0'
+    implementation 'io.netty:netty-buffer:4.1.131.Final'
+    implementation "io.opentelemetry:opentelemetry-sdk:$ursaOpenTelemetryVersion"
+    implementation "io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:$ursaOpenTelemetryVersion"
 
     testImplementation project(':clients').sourceSets.test.output
     testImplementation libs.junitJupiter

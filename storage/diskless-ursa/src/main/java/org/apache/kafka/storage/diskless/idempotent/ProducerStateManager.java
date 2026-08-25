@@ -17,8 +17,8 @@
 package org.apache.kafka.storage.diskless.idempotent;
 
 import org.apache.kafka.common.TopicIdPartition;
-import org.apache.kafka.common.record.MemoryRecords;
-import org.apache.kafka.common.record.RecordBatch;
+import org.apache.kafka.common.record.internal.MemoryRecords;
+import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.storage.diskless.DisklessClientZone;
 import org.apache.kafka.storage.diskless.handlers.KafkaEntryFormatter;
 

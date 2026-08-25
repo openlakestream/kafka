@@ -20,6 +20,7 @@ import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.server.config.ServerLogConfigs;
 import org.apache.kafka.test.TestUtils;
 
+import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,11 +28,64 @@ import org.junit.jupiter.api.Test;
 import java.nio.file.Files;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CompletableFuture;
+
+import io.oxia.client.api.AsyncOxiaClient;
+import io.streamnative.ursa.mledger.StorageWalManagedLedgerFactory;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class KafkaManagedLedgerFactoryHolderTest {
+
+    @Test
+    void testTopicConfigOperationsAreSkippedForUnsupportedManagedLedgerFactory() throws Exception {
+        ManagedLedgerFactory managedLedgerFactory = mock(ManagedLedgerFactory.class);
+
+        KafkaManagedLedgerFactoryHolder holder = new KafkaManagedLedgerFactoryHolder(
+                managedLedgerFactory, null, null, null);
+
+        assertSame(managedLedgerFactory, holder.factory());
+        holder.asyncUpdateTopicConfig("public/default/persistent/topic-partition-0", Map.of("key", "value"))
+                .get();
+        holder.asyncDeleteTopicConfig("public/default/persistent/topic-partition-0").get();
+        verifyNoInteractions(managedLedgerFactory);
+    }
+
+    @Test
+    void testTopicConfigOperationsDelegateToStorageWalManagedLedgerFactory() {
+        StorageWalManagedLedgerFactory managedLedgerFactory = mock(StorageWalManagedLedgerFactory.class);
+        String mlName = "public/default/persistent/topic-partition-0";
+        Map<String, String> topicConfig = Map.of("key", "value");
+        var updateFuture = CompletableFuture.<Void>completedFuture(null);
+        var deleteFuture = CompletableFuture.<Void>completedFuture(null);
+        when(managedLedgerFactory.asyncUpdateTopicConfig(mlName, topicConfig)).thenReturn(updateFuture);
+        when(managedLedgerFactory.asyncDeleteTopicConfig(mlName)).thenReturn(deleteFuture);
+        KafkaManagedLedgerFactoryHolder holder = new KafkaManagedLedgerFactoryHolder(
+                managedLedgerFactory, null, null, null);
+
+        assertSame(updateFuture, holder.asyncUpdateTopicConfig(mlName, topicConfig));
+        assertSame(deleteFuture, holder.asyncDeleteTopicConfig(mlName));
+        verify(managedLedgerFactory).asyncUpdateTopicConfig(mlName, topicConfig);
+        verify(managedLedgerFactory).asyncDeleteTopicConfig(mlName);
+    }
+
+    @Test
+    void testLateOxiaClientIsClosedAfterHolderCreationFails() throws Exception {
+        CompletableFuture<AsyncOxiaClient> clientFuture = new CompletableFuture<>();
+        AsyncOxiaClient client = mock(AsyncOxiaClient.class);
+
+        KafkaManagedLedgerFactoryHolder.closeOxiaClientAfterFailedCreate(
+                null, clientFuture, new Exception("creation failed"));
+        clientFuture.complete(client);
+
+        verify(client).close();
+    }
 
     @BeforeEach
     void setUp() {

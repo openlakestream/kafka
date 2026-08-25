@@ -218,7 +218,7 @@ public abstract class UrsaStorageE2ETestBase {
             int partitions,
             short replicationFactor,
             Map<String, String> additionalConfigs) throws Exception {
-        try (Admin admin = Admin.create(cluster.clientProperties())) {
+        try (Admin admin = cluster.admin()) {
             Map<String, String> topicConfigs = new HashMap<>();
             topicConfigs.put(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true");
             topicConfigs.putAll(additionalConfigs);
@@ -233,7 +233,7 @@ public abstract class UrsaStorageE2ETestBase {
      * Waits for a topic to be ready with the expected number of partitions.
      */
     protected void waitForTopicReady(KafkaClusterTestKit cluster, String topicName, int partitions) throws Exception {
-        try (Admin admin = Admin.create(cluster.clientProperties())) {
+        try (Admin admin = cluster.admin()) {
             waitForTopicReady(admin, topicName, partitions);
         }
     }

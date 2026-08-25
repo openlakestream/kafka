@@ -82,7 +82,7 @@ public class UrsaStorageS3MultiBrokerZoneAwareE2ETest extends AbstractUrsaStorag
             int zoneAOwnerBrokerId;
             int zoneBOwnerBrokerId;
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 createDisklessTopicWithAdmin(admin, topicName, 1, (short) 1);
                 waitForPartitionLeadership(admin, topicName, partition, null);
 

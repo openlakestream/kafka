@@ -28,7 +28,7 @@ import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.message.ShareAcknowledgeResponseData;
 import org.apache.kafka.common.message.ShareFetchResponseData.PartitionData;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.requests.ShareRequestMetadata;
 import org.apache.kafka.common.utils.ImplicitLinkedHashCollection;
@@ -57,7 +57,6 @@ import org.apache.kafka.server.share.session.ShareSessionCache;
 import org.apache.kafka.server.share.session.ShareSessionKey;
 import org.apache.kafka.server.storage.log.FetchParams;
 import org.apache.kafka.server.storage.log.FetchPartitionData;
-import org.apache.kafka.server.util.FutureUtils;
 import org.apache.kafka.server.util.timer.SystemTimer;
 import org.apache.kafka.server.util.timer.SystemTimerReaper;
 import org.apache.kafka.server.util.timer.Timer;
@@ -796,7 +795,19 @@ public class SharePartitionManager implements AutoCloseable {
                 Optional.empty()
             )));
 
-            disklessStorageSupport.handleFetch(shareFetch.fetchParams(), fetchInfos, null).whenComplete((fetchResult, fetchThrowable) -> {
+            CompletableFuture<Map<TopicIdPartition, FetchPartitionData>> fetchFuture;
+            try {
+                fetchFuture = disklessStorageSupport.handleFetch(shareFetch.fetchParams(), fetchInfos, null);
+            } catch (Exception e) {
+                try {
+                    handleDisklessFetchException(shareFetch, topicPartitionFetchOffsets.keySet(), e);
+                } finally {
+                    delayedShareFetch.releasePartitionLocks(topicPartitionFetchOffsets.keySet());
+                }
+                return;
+            }
+
+            fetchFuture.whenComplete((fetchResult, fetchThrowable) -> {
                 try {
                     if (fetchThrowable != null) {
                         handleDisklessFetchException(shareFetch, topicPartitionFetchOffsets.keySet(), fetchThrowable);

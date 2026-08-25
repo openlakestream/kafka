@@ -106,7 +106,7 @@ public class UrsaSDTInterceptorE2ETest {
         cluster.format();
         cluster.startup();
         cluster.waitForReadyBrokers();
-        admin = Admin.create(cluster.clientProperties());
+        admin = cluster.admin();
         oxiaClient = OxiaClientBuilder.create(oxiaContainer.getServiceAddress())
             .namespace("default")
             .asyncClient()

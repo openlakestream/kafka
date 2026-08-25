@@ -439,7 +439,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
             waitForTopicReady(cluster, topicName, 1);
 
             // Test EARLIEST and LATEST on empty topic
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 ListOffsetsResult.ListOffsetsResultInfo earliestEmpty =
                         admin.listOffsets(Map.of(tp, OffsetSpec.earliest())).all().get().get(tp);
                 assertEquals(0L, earliestEmpty.offset(), "EARLIEST on empty topic should be 0");
@@ -463,7 +463,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
             }
 
             // Test listOffsets with Admin client
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 ListOffsetsResult.ListOffsetsResultInfo earliest =
                         admin.listOffsets(Map.of(tp, OffsetSpec.earliest())).all().get().get(tp);
                 assertEquals(0L, earliest.offset(), "EARLIEST should return offset 0");
@@ -513,7 +513,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
                 producer.flush();
             }
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 ListOffsetsResult.ListOffsetsResultInfo earliest =
                         admin.listOffsets(Map.of(tp, OffsetSpec.earliest())).all().get().get(tp);
                 ListOffsetsResult.ListOffsetsResultInfo latest =
@@ -574,7 +574,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
             produceRecords(cluster.bootstrapServers(), topicName, numRecords);
 
             Uuid topicId;
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 topicId = admin.describeTopics(Collections.singleton(topicName))
                         .allTopicNames()
                         .get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -598,7 +598,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
                     broker.replicaManager().disklessStorageSupport().getUrsaState(),
                     new TopicIdPartition(topicId, topicPartition));
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 long earliestOffset = admin.listOffsets(Map.of(topicPartition, OffsetSpec.earliest()))
                         .all()
                         .get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -624,7 +624,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
         void testTopicDefaultDisabledKeepsImplicitTopicOnClassicStorage() throws Exception {
             String topicName = uniqueTopicName("classic-default-topic");
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 NewTopic classicTopic = new NewTopic(topicName, 1, (short) 1);
                 admin.createTopics(Collections.singleton(classicTopic))
                         .all().get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -657,7 +657,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
             if (initialUrsaStorageEnabled) {
                 createDisklessTopic(cluster, topicName);
             } else {
-                try (Admin admin = Admin.create(cluster.clientProperties())) {
+                try (Admin admin = cluster.admin()) {
                     NewTopic classicTopic = new NewTopic(topicName, 1, (short) 1)
                             .configs(Map.of(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "false"));
                     admin.createTopics(Collections.singleton(classicTopic))
@@ -676,7 +676,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
             waitForTopicReady(cluster, topicName, 1);
 
             ConfigResource topicResource = new ConfigResource(ConfigResource.Type.TOPIC, topicName);
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 setTopicConfig(admin, topicResource, TopicConfig.RETENTION_MS_CONFIG, "60000");
                 waitForUrsaTopicConfig(topicName, Map.of(
                         TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true",
@@ -719,7 +719,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
         }
 
         private void assertCannotAlterUrsaStorageEnable(String topicName, boolean newUrsaStorageEnabled) throws Exception {
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 ConfigResource topicResource = new ConfigResource(ConfigResource.Type.TOPIC, topicName);
                 AlterConfigOp alterUrsaStorageEnableConfig = new AlterConfigOp(
                         new ConfigEntry(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, Boolean.toString(newUrsaStorageEnabled)),
@@ -780,7 +780,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
             }
 
             Uuid topicId;
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 waitForTopicReady(admin, topicName, numPartitions);
                 topicId = admin.describeTopics(Collections.singleton(topicName))
                         .allTopicNames()
@@ -826,7 +826,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
                 streamIds = captureManagedLedgerStreamIds(oxiaClient, topicNames, partitionsPerTopic);
             }
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 admin.deleteTopics(topicNames).all().get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             }
 
@@ -961,7 +961,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
                         .configs(Map.of(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true")));
             }
 
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 admin.createTopics(topicsToCreate).all().get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 for (String topicName : topicNames) {
                     waitForTopicReady(admin, topicName, partitionsPerTopic);

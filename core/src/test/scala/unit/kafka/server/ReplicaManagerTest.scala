@@ -4916,7 +4916,7 @@ class ReplicaManagerTest {
       val leaderTopicsDelta = topicsCreateDelta(localId, true, topicName = topicPartition.topic)
       val leaderMetadataImage = imageFromTopics(leaderTopicsDelta.apply())
       replicaManager.applyDelta(leaderTopicsDelta, leaderMetadataImage)
-      assertEquals(HostedPartition.None, replicaManager.getPartition(topicPartition))
+      assertEquals(new HostedPartition.None[Partition], replicaManager.getPartition(topicPartition))
 
       val removeTopicsDelta = topicsDeleteDelta(leaderMetadataImage.topics())
       val removeMetadataImage = imageFromTopics(removeTopicsDelta.apply())
@@ -4944,7 +4944,7 @@ class ReplicaManagerTest {
       val leaderTopicsDelta = topicsCreateDelta(localId, true, topicName = topicPartition.topic)
       val leaderMetadataImage = imageFromTopics(leaderTopicsDelta.apply())
       replicaManager.applyDelta(leaderTopicsDelta, leaderMetadataImage)
-      assertEquals(HostedPartition.None, replicaManager.getPartition(topicPartition))
+      assertEquals(new HostedPartition.None[Partition], replicaManager.getPartition(topicPartition))
 
       val reassignmentDelta = new TopicsDelta(leaderMetadataImage.topics())
       reassignmentDelta.replay(new PartitionChangeRecord()
@@ -4979,7 +4979,7 @@ class ReplicaManagerTest {
       val leaderTopicsDelta = topicsCreateDelta(localId, true, topicName = topicPartition.topic)
       val leaderMetadataImage = imageFromTopics(leaderTopicsDelta.apply())
       replicaManager.applyDelta(leaderTopicsDelta, leaderMetadataImage)
-      assertEquals(HostedPartition.None, replicaManager.getPartition(topicPartition))
+      assertEquals(new HostedPartition.None[Partition], replicaManager.getPartition(topicPartition))
 
       val followerTopicsDelta = topicsChangeDelta(leaderMetadataImage.topics(), localId, false)
       val followerMetadataImage = imageFromTopics(followerTopicsDelta.apply())
@@ -5009,7 +5009,7 @@ class ReplicaManagerTest {
       val createdImage = imageFromTopics(createDelta.apply())
       replicaManager.applyDelta(createDelta, createdImage)
 
-      assertEquals(HostedPartition.None, replicaManager.getPartition(topicPartition))
+      assertEquals(new HostedPartition.None[Partition], replicaManager.getPartition(topicPartition))
       assertEquals(None, replicaManager.getLog(topicPartition))
     } finally {
       replicaManager.shutdown(checkpointHW = false)
@@ -6562,7 +6562,7 @@ class ReplicaManagerTest {
         internalTopicsAllowed = false,
         origin = AppendOrigin.CLIENT,
         entriesPerPartition = Map(topicIdPartition -> records),
-        responseCallback = responses => result.fire(responses(topicIdPartition))
+        responseCallback = responses => result.fire(responses.get(topicIdPartition))
       )
 
       assertEquals(Errors.NOT_LEADER_OR_FOLLOWER, result.assertFired.error)
@@ -6738,7 +6738,7 @@ class ReplicaManagerTest {
       val followerMetadataImage = imageFromTopics(followerTopicsDelta.apply())
       replicaManager.applyDelta(followerTopicsDelta, followerMetadataImage)
 
-      assertEquals(HostedPartition.None, replicaManager.getPartition(topicPartition))
+      assertEquals(new HostedPartition.None[Partition], replicaManager.getPartition(topicPartition))
       assertEquals(None, yammerGaugeValue[Long](sizeMetricSuffix))
       assertEquals(None, yammerGaugeValue[Long](logStartMetricSuffix))
       assertEquals(None, yammerGaugeValue[Long](logEndMetricSuffix))

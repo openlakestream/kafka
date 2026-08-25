@@ -701,7 +701,8 @@ public class ReplicationControlManager {
             }
             ApiError error;
             try {
-                error = createTopic(context, topic, records, successes, configRecords, describable.contains(topic.name()), request.validateOnly());
+                error = createTopic(context, topic, records, successes, configRecords,
+                    describable.contains(topic.name()), request.validateOnly(), forwarded);
             } catch (ApiException e) {
                 error = ApiError.fromThrowable(e);
             }
@@ -747,7 +748,8 @@ public class ReplicationControlManager {
                                  Map<String, CreatableTopicResult> successes,
                                  List<ApiMessageAndVersion> configRecords,
                                  boolean authorizedToReturnConfigs,
-                                 boolean validateOnly) {
+                                 boolean validateOnly,
+                                 boolean forwarded) {
         Map<String, String> creationConfigs = new HashMap<>(translateCreationConfigs(topic.configs()));
         List<ApiMessageAndVersion> topicConfigRecords = new ArrayList<>(configRecords);
         Map<Integer, PartitionRegistration> newParts = new HashMap<>();
@@ -761,7 +763,8 @@ public class ReplicationControlManager {
             ControllerResult<ApiError> configResult = configurationControl.incrementalAlterConfig(
                 new ConfigResource(TOPIC, topic.name()),
                 Map.of(URSA_STORAGE_ENABLE_CONFIG, new SimpleImmutableEntry<>(SET, Boolean.TRUE.toString())),
-                true);
+                true,
+                forwarded);
             if (configResult.response().isFailure()) {
                 return configResult.response();
             }

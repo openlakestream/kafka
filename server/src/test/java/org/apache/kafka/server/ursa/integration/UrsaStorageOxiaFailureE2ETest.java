@@ -114,7 +114,7 @@ public class UrsaStorageOxiaFailureE2ETest extends UrsaStorageE2ETestBase {
                 .pauseContainerCmd(oxiaContainer.getContainerId()).exec();
         try {
             String topicName = "oxia-paused-diskless-" + System.currentTimeMillis();
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 NewTopic newTopic = new NewTopic(topicName, 1, (short) 1)
                         .configs(Map.of(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true"));
 
@@ -141,7 +141,7 @@ public class UrsaStorageOxiaFailureE2ETest extends UrsaStorageE2ETestBase {
                 .pauseContainerCmd(oxiaContainer.getContainerId()).exec();
         try {
             String topicName = "oxia-paused-normal-" + System.currentTimeMillis();
-            try (Admin admin = Admin.create(cluster.clientProperties())) {
+            try (Admin admin = cluster.admin()) {
                 NewTopic newTopic = new NewTopic(topicName, 1, (short) 1)
                         .configs(Map.of(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "false"));
 
@@ -158,7 +158,7 @@ public class UrsaStorageOxiaFailureE2ETest extends UrsaStorageE2ETestBase {
 
     private static void createAndVerifyTopic(KafkaClusterTestKit kit) throws Exception {
         String warmupTopic = "oxia-warmup-" + System.currentTimeMillis();
-        try (Admin admin = Admin.create(kit.clientProperties())) {
+        try (Admin admin = kit.admin()) {
             NewTopic newTopic = new NewTopic(warmupTopic, 1, (short) 1)
                     .configs(Map.of(TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true"));
             admin.createTopics(Collections.singleton(newTopic))

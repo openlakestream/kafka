@@ -18,7 +18,7 @@ package kafka.server;
 
 import kafka.cluster.Partition;
 
-import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.storage.internals.log.LogAppendInfo;
 
 /**

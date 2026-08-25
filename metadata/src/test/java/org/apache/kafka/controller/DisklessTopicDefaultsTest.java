@@ -74,7 +74,7 @@ public class DisklessTopicDefaultsTest {
 
         ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
         CreatableTopicResult topicResult = ctx.replicationControl.createTopics(requestContext, request,
-            Set.of("diskless-topic-default")).response().topics().find("diskless-topic-default");
+            Set.of("diskless-topic-default"), false).response().topics().find("diskless-topic-default");
         assertNotNull(topicResult);
         assertEquals(NONE.code(), topicResult.errorCode());
         assertEquals(1, topicResult.replicationFactor());
@@ -97,7 +97,7 @@ public class DisklessTopicDefaultsTest {
 
         ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
         ControllerResult<CreateTopicsResponseData> result = ctx.replicationControl.createTopics(requestContext, request,
-            Set.of("diskless-topic-default-rf-3"));
+            Set.of("diskless-topic-default-rf-3"), false);
         CreatableTopicResult topicResult = result.response().topics().find("diskless-topic-default-rf-3");
         assertNotNull(topicResult);
         assertEquals(NONE.code(), topicResult.errorCode());
@@ -126,7 +126,7 @@ public class DisklessTopicDefaultsTest {
 
         ControllerRequestContext requestContext = anonymousContextFor(ApiKeys.CREATE_TOPICS);
         ControllerResult<CreateTopicsResponseData> result = ctx.replicationControl.createTopics(requestContext, request,
-            Set.of("classic-topic-default"));
+            Set.of("classic-topic-default"), false);
         CreatableTopicResult topicResult = result.response().topics().find("classic-topic-default");
         assertNotNull(topicResult);
         assertEquals(NONE.code(), topicResult.errorCode());

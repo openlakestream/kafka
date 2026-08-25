@@ -76,7 +76,6 @@ import org.apache.kafka.server.share.session.ShareSessionKey;
 import org.apache.kafka.server.storage.log.FetchIsolation;
 import org.apache.kafka.server.storage.log.FetchParams;
 import org.apache.kafka.server.storage.log.FetchPartitionData;
-import org.apache.kafka.server.util.FutureUtils;
 import org.apache.kafka.server.util.MockTime;
 import org.apache.kafka.server.util.timer.MockTimer;
 import org.apache.kafka.server.util.timer.SystemTimer;
@@ -1308,6 +1307,48 @@ public class SharePartitionManagerTest {
 
         verify(mockReplicaManager, times(1)).readFromLog(any(), any(), any(ReplicaQuota.class), anyBoolean());
         verify(mockDisklessStorageSupport, times(1)).handleFetch(any(), any(), Mockito.isNull());
+    }
+
+    @Test
+    public void testDisklessFetchSynchronousFailureCompletesRequestAndReleasesLock() {
+        String groupId = "grp";
+        String memberId = Uuid.randomUuid().toString();
+        TopicIdPartition disklessTp = new TopicIdPartition(
+            Uuid.randomUuid(), new TopicPartition("diskless-topic", 0));
+
+        SharePartition sharePartition = mock(SharePartition.class);
+        when(sharePartition.maybeInitialize()).thenReturn(CompletableFuture.completedFuture(null));
+        when(sharePartition.maybeAcquireFetchLock(any())).thenReturn(true);
+        when(sharePartition.canAcquireRecords()).thenReturn(true);
+        when(sharePartition.nextFetchOffset()).thenReturn(0L);
+        SharePartitionCache partitionCache = new SharePartitionCache();
+        partitionCache.put(new SharePartitionKey(groupId, disklessTp), sharePartition);
+
+        DisklessStorageReplicaManagerSupport mockDisklessStorageSupport = mock(DisklessStorageReplicaManagerSupport.class);
+        when(mockReplicaManager.disklessStorageSupport()).thenReturn(mockDisklessStorageSupport);
+        when(mockDisklessStorageSupport.partitionFetchInfos(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Map<TopicIdPartition, FetchRequest.PartitionData> fetchInfos =
+                (Map<TopicIdPartition, FetchRequest.PartitionData>) invocation.getArgument(0);
+            return new DisklessStorageReplicaManagerSupport.PartitionedEntries<>(
+                new LinkedHashMap<>(fetchInfos), Map.of());
+        });
+        doThrow(new RuntimeException("diskless fetch failed"))
+            .when(mockDisklessStorageSupport).handleFetch(any(), any(), Mockito.isNull());
+
+        sharePartitionManager = SharePartitionManagerBuilder.builder()
+            .withPartitionCache(partitionCache)
+            .withReplicaManager(mockReplicaManager)
+            .withTimer(systemTimerReaper())
+            .withBrokerTopicStats(brokerTopicStats)
+            .build();
+
+        CompletableFuture<Map<TopicIdPartition, PartitionData>> future = sharePartitionManager.fetchMessages(
+            groupId, memberId, FETCH_PARAMS, BATCH_OPTIMIZED, 1, MAX_FETCH_RECORDS, BATCH_SIZE, List.of(disklessTp));
+
+        assertTrue(future.isDone());
+        validateShareFetchFutureException(future, disklessTp, Errors.UNKNOWN_SERVER_ERROR, "diskless fetch failed");
+        verify(sharePartition).releaseFetchLock(any(Uuid.class));
     }
 
     @Test
