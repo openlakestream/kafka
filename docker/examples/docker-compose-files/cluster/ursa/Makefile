@@ -20,9 +20,12 @@ COMPOSE := $(DOCKER) compose
 # this list in sync with ALL_PROFILES in committer-tools/docker_cluster_smoke.py
 # and compose_all() in run-lakehouse-demo.sh.
 ALL_PROFILES := --profile lakehouse --profile demo --profile share-demo --profile lakehouse-demo --profile tools
-# The compaction/Iceberg services (polaris, polaris-setup, compactor) are not
-# part of the default stack; they need the locally built compactor image.
+# Polaris and its setup job are not part of the default stack. The compactor is:
+# without it the WAL delete watermark never advances and Kafka retention frees no
+# storage. The `lakehouse` profile adds the Iceberg catalog, and
+# URSA_MATERIALIZATION_ENABLED makes the compactor write the external table too.
 LAKEHOUSE_PROFILE := --profile lakehouse
+LAKEHOUSE_ENV := URSA_MATERIALIZATION_ENABLED=true
 
 TOPIC ?= test-diskless
 PARTITIONS ?= 12
@@ -33,7 +36,8 @@ help:
 	@echo ""
 	@echo "  make build-images     - Build the Kafka and Ursa compactor images"
 	@echo "                          (URSA_STORAGE_DIR=/path/to/ursa-storage)"
-	@echo "  make up               - Start the core cluster (Oxia, MinIO, 3 brokers)"
+	@echo "  make up               - Start the core cluster (Oxia, MinIO, 3 brokers,"
+	@echo "                          compactor); needs both locally built images"
 	@echo "  make down             - Stop all services"
 	@echo "  make destroy          - Stop all services and remove volumes"
 	@echo "  make logs             - Follow kafka-1 logs"
@@ -65,7 +69,8 @@ up:
 	@$(COMPOSE) exec kafka-1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:19092 --list 2>/dev/null || echo "Cluster still starting..."
 	@echo ""
 	@echo "Cluster started. Use 'make create-topic' to create a diskless topic."
-	@echo "For compaction and Iceberg, add: docker compose --profile lakehouse up -d"
+	@echo "For the Iceberg catalog, add:"
+	@echo "  URSA_MATERIALIZATION_ENABLED=true docker compose --profile lakehouse up -d"
 
 .PHONY: down
 down:
@@ -81,7 +86,7 @@ logs:
 
 .PHONY: compaction-logs
 compaction-logs:
-	$(COMPOSE) $(LAKEHOUSE_PROFILE) logs -f compactor
+	$(COMPOSE) logs -f compactor
 
 .PHONY: ps
 ps:
@@ -162,4 +167,4 @@ lakehouse-demo:
 
 .PHONY: duckdb
 duckdb:
-	$(COMPOSE) $(LAKEHOUSE_PROFILE) --profile tools run --rm duckdb
+	$(LAKEHOUSE_ENV) $(COMPOSE) $(LAKEHOUSE_PROFILE) --profile tools run --rm duckdb

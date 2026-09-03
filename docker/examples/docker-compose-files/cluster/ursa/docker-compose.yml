@@ -186,9 +186,12 @@ services:
       - ./lakehouse/polaris-setup.sh:/opt/ursa-demo/polaris-setup.sh:ro
     entrypoint: ["/bin/sh", "/opt/ursa-demo/polaris-setup.sh"]
 
+  # Part of the core stack, not the `lakehouse` profile: without compaction the
+  # WAL delete watermark never advances, so Kafka retention frees no storage.
+  # `lakehouse` adds Polaris and, with URSA_MATERIALIZATION_ENABLED=true, the
+  # external Iceberg table on top of the compacted objects Kafka already reads.
   compactor:
     image: ${COMPACTOR_IMAGE:-lakestream/compactor:latest}
-    profiles: ["lakehouse"]
     hostname: compactor
     restart: unless-stopped
     depends_on:
@@ -198,8 +201,10 @@ services:
         condition: service_completed_successfully
       polaris-setup:
         condition: service_completed_successfully
+        required: false
     environment:
       OTEL_SDK_DISABLED: "true"
+      URSA_MATERIALIZATION_ENABLED: "${URSA_MATERIALIZATION_ENABLED:-false}"
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_REGION: us-east-1
@@ -591,7 +596,7 @@ services:
           FROM duckdb_tables()
           WHERE database_name = 'lakehouse'
             AND schema_name = 'default'
-            AND table_name LIKE '${DEMO_TOPIC:-ursa-lakehouse-e2e}-topic-id-%'
+            AND table_name = '${DEMO_TOPIC:-ursa-lakehouse-e2e}'
           ORDER BY table_name
           LIMIT 1
         );

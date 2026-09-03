@@ -118,7 +118,20 @@ if [[ -n "${GRADLE_ARGS:-}" ]]; then
     # shellcheck disable=SC2206
     GRADLE_BUILD_ARGS+=(${GRADLE_ARGS})
 fi
-"${GRADLE_BUILD_ARGS[@]}"
+# The tarball's doc generators each run in a forked JVM whose classpath carries
+# slf4j-api without a binding, so every one of them prints the same three-line
+# "StaticLoggerBinder" warning on stderr. Gradle's -q silences its own output but
+# not a child JVM's, so filter out just those lines. stdout goes straight through
+# on fd 3; the rest of stderr, including real build failures, is left intact.
+exec 3>&1
+set +e
+"${GRADLE_BUILD_ARGS[@]}" 2>&1 1>&3 | grep -v '^SLF4J: ' >&2
+gradle_status=${PIPESTATUS[0]}
+set -e
+exec 3>&-
+if [[ ${gradle_status} -ne 0 ]]; then
+    exit "${gradle_status}"
+fi
 
 TARBALL=$(find "${PROJECT_ROOT}/core/build/distributions" -name "kafka_2.13-*.tgz" | head -1)
 if [ -z "$TARBALL" ]; then

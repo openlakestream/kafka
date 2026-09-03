@@ -3,7 +3,9 @@ Diskless Storage Docker Setup
 
 This directory contains the Docker Compose stack for running Kafka with **Diskless/Ursa Storage**. For enabled topics, Ursa is the primary storage layer rather than a tier that sits behind Kafka's local log.
 
-Everything lives in a single `docker-compose.yml`. The default `docker compose up` starts the core cluster — Oxia, MinIO and three brokers — which needs only the Kafka image. The compaction and Iceberg services sit behind the `lakehouse` profile, and every demo workload behind a profile of its own, so none of them start on their own.
+Everything lives in a single `docker-compose.yml`. The default `docker compose up` starts the core cluster — Oxia, MinIO, three brokers and the Ursa compactor — which needs both locally built images. The Iceberg catalog sits behind the `lakehouse` profile, and every demo workload behind a profile of its own, so none of them start on their own.
+
+The compactor is part of the core stack rather than the `lakehouse` profile because compaction is what makes storage reclaimable, not just what feeds the lakehouse. Kafka retention on a diskless topic issues a *soft* trim; WAL objects are physically deleted by a cleaner whose watermark is the oldest un-compacted position across every stream, and only compaction advances that watermark. With no compactor running, `retention.ms` and `retention.bytes` hide records logically and free nothing.
 
 ## Architecture
 
@@ -40,11 +42,12 @@ Core cluster (started by default):
 - **Oxia**: Lakestream catalog, WAL indexes, compaction tasks, and producer state
 - **MinIO**: S3-compatible object storage for the Ursa WAL, the managed compacted objects, and the Iceberg warehouse
 - **Kafka brokers**: 3-node KRaft cluster with diskless storage enabled
+- **Ursa compactor**: standalone container that publishes compaction tasks, decodes the Kafka `MemoryRecords` in the WAL, and writes the managed compacted objects Kafka fetch reads. This is also what lets the WAL be reclaimed, so it runs with or without the lakehouse.
 
 `lakehouse` profile (opt in):
 
-- **Ursa compactor**: standalone container that publishes compaction tasks, decodes the Kafka `MemoryRecords` in the WAL, and writes both the managed compacted objects and an external Iceberg table
 - **Polaris**: Iceberg REST catalog
+- **Ursa compactor, with materialization on**: `URSA_MATERIALIZATION_ENABLED=true` adds a second sink to the same WAL read, registering an external Iceberg table in Polaris, named after the Kafka topic. Compose recreates the compactor when that variable changes.
 - **DuckDB** (`tools` profile): on-demand SQL engine used for queries and for the end-to-end assertion
 
 ```text
@@ -54,14 +57,16 @@ Kafka producer -> Kafka broker -> Ursa WAL (MinIO)
                      Ursa compactor (publishes tasks)
                               |           |
                               v           v
-                    managed objects   Iceberg table
-                                      |     |
+                    managed objects   Iceberg table      <- lakehouse profile,
+                                      |     |               materialization on
                                       v     v
                                   Polaris  MinIO
                                       |
                                       v
                                    DuckDB
 ```
+
+The left branch is the core stack: it is what Kafka fetch reads after compaction and what lets the WAL be reclaimed. The right branch is the opt-in lakehouse.
 
 Classic local-log ingestion is not part of this diskless demo and will use a separate StreamCatalog-based integration.
 
@@ -71,21 +76,22 @@ Classic local-log ingestion is not part of this diskless demo and will use a sep
 - Docker Compose >= 2.20 (the stack uses `depends_on: ... required: false`)
 - Python >= 3.7 (for building the Kafka image)
 - Java >= 17 (for building Kafka)
-- A local `ursa-storage` checkout (only for the compactor image)
+- A local `ursa-storage` checkout (for the compactor image, which the core stack needs)
 
 ## Build the images
 
-Two images are built locally. Everything else is pulled from a public registry at a pinned version.
+Two images are built locally, and the core stack needs both. Everything else is pulled from a public registry at a pinned version.
 
 ```bash
 cd docker/examples/docker-compose-files/cluster/ursa
 
-# Kafka broker image only -> lakestream/kafka:latest
-./build-image.sh
-
 # Both images -> lakestream/kafka:latest and lakestream/compactor:latest
 URSA_STORAGE_DIR=/path/to/ursa-storage ./build-images.sh
 # or: make build-images URSA_STORAGE_DIR=/path/to/ursa-storage
+
+# Kafka broker image only -> lakestream/kafka:latest
+# Enough to rebuild the brokers against an existing compactor image.
+./build-image.sh
 ```
 
 Useful options:
@@ -102,7 +108,7 @@ SKIP_URSA_BUILD=true ./build-images.sh   # reuse the existing compactor package
 ## Quick start
 
 ```bash
-# Start the core cluster: Oxia, MinIO, and 3 brokers
+# Start the core cluster: Oxia, MinIO, 3 brokers, and the compactor
 make up
 
 # Create a diskless topic
@@ -118,11 +124,13 @@ make down
 make destroy
 ```
 
-The core cluster needs only `lakestream/kafka:latest`. To add compaction and the Iceberg catalog, enable the `lakehouse` profile — that pulls in Polaris and the locally built `lakestream/compactor:latest`:
+To add the Iceberg catalog on top, enable the `lakehouse` profile and turn materialization on. Compose sees the changed environment and recreates the compactor with the catalog configured:
 
 ```bash
-docker compose --profile lakehouse up -d
+URSA_MATERIALIZATION_ENABLED=true docker compose --profile lakehouse up -d
 ```
+
+Without that variable the `lakehouse` profile starts Polaris but the compactor keeps writing only the managed compacted objects, so no Iceberg table appears. The `make` targets below set it for you.
 
 ## Demos
 
@@ -130,7 +138,7 @@ Each demo is a Compose profile of one-shot containers. They never run during a p
 
 | Profile | Services | What it does |
 |---------|----------|--------------|
-| `lakehouse` | `polaris`, `polaris-setup`, `compactor` | Adds compaction and the Iceberg REST catalog to the core cluster (long-running, not one-shot) |
+| `lakehouse` | `polaris`, `polaris-setup` | Adds the Iceberg REST catalog (long-running, not one-shot). Pair with `URSA_MATERIALIZATION_ENABLED=true` so the already-running compactor also writes the external table. |
 | `demo` | `kafka-ready`, `create-topic`, `producer-1`, `producer-2`, `consumer` | Creates `test-diskless` (`PARTITIONS`, default 12) and runs two producers plus a consumer perf test |
 | `share-demo` | `kafka-ready`, `create-share-topic`, `configure-share-group`, `share-producer`, `share-consumer`, `describe-share-group` | Share-group consumption on a single-partition diskless topic |
 | `lakehouse-demo` | `kafka-ready`, `lakehouse-create-topic`, `raw-producer`, `kafka-consumer-check`, `wait-for-parquet`, `duckdb-query-check` | Kafka -> Ursa WAL -> compaction -> Iceberg -> DuckDB assertions (combine with `lakehouse`) |
@@ -144,11 +152,11 @@ make duckdb           # DuckDB shell
 
 # Or drive the profiles directly
 docker compose --profile demo up
-docker compose --profile lakehouse --profile lakehouse-demo up
-docker compose --profile lakehouse --profile tools run --rm duckdb
+URSA_MATERIALIZATION_ENABLED=true docker compose --profile lakehouse --profile lakehouse-demo up
+URSA_MATERIALIZATION_ENABLED=true docker compose --profile lakehouse --profile tools run --rm duckdb
 ```
 
-`make lakehouse-demo`, `make duckdb` and `make compaction-logs` enable the `lakehouse` profile for you.
+`make lakehouse-demo` and `make duckdb` enable the `lakehouse` profile and materialization for you. `make compaction-logs` needs neither, because the compactor is part of the core stack.
 
 ### Lakehouse end-to-end
 
@@ -166,12 +174,18 @@ settings, not perf-demo settings.
 
 The verifier requires a fresh Compose project so a prior topic or Iceberg snapshot cannot make an assertion pass accidentally. After a retained or failed run, use `make destroy` before retrying.
 
-Inside DuckDB (`make duckdb`), discover the incarnation-qualified table name and query it:
+Inside DuckDB (`make duckdb`), the table is named after the Kafka topic:
 
 ```sql
 SHOW ALL TABLES;
-SELECT count(*) FROM lakehouse.default."ursa-lakehouse-e2e-topic-id-<uuid>";
+SELECT count(*) FROM lakehouse.default."ursa-lakehouse-e2e";
 ```
+
+The stream behind it is named `<topic>-topic-id-<uuid>`, because Kafka lets a deleted topic be
+recreated under the same name and the two incarnations must not share a log. The table drops that
+suffix — `tableNameTemplate` in the compactor's config names it from the topic instead — so queries,
+views and dashboards keep working across a topic's lifetimes. The flip side is that a topic recreated
+under the same name appends to the existing table; drop the table first when that is not wanted.
 
 Polaris intentionally uses its in-memory development metastore and static MinIO credentials. It suits a reproducible local run, not a durable or production catalog. DuckDB is on demand rather than a resident server; use Trino instead when a shared JDBC/HTTP query endpoint is a requirement. All published ports bind to `127.0.0.1` because the stack uses fixed development credentials.
 
@@ -223,7 +237,7 @@ latency, raise it to batch more per PUT.
 |---------|-------------|
 | `make help` | List the available targets |
 | `make build-images` | Build the Kafka and Ursa compactor images |
-| `make up` | Start the core cluster |
+| `make up` | Start the core cluster, compactor included |
 | `make down` | Stop all services, every profile included |
 | `make destroy` | Stop all services and remove volumes, every profile included |
 | `make logs` | Follow kafka-1 logs |
@@ -312,6 +326,7 @@ KRaft metadata lives under `/var/lib/kafka/data/kraft-combined-logs` on each bro
 | `COMPACTION_PREFIX` | `ursa` | Prefix `wait-for-parquet` watches (spans `ursa/wal` and `ursa/compacted`) |
 | `URSA_WRITE_BUFFER_FLUSH_INTERVAL_MS` | `250` | Broker WAL write-buffer flush interval |
 | `URSA_WRITE_BUFFER_FLUSH_SIZE` | `268435456` | Broker WAL write-buffer flush size in bytes (256 MiB) |
+| `URSA_MATERIALIZATION_ENABLED` | `false` | Whether the compactor also writes an external Iceberg table. Needs the `lakehouse` profile up. |
 
 To use a custom Kafka image:
 

@@ -30,8 +30,13 @@ passed=false
 export URSA_WRITE_BUFFER_FLUSH_INTERVAL_MS="${URSA_WRITE_BUFFER_FLUSH_INTERVAL_MS:-100}"
 export URSA_WRITE_BUFFER_FLUSH_SIZE="${URSA_WRITE_BUFFER_FLUSH_SIZE:-4096}"
 
-# The compaction/Iceberg services live in the `lakehouse` profile and the demo
-# workload in `lakehouse-demo`; this verifier needs both.
+# The compactor runs in the core stack with the Iceberg sink off. This verifier
+# asserts on that sink, so it turns materialization on; the changed environment
+# makes Compose recreate the compactor with the catalog configured.
+export URSA_MATERIALIZATION_ENABLED=true
+
+# Polaris lives in the `lakehouse` profile and the demo workload in
+# `lakehouse-demo`; this verifier needs both.
 compose() {
   docker compose --project-name "$project" -f "$compose_file" \
     --profile lakehouse --profile lakehouse-demo "$@"
