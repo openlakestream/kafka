@@ -12,9 +12,9 @@ This file provides guidance to AI coding agents (Codex CLI, OpenCode, Claude Cod
 
 ## Project Overview
 
-Fork of Apache Kafka with **Diskless Storage** via **StreamNative Ursa**. When enabled, Kafka brokers become stateless — message durability is offloaded to Ursa's distributed storage layer and producer state to **Oxia** (a distributed KV store). The primary goal is to maintain compatibility with upstream Kafka while adding the Ursa storage bypass layer.
+Fork of Apache Kafka with **Diskless Storage** via **Ursa**. When enabled, Kafka brokers become stateless — message durability is offloaded to Ursa's distributed storage layer and producer state to **Oxia** (a distributed KV store). The primary goal is to maintain compatibility with upstream Kafka while adding the Ursa storage bypass layer.
 
-Design document: `docs/SNIP-diskless-storage-with-ursa-integration.md`
+Design document: `docs/LIP-diskless-storage-with-ursa-integration.md`
 
 ## Build Commands
 
@@ -33,7 +33,6 @@ Design document: `docs/SNIP-diskless-storage-with-ursa-integration.md`
 ./gradlew :server:test --tests "org.apache.kafka.server.ursa.integration.UrsaStorageE2ETest"
 ./gradlew :storage:storage-diskless-api:test --tests "org.apache.kafka.storage.diskless.DisklessStorageEngineLoaderTest"
 ./gradlew :storage:storage-diskless-ursa:test --tests "org.apache.kafka.storage.diskless.handlers.UrsaStorageStateTest"
-./gradlew :core:core-sdt-ursa:test --tests "kafka.server.ursa.sdt.UrsaSDTInterceptorTest"
 
 # Run a specific test method
 ./gradlew :core:test --tests "kafka.api.ProducerFailureHandlingTest.testCannotSendToInternalTopic"
@@ -65,12 +64,14 @@ Design document: `docs/SNIP-diskless-storage-with-ursa-integration.md`
 
 ### How Ursa Integrates with Kafka
 
-The diskless layer is a **bypass** in `ReplicaManager` that routes storage operations to Ursa instead of local logs, on a per-topic basis (`ursa.storage.enable=true` topic config).
+The diskless layer is a **bypass** in `ReplicaManager` that routes storage operations to Ursa instead of local logs, on a per-topic basis (`ursa.storage.enable=true` topic config). Brokers open partitions with create-if-absent, creating the Lakestream stream on first partition open. The active controller reconciles properties, partition growth, deletion, and orphan cleanup through one `DisklessTopicLifecycle` SPI call that fans out to both the catalog and producer-state cleanup.
 
 ```
 KafkaApis → ReplicaManager → DisklessStorageReplicaManagerSupport
-                                  ├── diskless topics → UrsaManagedLedgerWriter / UrsaManagedLedgerReader → Ursa
+                                  ├── diskless topics → PartitionWriter / PartitionReader → Ursa
                                   └── classic topics  → local Log (unchanged)
+
+Controller → DisklessTopicLifecycleReconciler → DisklessTopicLifecycle → StreamCatalog + ProducerState
 ```
 
 ### Key Modules
@@ -79,9 +80,8 @@ KafkaApis → ReplicaManager → DisklessStorageReplicaManagerSupport
 |--------|----------|-----------|
 | `storage/` | Java | Upstream Kafka storage code plus shared storage internals |
 | `storage/diskless-api/` | Java | Generic diskless SPI/common classes used by broker code |
-| `storage/diskless-ursa/` | Java | Ursa implementation: ManagedLedger writer/reader, Oxia store, producer state |
+| `storage/diskless-ursa/` | Java | Ursa implementation: Lakestream writer/reader, Oxia store, producer state |
 | `core/` | Scala | Broker: `ReplicaManager`, `KafkaApis`, `SocketServer`, `BrokerServer` |
-| `core/sdt-ursa/` | Java | Ursa SDT interceptor implementation and compaction task publisher |
 | `server/` | Java | Server configs (`SocketServerConfigs`), Ursa E2E integration tests |
 | `clients/` | Java | Network layer plus generic plugin classloader utilities |
 
@@ -91,16 +91,20 @@ KafkaApis → ReplicaManager → DisklessStorageReplicaManagerSupport
 - `DisklessStorageReplicaManagerSupport.java` — Entry point; partitions requests between diskless and classic paths
 - `DisklessStorageEngine.java` — Generic engine SPI implemented by Ursa
 - `DisklessStorageEngineLoader.java` — Loads the implementation through the isolated Ursa classpath
-- `DisklessMetadataStore.java` / `DisklessMetadataStoreLoader.java` — Generic metadata-store SPI and loader
+- `DisklessTopicLifecycle.java` — Controller-side topic lifecycle SPI (ensureTopic, deleteTopic, listManagedTopics, sweepOrphans)
+- `DisklessTopicLifecycleLoader.java` — Isolated loader for `DisklessTopicLifecycle`
+- `DisklessFutures.java` — Shared futures helper for unwrapping exceptions
+- `DisklessTopics.java` — Shared helper for topic configuration checks
 - `DisklessClassLoaderRegistry.java` — Shares plugin classloader instances by classpath and parent until all leases close
 - `handlers/UrsaStorageConfig.java` — Configuration holder shared by broker-side code and the Ursa implementation
 
 **Ursa implementation** (`storage/diskless-ursa/src/main/java/org/apache/kafka/storage/diskless/`):
 - `handlers/UrsaStorageEngineImpl.java` — Diskless storage engine implementation backed by Ursa
-- `handlers/UrsaManagedLedgerWriter.java` — Write path (async append via ManagedLedger)
-- `handlers/UrsaManagedLedgerReader.java` — Read path (Fetch + ListOffsets)
-- `handlers/UrsaStorageState.java` — Stream IDs, offset tracking, shared state
-- `OxiaDisklessMetadataStore.java` — Producer/topic metadata persistence through Oxia
+- `handlers/PartitionReader.java` — Read path for fetch and list offsets, with a cached cursor and an offset window cached for 100 ms (`OFFSET_RANGE_REFRESH_MS`); local appends widen it at once, this broker's own retention trim or a close drops it (another owner's trim, like its appends, lands within the interval), and `OFFSET_OUT_OF_RANGE` and `ListOffsets(EARLIEST/EARLIEST_LOCAL)` are only ever answered from a window read after the request arrived — `LATEST`/`MAX_TIMESTAMP` take the cached window and may lag by up to the interval
+- `handlers/PartitionWriter.java` — Write path: validation, append, producer state, append notifications
+- `handlers/PartitionRetention.java` — Coalesced retention worker
+- `handlers/LakestreamStorageHolder.java` — Catalog and Oxia client ownership; opens partitions with create-if-absent
+- `handlers/UrsaDisklessTopicLifecycle.java` — StreamCatalog-backed topic lifecycle implementation
 - `idempotent/ProducerStateManager.java` — Producer state tracking backed by Oxia snapshots
 
 **Plugin classloading**:
@@ -112,10 +116,7 @@ KafkaApis → ReplicaManager → DisklessStorageReplicaManagerSupport
 - `KafkaApis.scala` — Request handling, async produce/fetch for diskless
 - `BrokerServer.scala` — Initializes diskless storage support
 - `ReplicaFetcherThread.scala` — Skips fetching for diskless partitions
-
-**Ursa SDT interceptor** (`core/sdt-ursa/src/main/java/kafka/server/ursa/sdt/`):
-- `UrsaSDTInterceptor.java` — ReplicaManager interceptor implementation for Ursa SDT
-- `TopicCompactionTaskPublisher.java` — Publishes compaction tasks
+- `metadata/DisklessTopicLifecycleReconciler.java` — Active-controller reconciler: ensures/deletes diskless topics from metadata deltas and sweeps orphans on a configurable interval
 
 **Network / Pipelining** (`core/src/main/scala/kafka/network/`):
 - `SocketServer.scala` — Request pipelining support (`socket.server.enable.request.pipelining`)
@@ -138,11 +139,13 @@ KafkaApis → ReplicaManager → DisklessStorageReplicaManagerSupport
 ## Critical Patterns
 
 ### Ursa Dependencies
-Keep Ursa implementation dependencies out of Kafka's main classpath. Ursa, Oxia, AWS SDK, ManagedLedger, Pulsar, and lakehouse dependencies belong in the isolated `storage:storage-diskless-ursa` and `core:core-sdt-ursa` runtimes, not in `storage` or `core`.
+Keep Ursa implementation dependencies out of Kafka's main classpath. Ursa, Oxia, cloud SDKs, and lakehouse dependencies belong in the isolated `storage:storage-diskless-ursa` runtime, not in `storage` or `core`.
+
+The diskless storage data/read path compiles only against `lakestream-api`. Its production sources must not import `io.lakestream.ursa.*`, select a compacted-reader implementation, or depend on Ursa catalog/Oxia metadata layouts. `ursa-storage-kafka-runtime` is the single `runtimeOnly` bundle that discovers the catalog provider and internally assembles Ursa storage plus the Kafka lakehouse reader. The separate Oxia API dependency is outside this data/read boundary: it supports Kafka-owned producer-state snapshots and their deletion fence.
 
 Release tarballs package those isolated runtime jars under `./ursa-storage/`. Kafka, Scala, SLF4J, Log4j, and other platform jars are provided by `./libs/` and should not be duplicated into `./ursa-storage/` unless the dependency is intentionally private to the Ursa runtime. The `KafkaPluginClassLoader` loads plugin-private classes child-first while keeping Kafka/logging/Scala API packages parent-first.
 
-`ursa.storage.class.path` is the shared config used by diskless storage and Ursa SDT tests to point at this runtime classpath. In production, the default is `$KAFKA_HOME/ursa-storage/*`.
+`ursa.storage.class.path` is the shared config used by broker and controller diskless-storage loaders and their isolated integration tests. In production, the default is `$KAFKA_HOME/ursa-storage/*`.
 
 ### Isolated CI Tests
 Ursa integration tests (`org/apache/kafka/server/ursa/integration/**`, `org/apache/kafka/storage/diskless/**`) are isolated from the main test suite. Use `-Pkafka.ci.isolated.tests=only` to run them, or `=exclude` to skip them.
@@ -160,15 +163,20 @@ The script reports jars missing from `LICENSE-binary` (need to add) and stale en
 
 ## Docker Demo
 
+A single `docker-compose.yml` holds everything. `docker compose up` starts the core cluster; the compaction/Iceberg services sit behind the `lakehouse` profile and the workloads behind `demo`, `share-demo`, `lakehouse-demo` and `tools`.
+
 ```bash
 cd docker/examples/docker-compose-files/cluster/ursa
-./build-image.sh          # Build kafka-diskless:latest
-make demo                 # Full demo: 3-broker cluster + Oxia + MinIO + perf test
-make up                   # Start cluster only
+./build-image.sh          # Build lakestream/kafka:latest
+URSA_STORAGE_DIR=/path/to/ursa-storage ./build-images.sh  # + lakestream/compactor:latest
+make up                   # Core cluster: Oxia + MinIO + 3 brokers
 make create-topic         # Create diskless topic
+make demo                 # Profile `demo`: perf producers + consumer, torn down on exit
+make lakehouse-demo       # Profiles `lakehouse` + `lakehouse-demo`: Kafka -> Iceberg -> DuckDB
+make destroy              # Tear down every profile and remove volumes
 ```
 
-Architecture: 3 Kafka brokers + Oxia (metadata) + MinIO (S3 storage). Ports: kafka-1:29092, kafka-2:39092, kafka-3:49092, oxia:6648, minio:19000/19001.
+Architecture: 3 Kafka brokers + Oxia (metadata) + MinIO (S3 storage), plus Polaris (Iceberg catalog) and the Ursa compactor under the `lakehouse` profile. Only that profile needs the locally built compactor image. Ports (all bound to 127.0.0.1): kafka-1:29092, kafka-2:39092, kafka-3:49092, oxia:6648, minio:19000/19001, polaris:18181/18182.
 
 ## Upstream Compatibility
 

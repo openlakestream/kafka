@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.diskless;
 
 import org.apache.kafka.common.TopicIdPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.requests.ProduceResponse;
@@ -38,6 +39,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -46,6 +48,7 @@ import javax.tools.JavaCompiler;
 import javax.tools.ToolProvider;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -56,8 +59,7 @@ class DisklessStorageEngineLoaderTest {
 
     private static final String SHARED_RESOURCE = "shared-resource.txt";
     private static final String PLUGIN_RESOURCE = "plugin-only-resource.txt";
-    private static final String TCCL_ENGINE_CLASS = "plugin.TcclDisklessStorageEngine";
-    private static final String TCCL_METADATA_STORE_CLASS = "plugin.TcclDisklessMetadataStore";
+    private static final String SERVICE_NAME = DisklessStorageProvider.class.getName();
 
     @TempDir
     Path tempDir;
@@ -140,41 +142,7 @@ class DisklessStorageEngineLoaderTest {
     }
 
     @Test
-    void testDisklessStorageEngineLoaderReleasesClassLoaderWhenClassInitializationThrowsError() throws Exception {
-        Path childDir = Files.createDirectory(tempDir.resolve("engine-error"));
-        URL[] urls = DisklessStorageEngineLoader.classPathUrls(childDir.toString());
-        ClassLoader parent = DisklessStorageEngineLoader.class.getClassLoader();
-
-        assertThrows(ExceptionInInitializerError.class, () ->
-                DisklessStorageEngineLoader.load(
-                        null,
-                        0,
-                        ursaConfig(childDir),
-                        null,
-                        Map.of(),
-                        topic -> Map.of(),
-                        FailingEngine.class.getName()));
-
-        assertClassLoaderLeaseReleased(urls, parent);
-    }
-
-    @Test
-    void testDisklessMetadataStoreLoaderReleasesClassLoaderWhenClassInitializationThrowsError() throws Exception {
-        Path childDir = Files.createDirectory(tempDir.resolve("metadata-error"));
-        URL[] urls = DisklessMetadataStoreLoader.classPathUrls(childDir.toString());
-        ClassLoader parent = DisklessMetadataStoreLoader.class.getClassLoader();
-
-        assertThrows(ExceptionInInitializerError.class, () ->
-                DisklessMetadataStoreLoader.load(
-                        "oxia://localhost/default",
-                        childDir.toString(),
-                        FailingMetadataStore.class.getName()));
-
-        assertClassLoaderLeaseReleased(urls, parent);
-    }
-
-    @Test
-    void testLeasedDisklessStorageEngineReleasesClassLoaderAfterDelegateClose() throws Exception {
+    void testLeasedEngineReleasesClassLoaderAfterDelegateClose() throws Exception {
         Path childDir = Files.createDirectory(tempDir.resolve("child"));
         URL[] urls = new URL[] {childDir.toUri().toURL()};
         ClassLoader parent = DisklessStorageEngineLoaderTest.class.getClassLoader();
@@ -182,7 +150,7 @@ class DisklessStorageEngineLoaderTest {
         ClassLoader firstLoader = lease.classLoader();
         CloseTrackingDisklessStorageEngine delegate = new CloseTrackingDisklessStorageEngine(false);
 
-        new LeasedDisklessStorageEngine(delegate, lease).close();
+        DisklessClassLoaderContext.leased(DisklessStorageEngine.class, delegate, lease).close();
         assertTrue(delegate.closed.get());
 
         DisklessClassLoaderRegistry.Lease nextLease = DisklessClassLoaderRegistry.acquire(urls, parent);
@@ -194,20 +162,18 @@ class DisklessStorageEngineLoaderTest {
     }
 
     @Test
-    void testLeasedDisklessStorageEngineReleasesClassLoaderWhenDelegateCloseFails() throws Exception {
+    void testLeasedEngineReleasesClassLoaderWhenDelegateCloseFails() throws Exception {
         Path childDir = Files.createDirectory(tempDir.resolve("child"));
         URL[] urls = new URL[] {childDir.toUri().toURL()};
         ClassLoader parent = DisklessStorageEngineLoaderTest.class.getClassLoader();
         DisklessClassLoaderRegistry.Lease lease = DisklessClassLoaderRegistry.acquire(urls, parent);
         ClassLoader firstLoader = lease.classLoader();
         CloseTrackingDisklessStorageEngine delegate = new CloseTrackingDisklessStorageEngine(true);
+        DisklessStorageEngine engine =
+                DisklessClassLoaderContext.leased(DisklessStorageEngine.class, delegate, lease);
 
-        try {
-            new LeasedDisklessStorageEngine(delegate, lease).close();
-        } catch (IOException expected) {
-            // expected
-        }
-        assertTrue(delegate.closed.get());
+        assertThrows(IOException.class, engine::close);
+        assertTrue(delegate.closeAttempted.get());
 
         DisklessClassLoaderRegistry.Lease nextLease = DisklessClassLoaderRegistry.acquire(urls, parent);
         try {
@@ -215,26 +181,11 @@ class DisklessStorageEngineLoaderTest {
         } finally {
             nextLease.close();
         }
-    }
 
-    @Test
-    void testLeasedDisklessMetadataStoreReleasesClassLoaderAfterDelegateClose() throws Exception {
-        Path childDir = Files.createDirectory(tempDir.resolve("child"));
-        URL[] urls = new URL[] {childDir.toUri().toURL()};
-        ClassLoader parent = DisklessStorageEngineLoaderTest.class.getClassLoader();
-        DisklessClassLoaderRegistry.Lease lease = DisklessClassLoaderRegistry.acquire(urls, parent);
-        ClassLoader firstLoader = lease.classLoader();
-        CloseTrackingDisklessMetadataStore delegate = new CloseTrackingDisklessMetadataStore();
-
-        new LeasedDisklessMetadataStore(delegate, lease).close();
-        assertTrue(delegate.closed.get());
-
-        DisklessClassLoaderRegistry.Lease nextLease = DisklessClassLoaderRegistry.acquire(urls, parent);
-        try {
-            assertNotSame(firstLoader, nextLease.classLoader());
-        } finally {
-            nextLease.close();
-        }
+        // A second close is a no-op: the delegate is not closed twice.
+        delegate.closeAttempted.set(false);
+        engine.close();
+        assertFalse(delegate.closeAttempted.get());
     }
 
     @Test
@@ -248,23 +199,16 @@ class DisklessStorageEngineLoaderTest {
                 null,
                 Map.of(),
                 topic -> Map.of(),
-                TCCL_ENGINE_CLASS)) {
+                topic -> OptionalInt.empty(),
+                () -> 0L)) {
             engine.write(Map.of(), "").get();
             engine.fetch(null, Map.of()).get();
             engine.listOffsets(Map.of()).get();
             engine.cleanupPartition(null, false);
-            engine.deletePartitionData(null);
             engine.snapshotTrackedPartitions();
             engine.cleanupNonOwnedProducerStates(null, Set.of(), false);
         }
 
-        try (DisklessMetadataStore store = DisklessMetadataStoreLoader.load(
-                "oxia://localhost/default",
-                pluginDir.toString(),
-                TCCL_METADATA_STORE_CLASS)) {
-            store.put("key", new byte[0]).get();
-            store.delete("key").get();
-        }
     }
 
     private Path writeResource(String directoryName, String resourceName, String value) throws Exception {
@@ -290,7 +234,7 @@ class DisklessStorageEngineLoaderTest {
         Path sourceDir = Files.createDirectories(pluginDir.resolve("plugin"));
         Files.writeString(pluginDir.resolve(PLUGIN_RESOURCE), "visible-to-plugin-tccl");
         Files.writeString(sourceDir.resolve("TcclDisklessStorageEngine.java"), tcclEngineSource());
-        Files.writeString(sourceDir.resolve("TcclDisklessMetadataStore.java"), tcclMetadataStoreSource());
+        Files.writeString(sourceDir.resolve("TcclDisklessStorageProvider.java"), tcclProviderSource());
 
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         assertNotNull(compiler);
@@ -303,9 +247,36 @@ class DisklessStorageEngineLoaderTest {
                 "-d",
                 pluginDir.toString(),
                 sourceDir.resolve("TcclDisklessStorageEngine.java").toString(),
-                sourceDir.resolve("TcclDisklessMetadataStore.java").toString());
+                sourceDir.resolve("TcclDisklessStorageProvider.java").toString());
         assertEquals(0, result);
+
+        Path serviceFile = pluginDir.resolve("META-INF/services").resolve(SERVICE_NAME);
+        Files.createDirectories(serviceFile.getParent());
+        Files.writeString(serviceFile, "plugin.TcclDisklessStorageProvider\n");
         return pluginDir;
+    }
+
+    private String tcclProviderSource() {
+        return """
+                package plugin;
+
+                import org.apache.kafka.storage.diskless.DisklessStorageEngine;
+                import org.apache.kafka.storage.diskless.DisklessStorageProvider;
+                import org.apache.kafka.storage.diskless.DisklessTopicLifecycle;
+                import org.apache.kafka.storage.diskless.handlers.UrsaStorageConfig;
+
+                public final class TcclDisklessStorageProvider implements DisklessStorageProvider {
+                    @Override
+                    public DisklessStorageEngine createStorageEngine(StorageEngineContext context) {
+                        return new TcclDisklessStorageEngine();
+                    }
+
+                    @Override
+                    public DisklessTopicLifecycle createTopicLifecycle(UrsaStorageConfig config) {
+                        throw new UnsupportedOperationException("not used by this test plugin");
+                    }
+                }
+                """;
     }
 
     private String tcclEngineSource() {
@@ -313,32 +284,23 @@ class DisklessStorageEngineLoaderTest {
                 package plugin;
 
                 import org.apache.kafka.common.TopicIdPartition;
+                import org.apache.kafka.common.Uuid;
                 import org.apache.kafka.common.record.internal.MemoryRecords;
                 import org.apache.kafka.common.requests.FetchRequest;
                 import org.apache.kafka.common.requests.ProduceResponse;
-                import org.apache.kafka.common.utils.Time;
                 import org.apache.kafka.server.storage.log.FetchParams;
                 import org.apache.kafka.server.storage.log.FetchPartitionData;
                 import org.apache.kafka.storage.diskless.DisklessStorageEngine;
                 import org.apache.kafka.storage.diskless.ListOffsetsPartitionRequest;
                 import org.apache.kafka.storage.diskless.ListOffsetsPartitionResponse;
-                import org.apache.kafka.storage.diskless.handlers.UrsaStorageConfig;
-                import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
                 import java.io.IOException;
                 import java.util.Map;
                 import java.util.Set;
                 import java.util.concurrent.CompletableFuture;
-                import java.util.function.Function;
 
                 public final class TcclDisklessStorageEngine implements DisklessStorageEngine {
-                    public TcclDisklessStorageEngine(
-                            Time time,
-                            int brokerId,
-                            UrsaStorageConfig ursaConfig,
-                            BrokerTopicStats brokerTopicStats,
-                            Map<String, Object> logConfigDefaults,
-                            Function<String, Map<String, String>> topicConfigSupplier) {
+                    public TcclDisklessStorageEngine() {
                         requirePluginResource("constructor");
                     }
 
@@ -372,8 +334,13 @@ class DisklessStorageEngineLoaderTest {
                     }
 
                     @Override
-                    public void deletePartitionData(TopicIdPartition tp) {
-                        requirePluginResource("deletePartitionData");
+                    public void applyTopicConfig(String topicName, Uuid topicId, Map<String, String> config) {
+                        requirePluginResource("applyTopicConfig");
+                    }
+
+                    @Override
+                    public void fenceDeletedTopic(String topicName, Uuid topicId) {
+                        requirePluginResource("fenceDeletedTopic");
                     }
 
                     @Override
@@ -406,71 +373,19 @@ class DisklessStorageEngineLoaderTest {
                 """.formatted(PLUGIN_RESOURCE);
     }
 
-    private String tcclMetadataStoreSource() {
-        return """
-                package plugin;
-
-                import org.apache.kafka.storage.diskless.DisklessMetadataStore;
-
-                import java.util.concurrent.CompletableFuture;
-
-                public final class TcclDisklessMetadataStore implements DisklessMetadataStore {
-                    public TcclDisklessMetadataStore(String url) {
-                        requirePluginResource("constructor");
-                    }
-
-                    @Override
-                    public CompletableFuture<Void> put(String key, byte[] value) {
-                        requirePluginResource("put");
-                        return CompletableFuture.completedFuture(null);
-                    }
-
-                    @Override
-                    public CompletableFuture<Void> delete(String key) {
-                        requirePluginResource("delete");
-                        return CompletableFuture.completedFuture(null);
-                    }
-
-                    @Override
-                    public void close() {
-                        requirePluginResource("close");
-                    }
-
-                    private static void requirePluginResource(String operation) {
-                        ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
-                        if (classLoader == null || classLoader.getResource("%s") == null) {
-                            throw new IllegalStateException("Missing plugin TCCL resource during " + operation);
-                        }
-                    }
-                }
-                """.formatted(PLUGIN_RESOURCE);
-    }
-
     private UrsaStorageConfig ursaConfig(Path classPath) throws Exception {
         return UrsaStorageConfig.fromConfigs(Map.of(
                 ServerLogConfigs.URSA_STORAGE_CLASS_PATH_CONFIG,
                 classPath.toString()));
     }
 
-    private void assertClassLoaderLeaseReleased(URL[] urls, ClassLoader parent) throws Exception {
-        DisklessClassLoaderRegistry.Lease first = DisklessClassLoaderRegistry.acquire(urls, parent);
-        ClassLoader firstLoader = first.classLoader();
-        first.close();
-
-        DisklessClassLoaderRegistry.Lease second = DisklessClassLoaderRegistry.acquire(urls, parent);
-        try {
-            assertNotSame(firstLoader, second.classLoader());
-        } finally {
-            second.close();
-        }
-    }
-
     private static final class CloseTrackingDisklessStorageEngine implements DisklessStorageEngine {
         private final AtomicBoolean closed = new AtomicBoolean(false);
-        private final boolean failOnClose;
+        private final AtomicBoolean closeAttempted = new AtomicBoolean(false);
+        private final AtomicBoolean failOnClose;
 
         private CloseTrackingDisklessStorageEngine(boolean failOnClose) {
-            this.failOnClose = failOnClose;
+            this.failOnClose = new AtomicBoolean(failOnClose);
         }
 
         @Override
@@ -493,7 +408,11 @@ class DisklessStorageEngineLoaderTest {
         }
 
         @Override
-        public void deletePartitionData(TopicIdPartition tp) {
+        public void applyTopicConfig(String topicName, Uuid topicId, Map<String, String> config) {
+        }
+
+        @Override
+        public void fenceDeletedTopic(String topicName, Uuid topicId) {
         }
 
         @Override
@@ -511,49 +430,12 @@ class DisklessStorageEngineLoaderTest {
 
         @Override
         public void close() throws IOException {
-            closed.set(true);
-            if (failOnClose) {
+            closeAttempted.set(true);
+            if (failOnClose.get()) {
                 throw new IOException("close failed");
             }
-        }
-    }
-
-    private static final class CloseTrackingDisklessMetadataStore implements DisklessMetadataStore {
-        private final AtomicBoolean closed = new AtomicBoolean(false);
-
-        @Override
-        public CompletableFuture<Void> put(String key, byte[] value) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        @Override
-        public CompletableFuture<Void> delete(String key) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        @Override
-        public void close() {
             closed.set(true);
         }
     }
 
-    private static final class FailingEngine {
-        static {
-            fail();
-        }
-
-        private static void fail() {
-            throw new ExceptionInInitializerError("boom");
-        }
-    }
-
-    private static final class FailingMetadataStore {
-        static {
-            fail();
-        }
-
-        private static void fail() {
-            throw new ExceptionInInitializerError("boom");
-        }
-    }
 }

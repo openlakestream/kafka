@@ -17,34 +17,21 @@
 package org.apache.kafka.storage.diskless.handlers;
 
 import org.apache.kafka.common.TopicIdPartition;
-import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.NotLeaderOrFollowerException;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.internal.MemoryRecords;
-import org.apache.kafka.common.record.internal.Record;
-import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse;
 import org.apache.kafka.server.storage.log.FetchPartitionData;
+import org.apache.kafka.storage.diskless.DisklessFutures;
 import org.apache.kafka.storage.diskless.ListOffsetsPartitionRequest;
 import org.apache.kafka.storage.diskless.ListOffsetsPartitionResponse;
-import org.apache.kafka.storage.diskless.handlers.RecordAnalyzer.RecordAnalysisResult;
 import org.apache.kafka.storage.diskless.idempotent.ProducerStateManager;
 
-import org.apache.bookkeeper.mledger.AsyncCallbacks;
-import org.apache.bookkeeper.mledger.Entry;
-import org.apache.bookkeeper.mledger.ManagedCursor;
-import org.apache.bookkeeper.mledger.ManagedLedger;
-import org.apache.bookkeeper.mledger.ManagedLedgerException;
-import org.apache.bookkeeper.mledger.Position;
-import org.apache.bookkeeper.mledger.PositionBound;
-import org.apache.bookkeeper.mledger.PositionFactory;
-import org.apache.pulsar.common.api.proto.MessageMetadata;
-import org.apache.pulsar.common.protocol.Commands;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -53,21 +40,33 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
-import io.netty.buffer.ByteBuf;
+import io.lakestream.api.Log;
+import io.lakestream.api.LogOffset;
+import io.lakestream.api.exception.LogFencedException;
+import io.lakestream.api.exception.NoSuchStreamException;
 import io.oxia.client.api.AsyncOxiaClient;
-import io.streamnative.ursa.mledger.UrsaPosition;
 
+/**
+ * One diskless partition, as the broker sees it: the facade over the Lakestream {@link Log} handle
+ * and the three components that use it.
+ *
+ * <p>{@link PartitionWriter} owns produce, {@link PartitionReader} owns fetch and ListOffsets, and
+ * {@link PartitionRetention} owns trims. This class owns only what they share: opening the handle,
+ * the per-zone {@link ProducerStateManager}s, the log metrics, error mapping, and close.
+ *
+ * <p>The writer exists from construction because an open that has already failed runs its callback
+ * inline, from this constructor; the reader appears only once the handle is open, so a request that
+ * arrives before then waits on the init future rather than on a half-built reader.
+ */
 final class UrsaPartitionLog {
 
     private static final Logger log = LoggerFactory.getLogger(UrsaPartitionLog.class);
-    private static final long UNKNOWN_TIMESTAMP = -1L;
     private static final int MAX_ENTRIES_PER_FETCH = 10;
-    private static final int FETCH_CURSOR_POOL_SIZE = 4;
 
     private final TopicIdPartition topicIdPartition;
     private final UrsaStorageState state;
@@ -76,16 +75,19 @@ final class UrsaPartitionLog {
     private final int producerStateSnapshotRecordThreshold;
     private final ScheduledExecutorService producerStateScheduler;
     private final DisklessLogMetrics logMetrics;
-    private final CompletableFuture<ManagedLedger> initFuture;
-    private final PartitionWriteSequencer writeSequencer;
-    private volatile NonDurableCursorPool fetchCursorPool;
-    private volatile boolean closed;
+    private final CompletableFuture<Log> logFuture;
+    private final CompletableFuture<Log> initFuture;
+    private final PartitionWriter writer;
+    private final PartitionRetention retention;
     private final ConcurrentHashMap<String, ProducerStateManager> producerStateManagers = new ConcurrentHashMap<>();
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final CompletableFuture<Void> closeFuture = new CompletableFuture<>();
+    private volatile PartitionReader reader;
 
     UrsaPartitionLog(TopicIdPartition topicIdPartition,
                      UrsaStorageState state,
                      DisklessLogMetrics logMetrics,
-                     CompletableFuture<ManagedLedger> managedLedgerFuture,
+                     CompletableFuture<Log> logFuture,
                      Supplier<AsyncOxiaClient> oxiaClientSupplier,
                      long producerStateSnapshotIntervalMs,
                      int producerStateSnapshotRecordThreshold,
@@ -97,12 +99,66 @@ final class UrsaPartitionLog {
         this.producerStateSnapshotIntervalMs = producerStateSnapshotIntervalMs;
         this.producerStateSnapshotRecordThreshold = producerStateSnapshotRecordThreshold;
         this.producerStateScheduler = producerStateScheduler;
-        this.writeSequencer = new PartitionWriteSequencer(topicIdPartition.toString());
-        this.closed = false;
-        this.initFuture = createInitFuture(managedLedgerFuture);
+        this.logFuture = logFuture;
+        this.writer = new PartitionWriter(
+                topicIdPartition,
+                this::initialized,
+                this::getOrCreateProducerStateManager,
+                state.timestampType(topicIdPartition.topic()),
+                state.time(),
+                this::observeAppend);
+        this.retention = new PartitionRetention(
+                topicIdPartition, this::initialized, error -> invalidate(), this::invalidateReaderRange);
+        this.initFuture = createInitFuture(logFuture);
     }
 
-    ProducerStateManager getOrCreateProducerStateManager(String zone) {
+    TopicIdPartition topicIdPartition() {
+        return topicIdPartition;
+    }
+
+    PartitionRetention retention() {
+        return retention;
+    }
+
+    boolean initializationFailed() {
+        return initFuture.isCompletedExceptionally();
+    }
+
+    CompletableFuture<PartitionResponse> write(MemoryRecords records, String zone, String writerName) {
+        log.debug("Writing {} bytes to partition {} via {}", records.sizeInBytes(), topicIdPartition, writerName);
+        return writer.write(records, zone).exceptionally(this::writeErrorResponse);
+    }
+
+    CompletableFuture<FetchPartitionData> fetch(FetchRequest.PartitionData partitionData) {
+        return initialized()
+                .thenCompose(logInstance -> activeReader().fetch(partitionData))
+                .exceptionally(error -> createFetchErrorResponse(mapException(error)));
+    }
+
+    /**
+     * Registers a long-poll waiter for this partition. The reader registers one before its first
+     * read so that an append landing during that read wakes the request instead of being missed,
+     * and completes it when the request ends -- the deadline is the request's, not this waiter's.
+     */
+    CompletableFuture<Void> awaitAppend() {
+        return writer.awaitAppend();
+    }
+
+    /** Adopts a topic configuration change that this partition's writer caches. */
+    void applyTimestampType(TimestampType timestampType) {
+        writer.applyTimestampType(timestampType);
+    }
+
+    CompletableFuture<ListOffsetsPartitionResponse> listOffsets(ListOffsetsPartitionRequest request) {
+        return initialized()
+                .thenCompose(logInstance -> activeReader().listOffsets(request))
+                .exceptionally(error -> ListOffsetsPartitionResponse.error(topicIdPartition, mapException(error)));
+    }
+
+    synchronized ProducerStateManager getOrCreateProducerStateManager(String zone) {
+        if (closed.get()) {
+            throw ownershipLostException();
+        }
         return producerStateManagers.computeIfAbsent(zone, zoneId -> new ProducerStateManager(
                 topicIdPartition,
                 oxiaClientSupplier,
@@ -113,689 +169,272 @@ final class UrsaPartitionLog {
                 producerStateScheduler));
     }
 
-    void installProducerStateManager(String zone, ProducerStateManager producerStateManager) {
+    synchronized void installProducerStateManager(String zone, ProducerStateManager producerStateManager) {
+        if (closed.get()) {
+            throw ownershipLostException();
+        }
         producerStateManagers.put(zone, producerStateManager);
     }
 
-    CompletableFuture<PartitionResponse> write(MemoryRecords records, String zone, String writerName) {
-        log.debug("Writing {} bytes to partition {} via {}", records.sizeInBytes(), topicIdPartition, writerName);
-
-        if (records.sizeInBytes() == 0) {
-            return CompletableFuture.completedFuture(new PartitionResponse(Errors.NONE));
-        }
-
-        boolean hasProducerId = false;
-        for (RecordBatch batch : records.batches()) {
-            if (batch.isTransactional()) {
-                log.warn("Transactional produce rejected for partition {}", topicIdPartition);
-                return CompletableFuture.completedFuture(new PartitionResponse(Errors.INVALID_REQUEST));
-            }
-            if (batch.hasProducerId()) {
-                hasProducerId = true;
-            }
-        }
-
-        RecordAnalysisResult analysisResult;
-        try {
-            analysisResult = RecordAnalyzer.analyzeAndValidateRecords(
-                    records,
-                    new TopicPartition(topicIdPartition.topic(), topicIdPartition.partition()),
-                    0
-            );
-        } catch (Exception e) {
-            log.warn("Record validation failed for partition {}: {}", topicIdPartition, e.getMessage());
-            return CompletableFuture.completedFuture(new PartitionResponse(Errors.INVALID_RECORD));
-        }
-
-        if (analysisResult.validBytes() <= 0) {
-            return CompletableFuture.completedFuture(new PartitionResponse(Errors.NONE));
-        }
-
-        final boolean idempotent = hasProducerId;
-        return writeSequencer.submit(() -> writeValidated(records, analysisResult, idempotent, zone));
-    }
-
-    private PartitionWriteSequencer.WriteTask<PartitionResponse> writeValidated(
-            MemoryRecords records,
-            RecordAnalysisResult analysisResult,
-            boolean idempotent,
-            String zone) {
-        CompletableFuture<Void> submissionFuture = new CompletableFuture<>();
-        CompletableFuture<PartitionResponse> result = idempotent
-                ? appendIdempotentRecords(records, analysisResult, zone, submissionFuture)
-                : appendNonIdempotentRecords(records, analysisResult, submissionFuture);
-        CompletableFuture<PartitionResponse> mappedResult = result.exceptionally(this::writeErrorResponse);
-        return new PartitionWriteSequencer.WriteTask<>(submissionFuture, mappedResult);
-    }
-
-    void invalidate() {
-        // TODO: Fail queued writes fast after invalidation instead of letting already-enqueued requests
-        //  drain through the stale sequencer and independently discover the closed/fenced ledger.
-        state.removePartitionLog(topicIdPartition, this);
-        close(false);
-    }
-
-    CompletableFuture<FetchPartitionData> fetch(
-            FetchRequest.PartitionData partitionData) {
-        long fetchOffset = partitionData.fetchOffset;
-        int maxBytes = partitionData.maxBytes;
-
-        log.debug("Fetching from partition {} at offset {} with maxBytes {}",
-                topicIdPartition, fetchOffset, maxBytes);
-
-        return initialized().thenCompose(managedLedger -> getHighWatermark(managedLedger)
-                        .thenCompose(highWatermark -> {
-                            if (fetchOffset >= highWatermark) {
-                                log.debug("fetchOffset {} >= hwm {}, returning empty for partition {}",
-                                        fetchOffset, highWatermark, topicIdPartition);
-                                return CompletableFuture.completedFuture(new FetchPartitionData(
-                                        Errors.NONE,
-                                        highWatermark,
-                                        0,
-                                        MemoryRecords.EMPTY,
-                                        Optional.empty(),
-                                        OptionalLong.empty(),
-                                        Optional.empty(),
-                                        OptionalInt.empty(),
-                                        false
-                                ));
-                            }
-
-                            return readRecords(managedLedger, fetchOffset, highWatermark, MAX_ENTRIES_PER_FETCH, maxBytes)
-                                    .thenApply(records -> new FetchPartitionData(
-                                            Errors.NONE,
-                                            highWatermark,
-                                            0,
-                                            records,
-                                            Optional.empty(),
-                                            OptionalLong.empty(),
-                                            Optional.empty(),
-                                            OptionalInt.empty(),
-                                            false
-                                    ));
-                        }))
-                .exceptionally(error -> createFetchErrorResponse(mapException(error)));
-    }
-
-    CompletableFuture<ListOffsetsPartitionResponse> listOffsets(ListOffsetsPartitionRequest request) {
-        long timestamp = request.timestamp();
-        log.debug("ListOffsets for partition {} with timestamp {}", topicIdPartition, timestamp);
-
-        if (timestamp == ListOffsetsPartitionRequest.LATEST_TIERED_TIMESTAMP) {
-            return CompletableFuture.completedFuture(ListOffsetsPartitionResponse.success(topicIdPartition, -1L, -1L));
-        }
-
-        return initialized().thenCompose(managedLedger -> {
-            if (timestamp == ListOffsetsPartitionRequest.EARLIEST_TIMESTAMP
-                    || timestamp == ListOffsetsPartitionRequest.EARLIEST_LOCAL_TIMESTAMP) {
-                return handleEarliestTimestamp(managedLedger);
-            }
-            if (timestamp == ListOffsetsPartitionRequest.LATEST_TIMESTAMP) {
-                return handleLatestTimestamp(managedLedger);
-            }
-            if (timestamp == ListOffsetsPartitionRequest.MAX_TIMESTAMP) {
-                return handleMaxTimestamp(managedLedger);
-            }
-            return handleTimestampSearch(managedLedger, timestamp);
-        }).exceptionally(error -> ListOffsetsPartitionResponse.error(topicIdPartition, mapException(error)));
-    }
-
-    CompletableFuture<PartitionResponse> appendIdempotentRecords(
-            MemoryRecords records,
-            RecordAnalysisResult analysisResult,
-            String zone,
-            CompletableFuture<Void> submissionFuture) {
-        ProducerStateManager producerStateManager = getOrCreateProducerStateManager(zone);
-        List<ProducerStateManager.AppendBatch> appendBatches = buildAppendBatches(records);
-        if (appendBatches.isEmpty()) {
-            submissionFuture.complete(null);
-            return CompletableFuture.completedFuture(new PartitionResponse(Errors.NONE));
-        }
-
-        return producerStateManager.prepareAppend(appendBatches)
-                .thenCompose(prepareResult -> {
-                    if (prepareResult instanceof ProducerStateManager.InvalidEpoch invalidEpoch) {
-                        submissionFuture.complete(null);
-                        return CompletableFuture.completedFuture(
-                                new PartitionResponse(Errors.INVALID_PRODUCER_EPOCH, invalidEpoch.message()));
-                    }
-                    if (prepareResult instanceof ProducerStateManager.OutOfOrderSequence outOfOrderSequence) {
-                        submissionFuture.complete(null);
-                        return CompletableFuture.completedFuture(
-                                new PartitionResponse(Errors.OUT_OF_ORDER_SEQUENCE_NUMBER, outOfOrderSequence.message()));
-                    }
-                    if (prepareResult instanceof ProducerStateManager.Duplicate duplicate) {
-                        submissionFuture.complete(null);
-                        return duplicate.appendResultFuture()
-                                .thenApply(appendResult ->
-                                        new PartitionResponse(Errors.NONE, appendResult.baseOffset(), appendResult.timestamp(), 0L))
-                                .exceptionally(this::writeErrorResponse);
-                    }
-                    if (prepareResult instanceof ProducerStateManager.Ready ready) {
-                        return appendPreparedBatches(
-                                records, analysisResult, producerStateManager, ready.pendingAppend(), submissionFuture);
-                    }
-                    submissionFuture.complete(null);
-                    return CompletableFuture.failedFuture(
-                            new IllegalStateException("Unexpected prepare result: " + prepareResult));
-                })
-                .whenComplete((response, error) -> {
-                    if (error != null) {
-                        submissionFuture.complete(null);
-                    }
-                });
-    }
-
-    private CompletableFuture<PartitionResponse> appendPreparedBatches(
-            MemoryRecords records,
-            RecordAnalysisResult analysisResult,
-            ProducerStateManager producerStateManager,
-            ProducerStateManager.PendingAppend pendingAppend,
-            CompletableFuture<Void> submissionFuture) {
-        CompletableFuture<PartitionResponse> result = new CompletableFuture<>();
-
-        initialized().whenComplete((managedLedger, managedLedgerError) -> {
-            try {
-                if (managedLedgerError != null) {
-                    producerStateManager.abortAppend(pendingAppend, managedLedgerError);
-                    submissionFuture.complete(null);
-                    result.completeExceptionally(managedLedgerError);
-                    return;
-                }
-
-                ByteBuf data = KafkaEntryFormatter.encode(records, analysisResult);
-                int dataSize = data.readableBytes();
-
-                log.debug("Appending {} records ({} bytes) to managed ledger {} for partition {}, analysisResult: {}",
-                        analysisResult.recordCount(), dataSize, managedLedger.getName(), topicIdPartition, analysisResult);
-
-                CompletableFuture<Position> addFuture;
-                try {
-                    addFuture = asyncAddEntry(managedLedger, data, analysisResult.recordCount());
-                } catch (Throwable appendInitError) {
-                    data.release();
-                    producerStateManager.abortAppend(pendingAppend, appendInitError);
-                    submissionFuture.complete(null);
-                    result.completeExceptionally(appendInitError);
-                    return;
-                }
-
-                submissionFuture.complete(null);
-
-                addFuture.whenComplete((position, appendError) -> {
-                    try {
-                        if (appendError != null) {
-                            producerStateManager.abortAppend(pendingAppend, appendError);
-                            result.completeExceptionally(appendError);
-                            return;
-                        }
-
-                        long appendTimestamp = state.time().milliseconds();
-                        ProducerStateManager.AppendResult appendResult =
-                                producerStateManager.completeAppend(pendingAppend, position.getEntryId(), appendTimestamp);
-                        result.complete(new PartitionResponse(
-                                Errors.NONE,
-                                appendResult.baseOffset(),
-                                appendResult.timestamp(),
-                                0L));
-                    } catch (Throwable completeError) {
-                        producerStateManager.abortAppend(pendingAppend, completeError);
-                        result.completeExceptionally(completeError);
-                    } finally {
-                        data.release();
-                    }
-                });
-            } catch (Throwable callbackError) {
-                producerStateManager.abortAppend(pendingAppend, callbackError);
-                submissionFuture.complete(null);
-                result.completeExceptionally(callbackError);
-            }
-        });
-
-        return result;
-    }
-
-    CompletableFuture<PartitionResponse> appendNonIdempotentRecords(
-            MemoryRecords records,
-            RecordAnalysisResult analysisResult,
-            CompletableFuture<Void> submissionFuture) {
-        CompletableFuture<PartitionResponse> result = new CompletableFuture<>();
-
-        initialized().whenComplete((managedLedger, managedLedgerError) -> {
-            try {
-                if (managedLedgerError != null) {
-                    submissionFuture.complete(null);
-                    result.completeExceptionally(managedLedgerError);
-                    return;
-                }
-
-                ByteBuf data = KafkaEntryFormatter.encode(records, analysisResult);
-                int dataSize = data.readableBytes();
-
-                log.debug("Appending {} records ({} bytes) to managed ledger {} for partition {}, analysisResult: {}",
-                        analysisResult.recordCount(), dataSize, managedLedger.getName(), topicIdPartition, analysisResult);
-
-                CompletableFuture<Position> addFuture;
-                try {
-                    addFuture = asyncAddEntry(managedLedger, data, analysisResult.recordCount());
-                } catch (Throwable appendInitError) {
-                    data.release();
-                    submissionFuture.complete(null);
-                    result.completeExceptionally(appendInitError);
-                    return;
-                }
-
-                submissionFuture.complete(null);
-
-                addFuture.whenComplete((position, appendError) -> {
-                    try {
-                        if (appendError != null) {
-                            result.completeExceptionally(appendError);
-                            return;
-                        }
-
-                        long appendTimestamp = state.time().milliseconds();
-                        result.complete(new PartitionResponse(
-                                Errors.NONE,
-                                position.getEntryId(),
-                                appendTimestamp,
-                                0L));
-                    } finally {
-                        data.release();
-                    }
-                });
-            } catch (Throwable callbackError) {
-                submissionFuture.complete(null);
-                result.completeExceptionally(callbackError);
-            }
-        });
-
-        return result;
-    }
-
-    private CompletableFuture<Long> getHighWatermark(ManagedLedger managedLedger) {
-        try {
-            return CompletableFuture.completedFuture(getNextOffsetForUrsa(managedLedger.getLastConfirmedEntry()));
-        } catch (Throwable t) {
-            return CompletableFuture.failedFuture(t);
-        }
-    }
-
-    private long getEarliestOffset(ManagedLedger managedLedger) {
-        Position firstPosition = managedLedger.getFirstPosition();
-        if (isInvalidPosition(firstPosition)) {
-            return 0L;
-        }
-        if (firstPosition.compareTo(PositionFactory.EARLIEST) == 0) {
-            return 0L;
-        }
-        return firstPosition.getEntryId();
-    }
-
-    private long getNextOffsetForUrsa(Position position) {
-        if (position == null || position.getEntryId() < 0) {
-            return 0L;
-        }
-        if (position instanceof UrsaPosition ursaPosition) {
-            return ursaPosition.getEntryId() + Math.max(1, ursaPosition.numMessages());
-        }
-        return position.getEntryId() + 1;
-    }
-
-    private boolean isInvalidPosition(Position position) {
-        return position == null || position.getEntryId() < 0;
-    }
-
-    private OptionalLong tryGetPublishTime(ByteBuf entryBuffer) {
-        try {
-            MessageMetadata metadata = Commands.parseMessageMetadata(entryBuffer.duplicate());
-            if (metadata.hasPublishTime()) {
-                return OptionalLong.of(metadata.getPublishTime());
-            }
-            return OptionalLong.empty();
-        } catch (Exception e) {
-            return OptionalLong.empty();
-        }
-    }
-
-    private long[] findFirstTimestampGe(ByteBuf entryBuffer, long baseOffset, long targetTimestamp) {
-        try {
-            ByteBuffer kafkaRecords = KafkaEntryFormatter.decode(entryBuffer.duplicate());
-            int readableBytes = kafkaRecords.remaining();
-
-            if (readableBytes == 0) {
-                return null;
-            }
-
-            if (readableBytes >= 8) {
-                int pos = kafkaRecords.position();
-                kafkaRecords.putLong(pos, baseOffset);
-            }
-
-            MemoryRecords records = MemoryRecords.readableRecords(kafkaRecords);
-            for (RecordBatch batch : records.batches()) {
-                for (Record record : batch) {
-                    if (record.timestamp() >= targetTimestamp) {
-                        return new long[]{record.timestamp(), record.offset()};
-                    }
-                }
-            }
-            return null;
-        } catch (Exception e) {
-            log.warn("Failed to parse records at offset {} for timestamp search", baseOffset, e);
-            return null;
-        }
-    }
-
-    private CompletableFuture<OptionalLong> readPublishTimeAt(ManagedLedger managedLedger, Position position) {
-        ManagedCursor cursor;
-        try {
-            cursor = managedLedger.newNonDurableCursor(position, "kafka-read-publish-time-" + System.nanoTime());
-        } catch (ManagedLedgerException e) {
-            return CompletableFuture.failedFuture(e);
-        }
-
-        return asyncReadEntries(cursor, 1, Long.MAX_VALUE, position)
-                .whenComplete((ignored, error) -> {
-                    try {
-                        cursor.close();
-                    } catch (Exception e) {
-                        log.warn("Failed to close publish-time cursor for ledger {}", managedLedger.getName(), e);
-                    }
-                })
-                .thenApply(entries -> {
-                    if (entries.isEmpty()) {
-                        return OptionalLong.empty();
-                    }
-
-                    try {
-                        Entry entry = entries.get(0);
-                        return tryGetPublishTime(entry.getDataBuffer());
-                    } finally {
-                        releaseManagedLedgerEntries(entries);
-                    }
-                });
-    }
-
-    private CompletableFuture<MemoryRecords> readRecords(
-            ManagedLedger managedLedger,
-            long fetchOffset,
-            long maxOffsetExclusive,
-            int maxEntries,
-            int maxBytes) {
-        long ledgerId = managedLedger.getFirstPosition().getLedgerId();
-        Position maxPosition = maxOffsetExclusive > 0
-                ? PositionFactory.create(ledgerId, maxOffsetExclusive - 1)
-                : PositionFactory.LATEST;
-        Position startPosition = PositionFactory.create(ledgerId, fetchOffset);
-        if (fetchCursorPool == null) {
-            return CompletableFuture.failedFuture(
-                    new IllegalStateException("Fetch cursor pool is not initialized for " + topicIdPartition));
-        }
-
-        return fetchCursorPool.acquire(startPosition)
-                .thenCompose(lease -> asyncReadEntries(lease.cursor(), maxEntries, maxBytes, maxPosition)
-                        .whenComplete((ignored, error) -> lease.close())
-                        .thenApply(this::convertManagedLedgerEntriesToMemoryRecords));
-    }
-
-    private CompletableFuture<List<Entry>> asyncReadEntries(
-            ManagedCursor cursor,
-            int maxEntries,
-            long maxSizeBytes,
-            Position maxPosition) {
-        CompletableFuture<List<Entry>> future = new CompletableFuture<>();
-        cursor.asyncReadEntries(maxEntries, maxSizeBytes, new AsyncCallbacks.ReadEntriesCallback() {
-            @Override
-            public void readEntriesComplete(List<Entry> entries, Object ctx) {
-                future.complete(entries);
-            }
-
-            @Override
-            public void readEntriesFailed(ManagedLedgerException exception, Object ctx) {
-                future.completeExceptionally(exception);
-            }
-        }, null, maxPosition);
-        return future;
-    }
-
-    private MemoryRecords convertManagedLedgerEntriesToMemoryRecords(List<Entry> entries) {
-        if (entries.isEmpty()) {
-            return MemoryRecords.EMPTY;
-        }
-
-        try {
-            int totalSize = entries.stream().mapToInt(entry -> entry.getDataBuffer().readableBytes()).sum();
-            if (totalSize == 0) {
-                return MemoryRecords.EMPTY;
-            }
-
-            ByteBuffer combined = ByteBuffer.allocate(totalSize);
-            for (Entry entry : entries) {
-                ByteBuf payload = entry.getDataBuffer();
-                if (payload.readableBytes() == 0) {
-                    continue;
-                }
-
-                long storageOffset = entry.getEntryId();
-                ByteBuffer kafkaRecords = KafkaEntryFormatter.decode(payload);
-                int readableBytes = kafkaRecords.remaining();
-                if (readableBytes == 0) {
-                    continue;
-                }
-
-                if (readableBytes >= 8) {
-                    int pos = kafkaRecords.position();
-                    kafkaRecords.putLong(pos, storageOffset);
-                }
-
-                combined.put(kafkaRecords);
-            }
-            combined.flip();
-            return MemoryRecords.readableRecords(combined);
-        } finally {
-            releaseManagedLedgerEntries(entries);
-        }
-    }
-
-    private void releaseManagedLedgerEntries(List<Entry> entries) {
-        for (Entry entry : entries) {
-            if (entry == null) {
+    boolean cleanupNonOwnedProducerStates(Set<String> ownedZones, boolean deletePartition) {
+        boolean cleaned = false;
+        for (String zone : producerStateZones()) {
+            if (ownedZones.contains(zone)) {
                 continue;
             }
-            try {
-                entry.release();
-            } catch (Exception e) {
-                log.warn("Failed to release managed-ledger entry at offset {}", entry.getEntryId(), e);
+            cleaned = cleanupProducerState(zone, deletePartition).isPresent() || cleaned;
+        }
+        return cleaned;
+    }
+
+    /**
+     * Retires this partition log. The returned future completes once the reader, writer, retention
+     * and producer state are done with the handle and {@link Log#closeAsync()} has been requested;
+     * the handle's own close is retried inside ursa-storage and is deliberately not awaited, so no
+     * request or timer thread ever blocks on storage here.
+     */
+    CompletableFuture<Void> close(boolean deletePartition) {
+        PartitionReader retiredReader;
+        synchronized (this) {
+            if (!closed.compareAndSet(false, true)) {
+                return closeFuture;
             }
+            retiredReader = reader;
+            reader = null;
         }
-    }
-
-    private CompletableFuture<ListOffsetsPartitionResponse> handleEarliestTimestamp(ManagedLedger managedLedger) {
-        long offset = getEarliestOffset(managedLedger);
-        log.debug("EARLIEST for partition {}: offset={}", topicIdPartition, offset);
-        return CompletableFuture.completedFuture(
-                ListOffsetsPartitionResponse.success(topicIdPartition, offset, UNKNOWN_TIMESTAMP));
-    }
-
-    private CompletableFuture<ListOffsetsPartitionResponse> handleLatestTimestamp(ManagedLedger managedLedger) {
-        return getHighWatermark(managedLedger).thenApply(highWatermark -> {
-            log.debug("LATEST for partition {}: hwm={}", topicIdPartition, highWatermark);
-            return ListOffsetsPartitionResponse.success(topicIdPartition, highWatermark, UNKNOWN_TIMESTAMP);
-        });
-    }
-
-    private CompletableFuture<ListOffsetsPartitionResponse> handleMaxTimestamp(ManagedLedger managedLedger) {
-        Position lastPosition = managedLedger.getLastConfirmedEntry();
-        if (isInvalidPosition(lastPosition)) {
-            return CompletableFuture.completedFuture(ListOffsetsPartitionResponse.success(topicIdPartition, -1L, -1L));
+        writer.close();
+        if (retiredReader != null) {
+            // The cursor must be gone before the handle it reads through is closed. Metrics are
+            // registered together with the reader, so an open that never completed has none.
+            retiredReader.close();
+            logMetrics.remove(topicIdPartition);
         }
-
-        return readPublishTimeAt(managedLedger, lastPosition)
-                .thenApply(publishTimeOpt -> {
-                    long ts = publishTimeOpt.orElse(UNKNOWN_TIMESTAMP);
-                    long lastOffset = getNextOffsetForUrsa(lastPosition) - 1;
-                    if (lastOffset < 0) {
-                        lastOffset = -1L;
-                    }
-                    return ListOffsetsPartitionResponse.success(topicIdPartition, lastOffset, ts);
-                });
-    }
-
-    private CompletableFuture<ListOffsetsPartitionResponse> handleTimestampSearch(
-            ManagedLedger managedLedger,
-            long targetTimestamp) {
-        Position lac = managedLedger.getLastConfirmedEntry();
-        if (isInvalidPosition(lac) || managedLedger.getNumberOfEntries() == 0) {
-            return listOffsetsNotFound();
-        }
-
-        Position firstPosition = getFirstPositionForTimestampSearch(managedLedger);
-        if (isInvalidPosition(firstPosition)) {
-            return listOffsetsNotFound();
-        }
-
-        return findStartPositionByPublishTimeAtOrAfter(managedLedger, firstPosition, lac, targetTimestamp)
-                .thenCompose(startPosition -> {
-                    if (startPosition == null || isInvalidPosition(startPosition) || startPosition.compareTo(lac) > 0) {
-                        return listOffsetsNotFound();
-                    }
-
-                    return scanForFirstTimestampAtOrAfter(managedLedger, startPosition, lac, targetTimestamp)
-                            .thenApply(result -> result == null
-                                    ? ListOffsetsPartitionResponse.success(topicIdPartition, -1L, -1L)
-                                    : ListOffsetsPartitionResponse.success(topicIdPartition, result[1], result[0]));
-                });
-    }
-
-    private CompletableFuture<Position> findStartPositionByPublishTimeAtOrAfter(
-            ManagedLedger managedLedger,
-            Position startPosition,
-            Position lac,
-            long targetTimestamp) {
-        long entryCount = managedLedger.getNumberOfEntries();
-        if (entryCount <= 0) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        long maxIndex = entryCount - 1;
-        return new FindFirstEntryByPublishTimeAtOrAfter(managedLedger, startPosition, lac, targetTimestamp, maxIndex).find();
-    }
-
-    private CompletableFuture<long[]> scanForFirstTimestampAtOrAfter(
-            ManagedLedger managedLedger,
-            Position startPosition,
-            Position lac,
-            long targetTimestamp) {
-        ManagedCursor cursor;
-        try {
-            cursor = managedLedger.newNonDurableCursor(startPosition, "kafka-scan-for-timestamp-" + System.nanoTime());
-        } catch (ManagedLedgerException e) {
-            return CompletableFuture.failedFuture(e);
-        }
-
-        return scanCursorForFirstTimestampAtOrAfter(cursor, lac, targetTimestamp)
-                .whenComplete((ignored, error) -> {
-                    try {
-                        cursor.close();
-                    } catch (Exception e) {
-                        log.warn("Failed to close timestamp-scan cursor for ledger {}", managedLedger.getName(), e);
-                    }
-                });
-    }
-
-    private CompletableFuture<long[]> scanCursorForFirstTimestampAtOrAfter(
-            ManagedCursor cursor,
-            Position lac,
-            long targetTimestamp) {
-        return asyncReadEntries(cursor, 1, Long.MAX_VALUE, lac)
-                .thenCompose(entries -> {
-                    if (entries.isEmpty()) {
-                        return CompletableFuture.completedFuture(null);
-                    }
-
-                    try {
-                        for (Entry entry : entries) {
-                            long[] found = findFirstTimestampGe(entry.getDataBuffer(), entry.getEntryId(), targetTimestamp);
-                            if (found != null) {
-                                return CompletableFuture.completedFuture(found);
-                            }
+        CompletableFuture<Void> producerState = cleanupProducerStates(deletePartition);
+        CompletableFuture<Void> trims = retention.close();
+        CompletableFuture.allOf(producerState, trims).whenComplete((ignored, error) ->
+                logFuture.whenComplete((logInstance, openError) -> {
+                    if (logInstance != null) {
+                        try {
+                            // Assumes the Ursa LeasedLog overrides closeAsync() with a close that
+                            // returns immediately and retries itself. The interface default runs
+                            // the blocking close() on the calling thread, which here is whichever
+                            // thread completed the producer-state and trim drains.
+                            logInstance.closeAsync();
+                        } catch (Throwable closeError) {
+                            log.warn("Failed to request the close of the log for partition {}",
+                                    topicIdPartition, closeError);
                         }
-                    } finally {
-                        releaseManagedLedgerEntries(entries);
                     }
-
-                    return scanCursorForFirstTimestampAtOrAfter(cursor, lac, targetTimestamp);
-                });
+                    closeFuture.complete(null);
+                }));
+        return closeFuture;
     }
 
-    private CompletableFuture<ListOffsetsPartitionResponse> listOffsetsNotFound() {
-        return CompletableFuture.completedFuture(ListOffsetsPartitionResponse.success(topicIdPartition, -1L, -1L));
+    /** Retires this partition log and drops it from the state, so the next request reopens it. */
+    void invalidate() {
+        close(false);
+        state.removePartitionLog(topicIdPartition, this);
     }
 
-    private Position getFirstPositionForTimestampSearch(ManagedLedger managedLedger) {
-        Position firstPosition = managedLedger.getFirstPosition();
-        if (isInvalidPosition(firstPosition)) {
-            return managedLedger.getNextValidPosition(firstPosition);
+    int ownedWritePayloadCount() {
+        return writer.ownedWritePayloadCount();
+    }
+
+    private CompletableFuture<Log> initialized() {
+        return initFuture;
+    }
+
+    /**
+     * Widens the reader's cached offset window to cover an append this broker just made. The
+     * reader exists by then: the writer only appends once the init future has completed, which is
+     * what installs the reader.
+     */
+    private void observeAppend(LogOffset appended) {
+        PartitionReader currentReader = reader;
+        if (currentReader != null) {
+            currentReader.observeAppend(appended);
         }
-        return firstPosition;
     }
 
-    private Errors mapException(Throwable error) {
-        Throwable cause = unwrapCompletionException(error);
-        if (cause instanceof NotLeaderOrFollowerException) {
-            invalidate();
+    /** Drops the reader's cached offset window once a trim has moved the log's first offset. */
+    private void invalidateReaderRange() {
+        PartitionReader currentReader = reader;
+        if (currentReader != null) {
+            currentReader.invalidateRange();
+        }
+    }
+
+    /** The reader installed once the log opened; it is dropped as soon as this partition log closes. */
+    private PartitionReader activeReader() {
+        PartitionReader currentReader = reader;
+        if (currentReader == null) {
+            throw ownershipLostException();
+        }
+        return currentReader;
+    }
+
+    private NotLeaderOrFollowerException ownershipLostException() {
+        return new NotLeaderOrFollowerException("Partition log is closed for " + topicIdPartition);
+    }
+
+    private CompletableFuture<Log> createInitFuture(CompletableFuture<Log> opened) {
+        CompletableFuture<Log> initialized = new CompletableFuture<>();
+        opened.whenComplete((logInstance, error) -> {
+            if (error != null) {
+                if (closed.get()) {
+                    initialized.completeExceptionally(
+                            new NotLeaderOrFollowerException("Partition log already closed"));
+                    return;
+                }
+                log.warn("Failed to open Log for partition {}, evicting from cache", topicIdPartition, error);
+                // The writer stays open on purpose: this partition log was never leased, so a
+                // request that still reaches it must report the open failure rather than a lost
+                // leadership. Every in-flight write drains through the failed init future below.
+                // Cleanup runs first: the failed init future releases queued writes, and a
+                // draining produce must not recreate a ProducerStateManager after the cleanup.
+                cleanupProducerStates(false);
+                initialized.completeExceptionally(error);
+                // An already-failed future invokes this callback inside the map's mapping function,
+                // where removing the same key is a recursive update. In that case
+                // getOrCreatePartitionLog evicts the failed value right after it is published.
+                if (state.partitionLog(topicIdPartition) == this) {
+                    state.removePartitionLog(topicIdPartition, this);
+                }
+                return;
+            }
+
+            try {
+                install(logInstance, initialized);
+            } catch (Throwable initializationError) {
+                initialized.completeExceptionally(initializationError);
+                close(false);
+            }
+        });
+        return initialized;
+    }
+
+    /** Publishes the reader and the log metrics, or leaves neither behind if registration fails. */
+    private synchronized void install(Log logInstance, CompletableFuture<Log> initialized) {
+        if (closed.get()) {
+            throw new NotLeaderOrFollowerException("Partition log already closed");
+        }
+        UrsaPartitionLog activePartitionLog = state.partitionLog(topicIdPartition);
+        if (activePartitionLog != null && activePartitionLog != this) {
+            throw new NotLeaderOrFollowerException("Partition log already replaced");
+        }
+        PartitionReader openedReader = new PartitionReader(
+                topicIdPartition, logInstance, MAX_ENTRIES_PER_FETCH, state.time());
+        try {
+            logMetrics.register(topicIdPartition, logInstance);
+        } catch (Throwable metricRegistrationError) {
+            logMetrics.remove(topicIdPartition);
+            openedReader.close();
+            throw metricRegistrationError;
+        }
+        reader = openedReader;
+        initialized.complete(logInstance);
+    }
+
+    private CompletableFuture<Void> cleanupProducerStates(boolean deletePartition) {
+        List<CompletableFuture<Void>> cleanups = new ArrayList<>();
+        for (String zone : producerStateZones()) {
+            cleanupProducerState(zone, deletePartition).ifPresent(cleanups::add);
+        }
+        return CompletableFuture.allOf(cleanups.toArray(new CompletableFuture<?>[0]));
+    }
+
+    private Set<String> producerStateZones() {
+        return new LinkedHashSet<>(producerStateManagers.keySet());
+    }
+
+    /** Empty when the zone has no manager, or when the state is no longer accepting cleanups. */
+    private synchronized Optional<CompletableFuture<Void>> cleanupProducerState(
+            String zone,
+            boolean deletePartition) {
+        ProducerStateManager producerStateManager = producerStateManagers.get(zone);
+        if (producerStateManager == null) {
+            return Optional.empty();
+        }
+        return state.startProducerStateCleanup(() -> {
+            producerStateManagers.remove(zone, producerStateManager);
+            return producerStateManager.cleanup(deletePartition);
+        }).map(cleanup -> cleanup.<Void>handle((ignored, error) -> {
+            if (error != null) {
+                log.warn("Failed to cleanup producer state manager for partition {} and zone {}",
+                        topicIdPartition, zone, error);
+            }
+            return null;
+        }));
+    }
+
+    /**
+     * The error a client sees for one storage failure. Classification alone: the failure may have
+     * been raised by the partition-log lookup itself, before any handle existed to retire.
+     */
+    static Errors classify(Throwable error) {
+        Throwable cause = DisklessFutures.unwrap(error);
+        if (hasCause(cause, NotLeaderOrFollowerException.class)
+                || hasCause(cause, LogFencedException.class)) {
             return Errors.NOT_LEADER_OR_FOLLOWER;
         }
-        if (cause instanceof ManagedLedgerException managedLedgerException && isClosed(managedLedgerException)) {
-            invalidate();
-            return Errors.NOT_LEADER_OR_FOLLOWER;
-        }
-        if (isNotFound(cause)) {
-            invalidate();
+        if (hasCause(cause, NoSuchStreamException.class)) {
             return Errors.UNKNOWN_TOPIC_OR_PARTITION;
         }
         return Errors.KAFKA_STORAGE_ERROR;
     }
 
+    private Errors mapException(Throwable error) {
+        Errors mapped = classify(error);
+        if (mapped == Errors.NOT_LEADER_OR_FOLLOWER || mapped == Errors.UNKNOWN_TOPIC_OR_PARTITION) {
+            // The handle behind this partition log is gone; the next request opens a fresh one.
+            invalidate();
+        }
+        return mapped;
+    }
+
     private PartitionResponse writeErrorResponse(Throwable error) {
-        Throwable cause = unwrapCompletionException(error);
-        if (cause instanceof NotLeaderOrFollowerException) {
+        Errors mapped = classify(error);
+        Throwable cause = DisklessFutures.unwrap(error);
+        if (mapped == Errors.NOT_LEADER_OR_FOLLOWER) {
             invalidate();
             log.info("Partition log is no longer local owner for partition {}", topicIdPartition, cause);
-            return new PartitionResponse(Errors.NOT_LEADER_OR_FOLLOWER);
-        }
-        if (cause instanceof ManagedLedgerException managedLedgerException && isClosed(managedLedgerException)) {
+        } else if (mapped == Errors.UNKNOWN_TOPIC_OR_PARTITION) {
             invalidate();
-            log.info("Managed ledger is already closed for partition {}", topicIdPartition, cause);
-            return new PartitionResponse(Errors.NOT_LEADER_OR_FOLLOWER);
+            log.debug("Partition log is not provisioned yet for partition {}", topicIdPartition, cause);
+        } else {
+            log.error("Failed to write to partition {}", topicIdPartition, error);
         }
-
-        log.error("Failed to write to partition {}", topicIdPartition, error);
-        return new PartitionResponse(Errors.KAFKA_STORAGE_ERROR);
+        return new PartitionResponse(mapped);
     }
 
-    private Throwable unwrapCompletionException(Throwable error) {
+    /**
+     * Answers one partition of a request whose partition log could not be resolved at all -- the
+     * topic was deleted under this broker, or the storage state is closing.
+     *
+     * <p>Resolution happens partition by partition while the request is being fanned out, so by the
+     * time one partition throws the earlier ones may already have been handed to storage. Failing
+     * only the partition that could not be resolved is what keeps those earlier records from being
+     * reported as failed and produced a second time.
+     */
+    static Errors unresolved(TopicIdPartition topicIdPartition, String operation, Throwable error) {
+        Errors mapped = classify(error);
+        log.debug("Diskless {} for partition {} failed with {} before its log was resolved",
+                operation, topicIdPartition, mapped, error);
+        return mapped;
+    }
+
+    static boolean hasCause(Throwable error, Class<? extends Throwable> type) {
         Throwable cause = error;
-        while (cause.getCause() != null && cause instanceof CompletionException) {
+        while (cause != null) {
+            if (type.isInstance(cause)) {
+                return true;
+            }
             cause = cause.getCause();
         }
-        return cause;
+        return false;
     }
 
-    static boolean isClosed(ManagedLedgerException exception) {
-        String message = exception.getMessage();
-        return "Already closed".equals(message)
-                || exception instanceof ManagedLedgerException.ManagedLedgerAlreadyClosedException
-                || exception instanceof ManagedLedgerException.ManagedLedgerFencedException;
-    }
-
-    private static boolean isNotFound(Throwable error) {
-        return error instanceof ManagedLedgerException.ManagedLedgerNotFoundException
-                || error instanceof ManagedLedgerException.MetadataNotFoundException;
-    }
-
-    private FetchPartitionData createFetchErrorResponse(Errors error) {
+    static FetchPartitionData createFetchErrorResponse(Errors error) {
         return new FetchPartitionData(
                 error,
                 -1,
@@ -807,284 +446,5 @@ final class UrsaPartitionLog {
                 OptionalInt.empty(),
                 false
         );
-    }
-
-    boolean cleanupNonOwnedProducerStates(Set<String> ownedZones, boolean deletePartition) {
-        boolean cleaned = false;
-        for (String zone : snapshotProducerStateZones()) {
-            if (ownedZones.contains(zone)) {
-                continue;
-            }
-            cleaned = cleanupProducerState(zone, deletePartition) || cleaned;
-        }
-        return cleaned;
-    }
-
-    boolean cleanup(boolean deletePartition) {
-        boolean cleaned = false;
-        for (String zone : snapshotProducerStateZones()) {
-            cleaned = cleanupProducerState(zone, deletePartition) || cleaned;
-        }
-        return cleaned;
-    }
-
-    Set<String> snapshotProducerStateZones() {
-        return new LinkedHashSet<>(producerStateManagers.keySet());
-    }
-
-    void close() {
-        close(false);
-    }
-
-    void close(boolean deletePartition) {
-        closed = true;
-        cleanupWriteState();
-        cleanupGlobalState();
-        closeManagedLedger();
-        cleanup(deletePartition);
-    }
-
-    void cleanupWriteState() {
-        writeSequencer.reset();
-    }
-
-    void cleanupReadState() {
-        closeFetchCursorPool();
-    }
-
-    boolean cleanupGlobalState() {
-        boolean cleaned = logMetrics.remove(topicIdPartition);
-        return closeFetchCursorPool() || cleaned;
-    }
-
-    private boolean cleanupProducerState(String zone, boolean deletePartition) {
-        ProducerStateManager producerStateManager = producerStateManagers.remove(zone);
-        if (producerStateManager == null) {
-            return false;
-        }
-
-        producerStateManager.cleanup(deletePartition).exceptionally(error -> {
-            log.warn("Failed to cleanup producer state manager for partition {} and zone {}",
-                    topicIdPartition, zone, error);
-            return null;
-        });
-        return true;
-    }
-
-    private CompletableFuture<Position> asyncAddEntry(ManagedLedger managedLedger, ByteBuf data, int numberOfMessages) {
-        CompletableFuture<Position> future = new CompletableFuture<>();
-        managedLedger.asyncAddEntry(data, numberOfMessages, new AsyncCallbacks.AddEntryCallback() {
-            @Override
-            public void addComplete(Position position, ByteBuf entryData, Object ctx) {
-                future.complete(position);
-            }
-
-            @Override
-            public void addFailed(ManagedLedgerException exception, Object ctx) {
-                future.completeExceptionally(exception);
-            }
-        }, null);
-        return future;
-    }
-
-    private CompletableFuture<ManagedLedger> createInitFuture(CompletableFuture<ManagedLedger> managedLedgerFuture) {
-        CompletableFuture<ManagedLedger> initFuture = new CompletableFuture<>();
-        managedLedgerFuture.whenComplete((ledger, error) -> {
-            if (error != null) {
-                if (closed) {
-                    initFuture.completeExceptionally(new NotLeaderOrFollowerException("Partition log already closed"));
-                } else {
-                    log.warn("Failed to open ManagedLedger for partition {}, evicting from cache",
-                            topicIdPartition, error);
-                    cleanupWriteState();
-                    cleanupReadState();
-                    cleanup(false);
-                    state.removePartitionLog(topicIdPartition, this);
-                    initFuture.completeExceptionally(error);
-                }
-                return;
-            }
-
-            if (closed) {
-                closeManagedLedgerQuietly(ledger);
-                initFuture.completeExceptionally(new NotLeaderOrFollowerException("Partition log already closed"));
-                return;
-            }
-
-            UrsaPartitionLog activePartitionLog = state.partitionLog(topicIdPartition);
-            if (activePartitionLog != null && activePartitionLog != this) {
-                closeManagedLedgerQuietly(ledger);
-                initFuture.completeExceptionally(new NotLeaderOrFollowerException("Partition log already replaced"));
-                return;
-            }
-
-            try {
-                initGlobalState(ledger);
-                initFuture.complete(ledger);
-            } catch (Throwable activationError) {
-                closeManagedLedgerQuietly(ledger);
-                initFuture.completeExceptionally(activationError);
-            }
-        });
-        return initFuture;
-    }
-
-    private CompletableFuture<ManagedLedger> initialized() {
-        return initFuture;
-    }
-
-    private void initGlobalState(ManagedLedger ledger) {
-        boolean created = false;
-        synchronized (this) {
-            if (fetchCursorPool == null) {
-                fetchCursorPool = new NonDurableCursorPool(
-                        ledger,
-                        fetchCursorNamePrefix(topicIdPartition),
-                        FETCH_CURSOR_POOL_SIZE);
-                created = true;
-            }
-        }
-        if (created) {
-            logMetrics.register(topicIdPartition, ledger);
-        }
-    }
-
-    private void closeManagedLedger() {
-        initialized().whenComplete((ledger, error) -> {
-            if (ledger == null) {
-                return;
-            }
-            closeManagedLedgerQuietly(ledger);
-        });
-    }
-
-    private void closeManagedLedgerQuietly(ManagedLedger ledger) {
-        try {
-            ledger.close();
-        } catch (Exception e) {
-            log.warn("Failed to close ManagedLedger for partition {}", topicIdPartition, e);
-        }
-    }
-
-    private boolean closeFetchCursorPool() {
-        NonDurableCursorPool pool;
-        synchronized (this) {
-            pool = fetchCursorPool;
-            fetchCursorPool = null;
-        }
-        if (pool == null) {
-            return false;
-        }
-        try {
-            pool.close();
-        } catch (Exception e) {
-            log.warn("Failed to close fetch cursor pool for partition {}", topicIdPartition, e);
-        }
-        return true;
-    }
-
-    private static List<ProducerStateManager.AppendBatch> buildAppendBatches(MemoryRecords records) {
-        List<ProducerStateManager.AppendBatch> appendBatches = new ArrayList<>();
-        for (RecordBatch batch : records.batches()) {
-            if (!batch.hasProducerId()) {
-                continue;
-            }
-            int recordCount = batch.countOrNull() != null ? batch.countOrNull() : 0;
-            appendBatches.add(new ProducerStateManager.AppendBatch(
-                    batch.producerId(),
-                    batch.producerEpoch(),
-                    batch.baseSequence(),
-                    batch.lastSequence(),
-                    recordCount,
-                    batch.maxTimestamp()
-            ));
-        }
-        return appendBatches;
-    }
-
-    private static String fetchCursorNamePrefix(TopicIdPartition tp) {
-        return "kafka-fetch-" + tp.topic() + "-partition-" + tp.partition() + "-cursor";
-    }
-
-    private final class FindFirstEntryByPublishTimeAtOrAfter {
-        private final ManagedLedger managedLedger;
-        private final Position startPosition;
-        private final Position lac;
-        private final long targetTimestamp;
-        private long low;
-        private long high;
-
-        private FindFirstEntryByPublishTimeAtOrAfter(
-                ManagedLedger managedLedger,
-                Position startPosition,
-                Position lac,
-                long targetTimestamp,
-                long maxIndex) {
-            this.managedLedger = managedLedger;
-            this.startPosition = startPosition;
-            this.lac = lac;
-            this.targetTimestamp = targetTimestamp;
-            this.low = 0;
-            this.high = maxIndex;
-        }
-
-        private CompletableFuture<Position> find() {
-            if (startPosition.compareTo(lac) > 0) {
-                return CompletableFuture.completedFuture(null);
-            }
-
-            return readPublishTimeAt(managedLedger, startPosition)
-                    .thenCompose(startPublishTimeOpt -> {
-                        long startPublishTime = startPublishTimeOpt.orElse(UNKNOWN_TIMESTAMP);
-                        if (startPublishTime == UNKNOWN_TIMESTAMP || startPublishTime >= targetTimestamp) {
-                            return CompletableFuture.completedFuture(startPosition);
-                        }
-
-                        Position endPosition = positionAtIndex(high);
-                        if (endPosition == null || isInvalidPosition(endPosition) || endPosition.compareTo(lac) > 0) {
-                            return CompletableFuture.completedFuture(startPosition);
-                        }
-
-                        return readPublishTimeAt(managedLedger, endPosition).thenCompose(endPublishTimeOpt -> {
-                            long endPublishTime = endPublishTimeOpt.orElse(UNKNOWN_TIMESTAMP);
-                            if (endPublishTime == UNKNOWN_TIMESTAMP || endPublishTime < targetTimestamp) {
-                                return CompletableFuture.completedFuture(startPosition);
-                            }
-                            return search();
-                        });
-                    });
-        }
-
-        private CompletableFuture<Position> search() {
-            if (high <= low + 1) {
-                return CompletableFuture.completedFuture(positionAtIndex(high));
-            }
-
-            long mid = low + (high - low) / 2;
-            Position midPosition = positionAtIndex(mid);
-            if (midPosition == null || isInvalidPosition(midPosition) || midPosition.compareTo(lac) > 0) {
-                return CompletableFuture.completedFuture(startPosition);
-            }
-
-            return readPublishTimeAt(managedLedger, midPosition).thenCompose(midPublishTimeOpt -> {
-                long midPublishTime = midPublishTimeOpt.orElse(UNKNOWN_TIMESTAMP);
-                if (midPublishTime == UNKNOWN_TIMESTAMP) {
-                    return CompletableFuture.completedFuture(startPosition);
-                }
-                if (midPublishTime >= targetTimestamp) {
-                    high = mid;
-                } else {
-                    low = mid;
-                }
-                return search();
-            });
-        }
-
-        private Position positionAtIndex(long index) {
-            if (index <= 0) {
-                return startPosition;
-            }
-            return managedLedger.getPositionAfterN(startPosition, index, PositionBound.startExcluded);
-        }
     }
 }

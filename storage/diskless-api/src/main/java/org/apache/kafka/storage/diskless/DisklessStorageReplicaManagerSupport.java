@@ -51,11 +51,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 
 /**
  * Support class for integrating Ursa storage with ReplicaManager.
  * This class provides methods to partition requests by storage mode
- * and route them to the appropriate handlers using ManagedLedger.
+ * and route them to the configured diskless storage engine.
  */
 public class DisklessStorageReplicaManagerSupport implements Closeable {
 
@@ -89,6 +90,8 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
      * @param logConfigDefaults  default log configuration values
      * @param topicConfigSupplier function to get topic configuration
      * @param topicIdSupplier function to get topic ID
+     * @param partitionCountSupplier function to get the current partition count of a topic
+     * @param imageOffsetSupplier function to get the last metadata offset this broker has applied
      * @param aliveBrokerNodesSupplier function to get alive brokers for a listener
      * @param ownerSelectionListener listener used for canonical diskless owner selection
      */
@@ -100,6 +103,8 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
             Map<String, Object> logConfigDefaults,
             Function<String, Map<String, String>> topicConfigSupplier,
             Function<String, Uuid> topicIdSupplier,
+            Function<String, OptionalInt> partitionCountSupplier,
+            LongSupplier imageOffsetSupplier,
             Function<ListenerName, Iterable<Node>> aliveBrokerNodesSupplier,
             ListenerName ownerSelectionListener) {
 
@@ -117,6 +122,8 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
                 topicConfigSupplier,
                 aliveBrokerNodesSupplier,
                 topicIdSupplier,
+                partitionCountSupplier,
+                imageOffsetSupplier,
                 true
         );
         this.brokerId = brokerId;
@@ -129,11 +136,13 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
                 ursaConfig,
                 brokerTopicStats,
                 logConfigDefaults,
-                topicConfigSupplier
+                topicConfigSupplier,
+                partitionCountSupplier,
+                imageOffsetSupplier
         );
 
-        log.info("Diskless support initialized with ManagedLedger, oxia URLs: {} {}",
-                ursaConfig.getPulsarOxiaServiceUrl(), ursaConfig.getUrsaOxiaServiceUrl());
+        log.info("Diskless support initialized with Lakestream, oxia URLs: {} {}",
+                ursaConfig.getCatalogOxiaServiceUrl(), ursaConfig.getUrsaOxiaServiceUrl());
     }
 
     // Visible for testing.
@@ -160,23 +169,28 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
      * Updates the topic configuration in the diskless storage backend.
      * This is called when topic configs change (e.g., alter configs).
      */
-    public void updateTopicConfig(String topic, Properties config) {
-        if (!enabled || engine == null) {
+    public void applyTopicConfig(String topic, Properties config) {
+        if (!enabled || engine == null || topic == null || config == null) {
+            return;
+        }
+        Uuid topicId = metadataView.getTopicId(topic);
+        if (topicId == null || Uuid.ZERO_UUID.equals(topicId)) {
+            log.debug("Skip diskless config update for {} without a current topic ID", topic);
             return;
         }
         Map<String, String> configMap = new LinkedHashMap<>();
         config.forEach((k, v) -> configMap.put(k.toString(), v.toString()));
-        engine.updateTopicConfig(topic, configMap);
+        engine.applyTopicConfig(topic, topicId, configMap);
     }
 
     /**
      * Deletes the topic configuration after the topic has been deleted.
      */
-    public void deleteTopicConfig(String topic) {
-        if (!enabled || engine == null || topic == null) {
+    public void fenceDeletedTopic(String topicName, Uuid topicId) {
+        if (!enabled || engine == null || topicName == null || topicId == null) {
             return;
         }
-        engine.deleteTopicConfig(topic);
+        engine.fenceDeletedTopic(topicName, topicId);
     }
 
     /**
@@ -186,16 +200,41 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
         return metadataView.isDisklessStorageTopic(topic);
     }
 
-    public boolean isCurrentDisklessOwner(TopicIdPartition topicIdPartition, String zone) {
+    /** Returns whether the supplied topic ID is still the current Kafka incarnation for its name. */
+    public boolean isCurrentTopicIncarnation(TopicIdPartition topicIdPartition) {
         if (!enabled || topicIdPartition == null) {
             return false;
         }
+        Uuid currentTopicId = metadataView.getTopicId(topicIdPartition.topic());
+        return currentTopicId != null && currentTopicId.equals(topicIdPartition.topicId());
+    }
 
+    public boolean isCurrentDisklessOwner(TopicIdPartition topicIdPartition, String zone) {
+        if (!enabled
+                || topicIdPartition == null
+                || !isCurrentTopicIncarnation(topicIdPartition)
+                || !metadataView.isDisklessStorageTopic(topicIdPartition.topic())) {
+            return false;
+        }
+
+        return isSelectedBrokerForZone(topicIdPartition, zone);
+    }
+
+    private boolean isSelectedBrokerForZone(TopicIdPartition topicIdPartition, String zone) {
         OptionalInt selected = brokerSelector.selectBrokerForZone(
                 topicIdPartition.topicId(),
                 topicIdPartition.partition(),
                 zone);
         return selected.isPresent() && selected.getAsInt() == brokerId;
+    }
+
+    /** Returns whether this broker owns the partition for at least one currently active client zone. */
+    public boolean isCurrentDisklessOwnerInAnyZone(TopicIdPartition topicIdPartition) {
+        return enabled
+                && topicIdPartition != null
+                && isCurrentTopicIncarnation(topicIdPartition)
+                && metadataView.isDisklessStorageTopic(topicIdPartition.topic())
+                && !ownedZones(topicIdPartition).isEmpty();
     }
 
     public boolean hasTrackedPartitionsForTopic(String topic) {
@@ -248,15 +287,9 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
             }
         }
 
-        // TODO: Since deleted partitions are only passed on the deletion delta,
-        //  there may be no subsequent retries—leaving managed-ledger metadata/stream leaked.
         cleanupTrackedPartitions(trackedPartitionsToCleanup, topicMaybeEmptied);
         cleanupRetainedProducerStates(retainedOwnedZones);
         cleanupDeletedTrackedPartitions(trackedPartitionsToDelete, topicMaybeEmptied);
-
-        Set<TopicIdPartition> deletedPartitionsWithoutTrackedState =
-                deletedPartitionsWithoutTrackedState(partitionsToCheck, permanentlyDeletedPartitions);
-        cleanupDeletedPartitionsWithoutTrackedState(deletedPartitionsWithoutTrackedState);
     }
 
     private void cleanupTrackedPartitions(
@@ -275,30 +308,9 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
             Consumer<String> topicMaybeEmptied
     ) {
         for (TopicIdPartition trackedPartition : trackedPartitionsToDelete) {
-            boolean cleanupSucceeded = cleanupPartitionInternal(trackedPartition, true);
-            cleanupSucceeded = deletePartitionDataInternal(trackedPartition) && cleanupSucceeded;
-            if (cleanupSucceeded) {
+            if (cleanupPartitionInternal(trackedPartition, true)) {
                 topicMaybeEmptied.accept(trackedPartition.topic());
             }
-        }
-    }
-
-    private Set<TopicIdPartition> deletedPartitionsWithoutTrackedState(
-            Set<TopicIdPartition> trackedPartitions,
-            Set<TopicIdPartition> permanentlyDeletedPartitions
-    ) {
-        Set<TopicIdPartition> deletedPartitionsWithoutTrackedState = new LinkedHashSet<>();
-        for (TopicIdPartition deletedPartition : permanentlyDeletedPartitions) {
-            if (!trackedPartitions.contains(deletedPartition)) {
-                deletedPartitionsWithoutTrackedState.add(deletedPartition);
-            }
-        }
-        return deletedPartitionsWithoutTrackedState;
-    }
-
-    private void cleanupDeletedPartitionsWithoutTrackedState(Set<TopicIdPartition> deletedPartitionsWithoutTrackedState) {
-        for (TopicIdPartition deletedPartition : deletedPartitionsWithoutTrackedState) {
-            deletePartitionDataInternal(deletedPartition);
         }
     }
 
@@ -380,15 +392,56 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
             Map<TopicIdPartition, FetchRequest.PartitionData> fetchInfos,
             String clientId) {
         String zone = brokerSelector.effectiveZone(clientId);
+        Map<TopicIdPartition, TopicIdPartition> requestToCanonical = new LinkedHashMap<>();
+        Map<TopicIdPartition, FetchRequest.PartitionData> canonicalFetchInfos = new LinkedHashMap<>();
+        fetchInfos.forEach((requestPartition, partitionData) -> {
+            TopicIdPartition canonicalPartition = canonicalFetchPartition(requestPartition);
+            requestToCanonical.put(requestPartition, canonicalPartition);
+            if (canonicalPartition != null) {
+                canonicalFetchInfos.put(canonicalPartition, partitionData);
+            }
+        });
+
         return handleWithOwnership(
-                fetchInfos,
+                canonicalFetchInfos,
                 "fetch",
                 ownedFetchInfos -> handleOwnedFetch(params, ownedFetchInfos),
                 (ignored, response) -> response,
                 ignored -> notLeaderFetchPartitionData(),
                 ignored -> unknownErrorFetchPartitionData(),
                 zone
-        );
+        ).thenApply(canonicalResponses -> {
+            Map<TopicIdPartition, FetchPartitionData> requestResponses = new LinkedHashMap<>();
+            requestToCanonical.forEach((requestPartition, canonicalPartition) -> {
+                FetchPartitionData response = canonicalPartition != null
+                        ? canonicalResponses.get(canonicalPartition)
+                        : null;
+                requestResponses.put(
+                        requestPartition,
+                        response != null ? response : notLeaderFetchPartitionData());
+            });
+            return requestResponses;
+        });
+    }
+
+    /**
+     * Fetch protocol versions before topic IDs use {@link Uuid#ZERO_UUID} in their internal
+     * request key. Resolve only that legacy sentinel to the current metadata image before
+     * ownership selection and storage access. A non-zero stale topic ID must not be rewritten to
+     * a newer incarnation.
+     */
+    private TopicIdPartition canonicalFetchPartition(TopicIdPartition requestPartition) {
+        if (requestPartition == null) {
+            return null;
+        }
+        if (!Uuid.ZERO_UUID.equals(requestPartition.topicId())) {
+            return requestPartition;
+        }
+        Uuid currentTopicId = metadataView.getTopicId(requestPartition.topic());
+        if (currentTopicId == null || Uuid.ZERO_UUID.equals(currentTopicId)) {
+            return null;
+        }
+        return new TopicIdPartition(currentTopicId, requestPartition.topicPartition());
     }
 
     /**
@@ -452,14 +505,6 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
                 engine.cleanupPartition(tp, deletePartition);
             }
         });
-    }
-
-    private boolean deletePartitionDataInternal(TopicIdPartition tp) {
-        if (!enabled || tp == null || !isCurrentDisklessOwner(tp, DisklessClientZone.NO_ZONE) || engine == null) {
-            return true;
-        }
-        // TODO: Add retry for transient failures.
-        return cleanupStep("persistent storage", tp, () -> engine.deletePartitionData(tp));
     }
 
     private <V, O, R> CompletableFuture<Map<TopicIdPartition, R>> handleWithOwnership(
@@ -565,11 +610,6 @@ public class DisklessStorageReplicaManagerSupport implements Closeable {
             log.warn("Failed to cleanup diskless {} state for partition {}", component, tp, t);
             return false;
         }
-    }
-
-    // Visible for testing.
-    public Object getUrsaState() {
-        return engine;
     }
 
     @Override

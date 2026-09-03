@@ -22,39 +22,48 @@ import org.apache.kafka.server.metrics.KafkaMetricsGroup;
 import org.apache.kafka.server.metrics.KafkaYammerMetrics;
 import org.apache.kafka.storage.internals.log.LogMetricNames;
 
-import org.apache.bookkeeper.mledger.ManagedLedger;
-import org.apache.bookkeeper.mledger.Position;
-import org.apache.bookkeeper.mledger.PositionFactory;
-
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
-import io.streamnative.ursa.mledger.UrsaPosition;
+import io.lakestream.api.Log;
+import io.lakestream.api.LogOffset;
 
 final class DisklessLogMetrics {
 
-    private final KafkaMetricsGroup logMetricsGroup = new KafkaMetricsGroup("kafka.log", "Log");
+    private static final long REFRESH_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
 
-    void register(TopicIdPartition topicIdPartition, ManagedLedger managedLedger) {
-        if (topicIdPartition == null || managedLedger == null) {
+    private final KafkaMetricsGroup logMetricsGroup = new KafkaMetricsGroup("kafka.log", "Log");
+    private final ConcurrentHashMap<TopicIdPartition, MetricSnapshot> snapshots = new ConcurrentHashMap<>();
+
+    void register(TopicIdPartition topicIdPartition, Log log) {
+        if (topicIdPartition == null || log == null) {
             return;
         }
         Map<String, String> tags = createLogMetricTags(topicIdPartition.topicPartition());
+        MetricSnapshot snapshot = new MetricSnapshot();
+        snapshots.put(topicIdPartition, snapshot);
+        snapshot.refresh(log);
 
         logMetricsGroup.newGauge(
                 LogMetricNames.SIZE,
-                () -> Math.max(0L, managedLedger.getTotalSize()),
+                () -> snapshot.values(log).size(),
                 tags
         );
         logMetricsGroup.newGauge(
                 LogMetricNames.LOG_START_OFFSET,
-                () -> Math.max(0L, resolveLogStartOffset(managedLedger)),
+                () -> snapshot.values(log).startOffset(),
                 tags
         );
         logMetricsGroup.newGauge(
                 LogMetricNames.LOG_END_OFFSET,
-                () -> Math.max(0L, resolveLogEndOffset(managedLedger)),
+                () -> snapshot.values(log).endOffset(),
                 tags
         );
     }
@@ -65,16 +74,14 @@ final class DisklessLogMetrics {
         }
 
         Map<String, String> tags = createLogMetricTags(topicIdPartition.topicPartition());
+        snapshots.remove(topicIdPartition);
         boolean existing = hasAnyExistingLogMetrics(tags);
         removeMetrics(tags);
         return existing;
     }
 
     void removeAll(Collection<TopicIdPartition> topicIdPartitions) {
-        topicIdPartitions.stream()
-                .map(TopicIdPartition::topicPartition)
-                .distinct()
-                .forEach(topicPartition -> removeMetrics(createLogMetricTags(topicPartition)));
+        topicIdPartitions.forEach(this::remove);
     }
 
     private boolean hasAnyExistingLogMetrics(Map<String, String> tags) {
@@ -101,29 +108,64 @@ final class DisklessLogMetrics {
         logMetricsGroup.removeMetric(LogMetricNames.LOG_END_OFFSET, tags);
     }
 
-    private long resolveLogStartOffset(ManagedLedger managedLedger) {
-        Position firstPosition = managedLedger.getFirstPosition();
-        if (isInvalidPosition(firstPosition)) {
-            return 0L;
-        }
-        if (firstPosition.compareTo(PositionFactory.EARLIEST) == 0) {
-            return 0L;
-        }
-        return Math.max(0L, firstPosition.getEntryId());
+    private static boolean isInvalidOffset(LogOffset offset) {
+        return offset == null || offset.offset() < 0;
     }
 
-    private long resolveLogEndOffset(ManagedLedger managedLedger) {
-        Position lastConfirmedEntry = managedLedger.getLastConfirmedEntry();
-        if (isInvalidPosition(lastConfirmedEntry)) {
-            return 0L;
+    private static MetricValues resolveValues(LogOffset firstOffset, LogOffset lastOffset) {
+        if (isInvalidOffset(firstOffset) || isInvalidOffset(lastOffset)) {
+            return MetricValues.EMPTY;
         }
-        if (lastConfirmedEntry instanceof UrsaPosition ursaPosition) {
-            return Math.max(0L, ursaPosition.getEntryId() + Math.max(1, ursaPosition.numMessages()));
-        }
-        return Math.max(0L, lastConfirmedEntry.getEntryId() + 1);
+        long startOffset = firstOffset.offset();
+        long endOffset = Math.max(startOffset, lastOffset.offset() + lastOffset.numberOfRecords());
+        long size = Math.max(0L, lastOffset.cumulativeSize()
+                - firstOffset.cumulativeSize()
+                + firstOffset.entrySize());
+        return new MetricValues(size, startOffset, endOffset);
     }
 
-    private boolean isInvalidPosition(Position position) {
-        return position == null || position.getEntryId() < 0;
+    private static final class MetricSnapshot {
+        private final AtomicReference<MetricValues> current = new AtomicReference<>(MetricValues.EMPTY);
+        private final AtomicBoolean refreshInProgress = new AtomicBoolean();
+        private final AtomicLong nextRefreshNanos = new AtomicLong();
+
+        MetricValues values(Log log) {
+            refresh(log);
+            return current.get();
+        }
+
+        void refresh(Log log) {
+            long now = System.nanoTime();
+            if (now < nextRefreshNanos.get() || !refreshInProgress.compareAndSet(false, true)) {
+                return;
+            }
+            nextRefreshNanos.set(now + REFRESH_INTERVAL_NANOS);
+
+            CompletableFuture<LogOffset> firstOffsetFuture;
+            CompletableFuture<LogOffset> lastOffsetFuture;
+            try {
+                firstOffsetFuture = log.getFirstOffset();
+                lastOffsetFuture = log.getLastOffset();
+                if (firstOffsetFuture == null || lastOffsetFuture == null) {
+                    refreshInProgress.set(false);
+                    return;
+                }
+            } catch (Throwable error) {
+                refreshInProgress.set(false);
+                return;
+            }
+
+            firstOffsetFuture.thenCombine(lastOffsetFuture, DisklessLogMetrics::resolveValues)
+                    .whenComplete((values, error) -> {
+                        if (error == null && values != null) {
+                            current.set(values);
+                        }
+                        refreshInProgress.set(false);
+                    });
+        }
+    }
+
+    private record MetricValues(long size, long startOffset, long endOffset) {
+        private static final MetricValues EMPTY = new MetricValues(0L, 0L, 0L);
     }
 }

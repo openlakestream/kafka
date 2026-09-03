@@ -49,7 +49,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       is-trunk: ${{ github.ref == 'refs/heads/trunk' }}
-      is-public-fork: ${{ github.event.pull_request.head.repo.fork || false }}
+      is-public-fork: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
       # Run JUnit tests for push events, scheduled runs, or PRs with 'run-junit-tests' label
       run-junit-tests: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-junit-tests') }}
     secrets:

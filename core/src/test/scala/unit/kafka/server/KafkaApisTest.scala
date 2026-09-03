@@ -2418,7 +2418,8 @@ class KafkaApisTest extends Logging {
       any(),
       statsCallback.capture(),
       any(),
-      any()
+      any(),
+      anyString()
     )).thenAnswer(_ => {
       statsCallback.getValue.apply(Map(
         tp0 -> new RecordValidationStats(1000L, 5, 100L),
@@ -2476,7 +2477,8 @@ class KafkaApisTest extends Logging {
         responseCallback.capture(),
         any(),
         any(),
-        any()
+        any(),
+        anyString()
       )).thenAnswer(_ => responseCallback.getValue.apply(Map(tp -> new PartitionResponse(Errors.INVALID_PRODUCER_EPOCH))))
 
       when(clientRequestQuotaManager.maybeRecordAndGetThrottleTimeMs(any[Request](),

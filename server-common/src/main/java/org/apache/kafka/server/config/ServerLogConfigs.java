@@ -181,8 +181,8 @@ public class ServerLogConfigs {
     // Ursa Storage configurations
     public static final String URSA_STORAGE_ENABLE_CONFIG = "ursa.storage.enable";
     public static final boolean URSA_STORAGE_ENABLE_DEFAULT = false;
-    public static final String URSA_STORAGE_ENABLE_DOC = "Enable Ursa storage mode instead of object storage. " +
-            "When enabled, diskless storage will use Ursa StorageApi for stream-based storage.";
+    public static final String URSA_STORAGE_ENABLE_DOC = "Enable Ursa diskless storage mode instead of Kafka local logs. " +
+            "When enabled, record durability is provided by the configured Lakestream runtime.";
 
     public static final String URSA_STORAGE_TOPIC_DEFAULT_ENABLE_CONFIG = "ursa.storage.topic.default.enable";
     public static final boolean URSA_STORAGE_TOPIC_DEFAULT_ENABLE_DEFAULT = false;
@@ -190,47 +190,27 @@ public class ServerLogConfigs {
             "Enable diskless storage for topics by default when no topic-level override is provided. " +
                     "Internal topics remain on classic storage.";
 
-    public static final String INTERCEPTOR_CLASS_NAME_CONFIG = "kafka.server.interceptor.class.name";
-    public static final String INTERCEPTOR_CLASS_NAME_DEFAULT = "kafka.server.DefaultInterceptor";
-    public static final String INTERCEPTOR_CLASS_NAME_DOC =
-        "The fully qualified class name of the interceptor implementation. The class must implement " +
-        "<code>kafka.server.ReplicaManagerInterceptor</code> and expose a public constructor accepting " +
-        "<code>kafka.server.KafkaConfig</code> and <code>org.apache.kafka.metadata.ConfigRepository</code>.";
-
     public static final String URSA_STORAGE_CLASS_PATH_CONFIG = "ursa.storage.class.path";
     public static final String URSA_STORAGE_CLASS_PATH_DEFAULT = "";
     public static final String URSA_STORAGE_CLASS_PATH_DOC =
             "Optional classpath for the Ursa diskless storage runtime. If unset, brokers load jars from " +
                     "<code>$KAFKA_HOME/ursa-storage/*</code>.";
 
-    // Deprecated (do not use annotation to pass checkstyle check)
-    public static final String URSA_STORAGE_OXIA_SERVICE_URL_CONFIG = "ursa.storage.oxia.service.url";
-    public static final String URSA_STORAGE_OXIA_SERVICE_URL_DEFAULT = "localhost:6648";
-    public static final String URSA_STORAGE_OXIA_SERVICE_URL_DOC = "The Oxia service URL for Ursa storage metadata.";
-
-    public static final String PULSAR_OXIA_SERVICE_URL_CONFIG = "pulsar.oxia.service.url";
-    public static final String PULSAR_OXIA_SERVICE_URL_DEFAULT = "oxia://localhost:6648/default";
-    public static final String PULSAR_OXIA_SERVICE_URL_DOC = "The Oxia service URL for Pulsar metadata store. " +
-            "The format should be 'oxia://host:port/[namespace]'. If the namespace is not provided, 'default' will be used.";
+    public static final String URSA_CATALOG_OXIA_SERVICE_URL_CONFIG = "ursa.catalog.oxia.service.url";
+    public static final String URSA_CATALOG_OXIA_SERVICE_URL_DEFAULT = "oxia://localhost:6648/default";
+    public static final String URSA_CATALOG_OXIA_SERVICE_URL_DOC =
+            "The Oxia service URL (oxia://host:port/namespace) for the Ursa log catalog.";
 
     public static final String URSA_OXIA_SERVICE_URL_CONFIG = "ursa.oxia.service.url";
     public static final String URSA_OXIA_SERVICE_URL_DEFAULT = "oxia://localhost:6648/default";
-    public static final String URSA_OXIA_SERVICE_URL_DOC = "The Oxia service URL for Ursa storage metadata. " +
-            "The format should be 'oxia://host:port/[namespace]'. If the namespace is not provided, 'default' will be used.";
-
-    public static final String URSA_STORAGE_WAL_DIRECTORY_CONFIG = "ursa.storage.wal.directory";
-    public static final String URSA_STORAGE_WAL_DIRECTORY_DEFAULT = "/tmp/ursa-wal";
-    public static final String URSA_STORAGE_WAL_DIRECTORY_DOC = "The directory for Ursa storage write-ahead log.";
-
-    // Deprecated (do not use annotation to pass checkstyle check)
-    public static final String URSA_STORAGE_NAMESPACE_CONFIG = "ursa.storage.namespace";
-    public static final String URSA_STORAGE_NAMESPACE_DEFAULT = "default";
-    public static final String URSA_STORAGE_NAMESPACE_DOC = "The namespace for Ursa storage streams.";
+    public static final String URSA_OXIA_SERVICE_URL_DOC =
+            "The Oxia service URL (oxia://host:port/namespace) for Ursa storage metadata and Kafka producer-state snapshots.";
 
     public static final String URSA_STORAGE_BACKEND_TYPE_CONFIG = "ursa.storage.backend.type";
     public static final String URSA_STORAGE_BACKEND_TYPE_DEFAULT = "LOCAL";
     public static final String URSA_STORAGE_BACKEND_TYPE_DOC = "The backend storage type for Ursa storage. " +
-            "Supported values: LOCAL, S3, GCS, AZURE_BLOB. AZUREBLOB is also accepted as a compatibility alias.";
+            "Supported values: LOCAL, S3, GCS, AZURE_BLOB. AZUREBLOB is also accepted as a compatibility alias. " +
+            "Azure compaction requires an HNS-enabled account because compacted files use the ABFS connector.";
 
     public static final String URSA_STORAGE_PATH_CONFIG = "ursa.storage.path";
     public static final String URSA_STORAGE_PATH_DEFAULT = "/tmp/ursa-data";
@@ -247,35 +227,6 @@ public class ServerLogConfigs {
     public static final String URSA_STORAGE_COMPACTION_BUCKET_DOC =
             "The object storage bucket or container name for Ursa compaction output.";
 
-    public static final String URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_CONFIG =
-            "ursa.storage.external.reader.factory.class";
-    public static final String URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_DEFAULT =
-            "io.streamnative.ursa.mledger.reader.NoopExternalReaderFactory";
-    public static final String URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_DOC =
-            "The external reader factory class used by Ursa managed ledger readers.";
-
-    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_CONFIG =
-            "ursa.storage.kop.schema.registry.url";
-    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_DEFAULT = "";
-    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_DOC =
-            "The schema registry URL used by the external reader factory for Kafka parquet serde.";
-
-    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_CONFIG =
-            "ursa.storage.kop.schema.registry.http.header.authorization";
-    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_DEFAULT = "";
-    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_DOC =
-            "Optional full <code>Authorization</code> header value sent as-is to the schema registry by the external "
-                    + "reader factory. Examples: <code>Bearer token</code>, "
-                    + "<code>Basic base64(username:password)</code>.";
-
-    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_CONFIG =
-            "ursa.storage.kop.schema.registry.http.header.authorization.file";
-    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_DEFAULT = "";
-    public static final String URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_DOC =
-            "Optional file path containing the full <code>Authorization</code> header value sent as-is to the schema "
-                    + "registry by the external reader factory. The file contents should be a value such as "
-                    + "<code>Bearer token</code> or <code>Basic base64(username:password)</code>.";
-
     public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_CONFIG = "ursa.storage.write.buffer.flush.interval.ms";
     public static final long URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DEFAULT = 250L;
     public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS_DOC = "The interval in milliseconds for flushing the write buffer.";
@@ -288,6 +239,13 @@ public class ServerLogConfigs {
     public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_CONFIG = "ursa.storage.write.buffer.flush.size";
     public static final long URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DEFAULT = 256 * 1024 * 1024L;
     public static final String URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE_DOC = "The size in bytes for triggering a write buffer flush.";
+
+    public static final String URSA_STORAGE_LIFECYCLE_SWEEP_INTERVAL_MS_CONFIG =
+            "ursa.storage.lifecycle.sweep.interval.ms";
+    public static final long URSA_STORAGE_LIFECYCLE_SWEEP_INTERVAL_MS_DEFAULT = 600_000L;
+    public static final String URSA_STORAGE_LIFECYCLE_SWEEP_INTERVAL_MS_DOC =
+            "Interval between scans that delete diskless storage left behind by topics no longer in Kafka metadata. "
+                    + "Runs on the active controller.";
 
     public static final String URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_CONFIG =
             "ursa.storage.producer.state.snapshot.interval.ms";
@@ -317,6 +275,17 @@ public class ServerLogConfigs {
     public static final String URSA_STORAGE_S3_SECRET_KEY_CONFIG = "ursa.storage.s3.secret.key";
     public static final String URSA_STORAGE_S3_SECRET_KEY_DEFAULT = "";
     public static final String URSA_STORAGE_S3_SECRET_KEY_DOC = "The S3 secret access key for Ursa storage.";
+
+    public static final String URSA_STORAGE_S3_SESSION_TOKEN_CONFIG = "ursa.storage.s3.session.token";
+    public static final String URSA_STORAGE_S3_SESSION_TOKEN_DEFAULT = "";
+    public static final String URSA_STORAGE_S3_SESSION_TOKEN_DOC =
+            "Optional S3 session token for temporary Ursa storage credentials.";
+
+    public static final String URSA_STORAGE_S3_PATH_STYLE_ACCESS_CONFIG = "ursa.storage.s3.path.style.access";
+    public static final Boolean URSA_STORAGE_S3_PATH_STYLE_ACCESS_DEFAULT = null;
+    public static final String URSA_STORAGE_S3_PATH_STYLE_ACCESS_DOC =
+            "Whether the compacted-object reader should use S3 path-style access. When unset, the reader enables "
+                    + "path-style access automatically for custom endpoints.";
 
     public static final String URSA_STORAGE_S3_BUCKET_CONFIG = "ursa.storage.s3.bucket";
     public static final String URSA_STORAGE_S3_BUCKET_DEFAULT = "kafka-ursa-storage";

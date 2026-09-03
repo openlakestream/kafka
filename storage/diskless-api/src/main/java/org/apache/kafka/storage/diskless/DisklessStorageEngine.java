@@ -16,13 +16,19 @@
  */
 package org.apache.kafka.storage.diskless;
 
+import org.apache.kafka.common.Uuid;
+
 import java.util.Map;
 
 public interface DisklessStorageEngine extends Reader, Writer, DisklessStorageStateOperations {
 
-    default void updateTopicConfig(String topic, Map<String, String> config) {
-    }
+    /** Applies the latest broker-visible configuration for one immutable topic incarnation. */
+    void applyTopicConfig(String topicName, Uuid topicId, Map<String, String> config);
 
-    default void deleteTopicConfig(String topic) {
-    }
+    /**
+     * Fences one deleted topic incarnation before the broker closes its cached partition handles.
+     * Implementations must prevent a concurrent request from opening a new handle after this
+     * method returns.
+     */
+    void fenceDeletedTopic(String topicName, Uuid topicId);
 }

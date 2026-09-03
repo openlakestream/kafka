@@ -71,6 +71,16 @@ public final class ProducerStateSerDes {
     }
 
     /**
+     * Serialize a valid snapshot with no producer entries.
+     *
+     * <p>The producer-state manager uses this payload to claim ownership of an Oxia snapshot key
+     * before log replay has reconstructed any producer state.
+     */
+    static byte[] emptySnapshot() throws IOException {
+        return encodeSnapshot(Map.of()).bytes();
+    }
+
+    /**
      * Deserialize a snapshot payload back into producer-state map form.
      */
     public static Map<Long, ProducerStateEntry> deserialize(byte[] bytes) throws IOException {

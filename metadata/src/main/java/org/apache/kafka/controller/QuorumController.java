@@ -117,7 +117,6 @@ import org.apache.kafka.raft.RaftClient;
 import org.apache.kafka.server.authorizer.AclCreateResult;
 import org.apache.kafka.server.authorizer.AclDeleteResult;
 import org.apache.kafka.server.common.ApiMessageAndVersion;
-import org.apache.kafka.server.common.DisklessTopicPreCommitHandler;
 import org.apache.kafka.server.common.KRaftVersion;
 import org.apache.kafka.server.common.OffsetAndEpoch;
 import org.apache.kafka.server.fault.FaultHandler;
@@ -226,7 +225,6 @@ public final class QuorumController implements Controller {
         private long delegationTokenExpiryCheckIntervalMs = TimeUnit.MINUTES.toMillis(5);
         private long uncleanLeaderElectionCheckIntervalMs = TimeUnit.MINUTES.toMillis(5);
         private boolean disklessStorageSystemEnabled = false;
-        private Optional<DisklessTopicPreCommitHandler> disklessTopicPreCommitHandler = Optional.empty();
 
         public Builder(int nodeId, String clusterId) {
             this.nodeId = nodeId;
@@ -397,12 +395,6 @@ public final class QuorumController implements Controller {
             return this;
         }
 
-        public Builder setDisklessTopicPreCommitHandler(Optional<DisklessTopicPreCommitHandler> handler) {
-            this.disklessTopicPreCommitHandler = handler;
-            return this;
-        }
-
-
         public QuorumController build() throws Exception {
             if (raftClient == null) {
                 throw new IllegalStateException("You must set a raft client.");
@@ -470,8 +462,7 @@ public final class QuorumController implements Controller {
                     uncleanLeaderElectionCheckIntervalMs,
                     controllerPerformanceSamplePeriodMs,
                     controllerPerformanceAlwaysLogThresholdMs,
-                    disklessStorageSystemEnabled,
-                    disklessTopicPreCommitHandler
+                    disklessStorageSystemEnabled
                 );
             } catch (Exception e) {
                 Utils.closeQuietly(queue, "event queue");
@@ -1555,8 +1546,7 @@ public final class QuorumController implements Controller {
         long uncleanLeaderElectionCheckIntervalMs,
         long controllerPerformanceSamplePeriodMs,
         long controllerPerformanceAlwaysLogThresholdMs,
-        boolean disklessStorageSystemEnabled,
-        Optional<DisklessTopicPreCommitHandler> disklessTopicPreCommitHandler
+        boolean disklessStorageSystemEnabled
     ) {
         this.nonFatalFaultHandler = nonFatalFaultHandler;
         this.fatalFaultHandler = fatalFaultHandler;
@@ -1626,7 +1616,6 @@ public final class QuorumController implements Controller {
             setCreateTopicPolicy(createTopicPolicy).
             setFeatureControl(featureControl).
             setDisklessStorageSystemEnabled(disklessStorageSystemEnabled).
-            setDisklessTopicPreCommitHandler(disklessTopicPreCommitHandler).
             build();
         this.scramControlManager = new ScramControlManager.Builder().
             setLogContext(logContext).

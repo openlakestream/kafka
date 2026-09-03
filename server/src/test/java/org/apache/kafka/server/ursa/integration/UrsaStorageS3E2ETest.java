@@ -59,7 +59,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import javax.management.ObjectName;
 
-import io.streamnative.oxia.testcontainers.OxiaContainer;
+import io.oxia.testcontainers.OxiaContainer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -69,7 +69,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * End-to-end integration tests for Ursa Storage with S3 backend using LocalStack.
  * Uses KafkaClusterTestKit to spin up a test Kafka cluster with Ursa storage mode
- * using ManagedLedger with embedded Oxia and LocalStack S3.
+ * using Lakestream logs with embedded Oxia and LocalStack S3.
  *
  * <p>Tests are organized into nested classes by functionality for better isolation.
  */
@@ -154,7 +154,10 @@ public class UrsaStorageS3E2ETest extends UrsaStorageE2ETestBase {
                         .setNumControllerNodes(1)
                         .build()))
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG, "true")
-                .setConfigProp(ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG, oxiaServiceAddress)
+                .setConfigProp(ServerLogConfigs.URSA_CATALOG_OXIA_SERVICE_URL_CONFIG,
+                        "oxia://" + oxiaServiceAddress + "/default")
+                .setConfigProp(ServerLogConfigs.URSA_OXIA_SERVICE_URL_CONFIG,
+                        "oxia://" + oxiaServiceAddress + "/default")
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG, "S3")
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_PATH_CONFIG, s3Prefix)
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_CONFIG, s3Endpoint.toString())

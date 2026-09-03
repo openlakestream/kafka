@@ -47,7 +47,7 @@ class KafkaPluginClassLoaderUtilsTest {
     @ValueSource(strings = {
         "io.oxia.client.api.OxiaClientBuilder",
         "software.amazon.awssdk.services.s3.S3Client",
-        "org.apache.bookkeeper.mledger.ManagedLedgerFactory",
+        "io.lakestream.api.Log",
         "io.opentelemetry.sdk.autoconfigure.AutoConfiguredOpenTelemetrySdkBuilder"
     })
     void testPluginDependencyClassesAreLoadedInIsolation(String className) {

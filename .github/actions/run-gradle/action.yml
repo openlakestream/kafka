@@ -122,7 +122,8 @@ runs:
         exitcode="$?"
         echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
     - name: Archive build scan (${{ inputs.test-task }})
-      if: always()
+      # Build scans are published to Apache's Develocity instance by CI Complete.
+      if: ${{ always() && github.repository == 'apache/kafka' }}
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.build-scan-artifact-name }}

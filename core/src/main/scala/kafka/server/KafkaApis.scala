@@ -62,7 +62,7 @@ import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfigProvider
 import org.apache.kafka.coordinator.group.{Group, GroupConfig, GroupConfigManager, GroupCoordinator}
 import org.apache.kafka.coordinator.share.ShareCoordinator
 import org.apache.kafka.coordinator.transaction.InitProducerIdResult
-import org.apache.kafka.metadata.{ConfigRepository, MetadataCache}
+import org.apache.kafka.metadata.{ConfigRepository, KRaftMetadataCache, MetadataCache}
 import org.apache.kafka.network.Request
 import org.apache.kafka.security.DelegationTokenManager
 import org.apache.kafka.server.{ApiVersionManager, AuthHelper, AutoTopicCreationManager, ClientMetricsManager, FetchManager, ForwardingManager, ProcessRole}
@@ -76,7 +76,7 @@ import org.apache.kafka.server.storage.log.{FetchIsolation, FetchParams, FetchPa
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
 import org.apache.kafka.storage.internals.log.{AppendOrigin, RecordValidationStats}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
-import org.apache.kafka.storage.diskless.{DisklessBrokerSelector, DisklessTopicMetadataTransformer, MetadataCacheDisklessStorageView}
+import org.apache.kafka.storage.diskless.{DisklessBrokerSelector, DisklessTopicMetadataTransformer, DisklessTopics, MetadataCacheDisklessStorageView}
 
 import java.util
 import java.util.concurrent.atomic.AtomicInteger
@@ -138,6 +138,14 @@ class KafkaApis(val requestChannel: RequestChannel,
         },
         (listenerName: ListenerName) => metadataCache.getAliveBrokerNodes(listenerName),
         (topic: String) => metadataCache.getTopicId(topic),
+        (topic: String) => DisklessTopics.partitionCount(metadataCache.numPartitions(topic)),
+        // This view only reads metadata; nothing it serves provisions storage stamped with the
+        // offset. It is still reported when the cache exposes an image, so the two views agree.
+        metadataCache match {
+          case kraftMetadataCache: KRaftMetadataCache =>
+            () => kraftMetadataCache.currentImage().offset()
+          case _ => () => 0L
+        },
         true
       ))
     } else {
