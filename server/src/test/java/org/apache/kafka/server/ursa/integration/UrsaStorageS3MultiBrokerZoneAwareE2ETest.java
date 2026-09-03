@@ -44,7 +44,6 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
@@ -127,10 +126,12 @@ public class UrsaStorageS3MultiBrokerZoneAwareE2ETest extends AbstractUrsaStorag
                         "Zone-b metadata should expose the expected broker rack");
             }
 
-            String zoneANonOwnerBootstrap = brokerBootstrap(zoneAOwnerBrokerId);
+            verifyPartitionLogStateForIoOwners(topicIdPartition, Set.of());
+
+            String zoneABootstrap = brokerBootstrap(zoneAOwnerBrokerId);
 
             try (Producer<byte[], byte[]> producer =
-                         createMultiBrokerProducer(zoneANonOwnerBootstrap, zoneBClientId)) {
+                         createMultiBrokerProducer(zoneABootstrap, zoneBClientId)) {
                 for (int i = 0; i < numRecords; i++) {
                     ProducerRecord<byte[], byte[]> record = new ProducerRecord<>(
                             topicName, partition,
@@ -141,10 +142,10 @@ public class UrsaStorageS3MultiBrokerZoneAwareE2ETest extends AbstractUrsaStorag
                 producer.flush();
             }
 
-            waitForBrokerManagedLedgerState(zoneBOwnerBrokerId, topicIdPartition, true);
+            verifyPartitionLogStateForIoOwners(topicIdPartition, Set.of(zoneBOwnerBrokerId));
 
             try (Consumer<byte[], byte[]> consumer = createMultiBrokerConsumer(
-                    zoneANonOwnerBootstrap,
+                    zoneABootstrap,
                     "rack-topology-zone-b-group-" + System.currentTimeMillis(),
                     zoneBClientId)) {
                 consumer.assign(Collections.singletonList(topicPartition));
@@ -161,9 +162,7 @@ public class UrsaStorageS3MultiBrokerZoneAwareE2ETest extends AbstractUrsaStorag
                 }
             }
 
-            waitForBrokerManagedLedgerState(zoneBOwnerBrokerId, topicIdPartition, true);
-            assertFalse(brokerHasManagedLedgerState(zoneAOwnerBrokerId, topicIdPartition),
-                    "Zone-a bootstrap broker should not retain local managed ledger state for a zone-b client");
+            verifyPartitionLogStateForIoOwners(topicIdPartition, Set.of(zoneBOwnerBrokerId));
         }
 
         @Test
@@ -185,6 +184,7 @@ public class UrsaStorageS3MultiBrokerZoneAwareE2ETest extends AbstractUrsaStorag
                     zoneOwnerContext.zoneBOwnerBrokerId,
                     zoneAClientId,
                     zoneBClientId);
+            verifyPartitionLogStateForIoOwners(zoneOwnerContext.topicIdPartition, Set.of());
 
             Set<String> expectedPayloads = expectedConcurrentZonePayloads(producersPerZone, recordsPerProducer);
             ConcurrentZoneTrafficResult trafficResult = runConcurrentMultiZoneTraffic(
@@ -203,10 +203,9 @@ public class UrsaStorageS3MultiBrokerZoneAwareE2ETest extends AbstractUrsaStorag
                     "Zone-a consumer should observe every payload written by both zones");
             assertEquals(expectedPayloads, trafficResult.zoneBObservedPayloads,
                     "Zone-b consumer should observe every payload written by both zones");
-            verifyManagedLedgerStateForZoneOwners(
+            verifyPartitionLogStateForIoOwners(
                     zoneOwnerContext.topicIdPartition,
-                    zoneOwnerContext.zoneAOwnerBrokerId,
-                    zoneOwnerContext.zoneBOwnerBrokerId);
+                    Set.of(zoneOwnerContext.zoneAOwnerBrokerId, zoneOwnerContext.zoneBOwnerBrokerId));
         }
     }
 }

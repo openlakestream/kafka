@@ -440,7 +440,7 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _], enforceProv
 
   /** Diskless Storage Configurations **/
   val ursaStorageEnable: Boolean = getBoolean(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG)
-  val replicaManagerInterceptorClassName = getString(ServerLogConfigs.INTERCEPTOR_CLASS_NAME_CONFIG)
+  val disklessLifecycleSweepIntervalMs: Long = getLong(ServerLogConfigs.URSA_STORAGE_LIFECYCLE_SWEEP_INTERVAL_MS_CONFIG)
 
   override def addReconfigurable(reconfigurable: Reconfigurable): Unit = {
     dynamicConfig.addReconfigurable(reconfigurable)
@@ -763,6 +763,16 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _], enforceProv
     logProps.put(TopicConfig.MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG, logMessageTimestampAfterMaxMs: java.lang.Long)
     logProps.put(TopicConfig.LOCAL_LOG_RETENTION_MS_CONFIG, remoteLogManagerConfig.logLocalRetentionMs: java.lang.Long)
     logProps.put(TopicConfig.LOCAL_LOG_RETENTION_BYTES_CONFIG, remoteLogManagerConfig.logLocalRetentionBytes: java.lang.Long)
+    logProps
+  }
+
+  /**
+   * Adds broker-only settings consumed by the diskless runtime. This map must not be used to construct a topic
+   * [[LogConfig]], because those settings would then be exposed by topic DescribeConfigs.
+   */
+  private[server] def extractDisklessLogConfigMap: java.util.Map[String, Object] = {
+    val logProps = new java.util.HashMap[String, Object](extractLogConfigMap)
+    logProps.put(ServerLogConfigs.LOG_CLEANUP_INTERVAL_MS_CONFIG, logCleanupIntervalMs: java.lang.Long)
     logProps
   }
 }

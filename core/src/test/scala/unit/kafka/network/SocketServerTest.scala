@@ -491,6 +491,7 @@ class SocketServerTest {
       processRequestNoOpResponse(testableServer.dataPlaneRequestChannel, received2)
 
       val selector = testableServer.testableSelector
+      selector.waitForOperations(SelectorOperation.Unmute, 2)
       assertTrue(selector.operationCounts.getOrElse(SelectorOperation.Mute, 0) >= 2)
       assertTrue(selector.operationCounts.getOrElse(SelectorOperation.Unmute, 0) >= 2)
       socket.close()

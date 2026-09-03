@@ -69,7 +69,7 @@ import java.util.concurrent.TimeUnit;
 
 import javax.management.ObjectName;
 
-import io.streamnative.oxia.testcontainers.OxiaContainer;
+import io.oxia.testcontainers.OxiaContainer;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
@@ -205,7 +205,10 @@ abstract class AbstractUrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETes
 
         return enableBrokerRequestPipelining(new KafkaClusterTestKit.Builder(nodes))
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_ENABLE_CONFIG, "true")
-                .setConfigProp(ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG, oxiaServiceAddress)
+                .setConfigProp(ServerLogConfigs.URSA_CATALOG_OXIA_SERVICE_URL_CONFIG,
+                        "oxia://" + oxiaServiceAddress + "/default")
+                .setConfigProp(ServerLogConfigs.URSA_OXIA_SERVICE_URL_CONFIG,
+                        "oxia://" + oxiaServiceAddress + "/default")
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_BACKEND_TYPE_CONFIG, "S3")
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_PATH_CONFIG, s3Prefix)
                 .setConfigProp(ServerLogConfigs.URSA_STORAGE_S3_ENDPOINT_CONFIG, s3Endpoint.toString())
@@ -332,7 +335,7 @@ abstract class AbstractUrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETes
         return null;
     }
 
-    protected boolean brokerHasManagedLedgerState(int brokerId, TopicIdPartition topicIdPartition) throws Exception {
+    protected boolean brokerHasPartitionLogState(int brokerId, TopicIdPartition topicIdPartition) throws Exception {
         return cluster.brokers().get(brokerId)
                 .replicaManager()
                 .disklessStorageSupport()
@@ -340,7 +343,7 @@ abstract class AbstractUrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETes
                 .contains(topicIdPartition);
     }
 
-    protected void waitForBrokerManagedLedgerState(
+    protected void waitForBrokerPartitionLogState(
             int brokerId,
             TopicIdPartition topicIdPartition,
             boolean expected
@@ -349,26 +352,42 @@ abstract class AbstractUrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETes
         TestUtils.waitForCondition(
                 () -> {
                     try {
-                        return brokerHasManagedLedgerState(brokerId, topicIdPartition) == expected;
+                        return brokerHasPartitionLogState(brokerId, topicIdPartition) == expected;
                     } catch (Exception e) {
                         return false;
                     }
                 },
                 30_000L,
-                "Broker " + brokerId + " did not " + expectation + " managed ledger state for " + topicIdPartition);
+                "Broker " + brokerId + " did not " + expectation + " partition log state for " + topicIdPartition);
     }
 
-    protected void waitForExclusiveManagedLedgerState(
+    protected void waitForExclusivePartitionLogState(
             List<Integer> brokerIds,
             int expectedOwnerBrokerId,
+            TopicIdPartition topicIdPartition
+    ) throws InterruptedException {
+        waitForPartitionLogStateOnBrokers(
+                brokerIds, Set.of(expectedOwnerBrokerId), topicIdPartition);
+    }
+
+    protected void waitForNoPartitionLogState(
+            List<Integer> brokerIds,
+            TopicIdPartition topicIdPartition
+    ) throws InterruptedException {
+        waitForPartitionLogStateOnBrokers(brokerIds, Set.of(), topicIdPartition);
+    }
+
+    private void waitForPartitionLogStateOnBrokers(
+            List<Integer> brokerIds,
+            Set<Integer> expectedStateBrokerIds,
             TopicIdPartition topicIdPartition
     ) throws InterruptedException {
         TestUtils.waitForCondition(
                 () -> {
                     try {
                         for (int brokerId : brokerIds) {
-                            boolean expected = brokerId == expectedOwnerBrokerId;
-                            if (brokerHasManagedLedgerState(brokerId, topicIdPartition) != expected) {
+                            boolean expected = expectedStateBrokerIds.contains(brokerId);
+                            if (brokerHasPartitionLogState(brokerId, topicIdPartition) != expected) {
                                 return false;
                             }
                         }
@@ -378,7 +397,7 @@ abstract class AbstractUrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETes
                     }
                 },
                 30_000L,
-                "Expected only broker " + expectedOwnerBrokerId + " to retain managed ledger state for "
+                "Expected only brokers " + expectedStateBrokerIds + " to retain partition log state for "
                         + topicIdPartition + " across brokers " + brokerIds);
     }
 
@@ -736,17 +755,15 @@ abstract class AbstractUrsaStorageS3MultiBrokerE2ETest extends UrsaStorageE2ETes
         }
     }
 
-    protected void verifyManagedLedgerStateForZoneOwners(
+    protected void verifyPartitionLogStateForIoOwners(
             TopicIdPartition topicIdPartition,
-            int zoneAOwnerBrokerId,
-            int zoneBOwnerBrokerId
+            Set<Integer> ioOwnerBrokerIds
     ) throws Exception {
-        waitForBrokerManagedLedgerState(zoneAOwnerBrokerId, topicIdPartition, true);
-        waitForBrokerManagedLedgerState(zoneBOwnerBrokerId, topicIdPartition, true);
         for (int brokerId = 0; brokerId < NUM_BROKERS; brokerId++) {
-            if (brokerId != zoneAOwnerBrokerId && brokerId != zoneBOwnerBrokerId) {
-                waitForBrokerManagedLedgerState(brokerId, topicIdPartition, false);
-            }
+            waitForBrokerPartitionLogState(
+                    brokerId,
+                    topicIdPartition,
+                    ioOwnerBrokerIds.contains(brokerId));
         }
     }
 }

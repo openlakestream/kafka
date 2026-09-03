@@ -20,7 +20,7 @@ package kafka.server
 import kafka.network.SocketServer
 import kafka.raft.KafkaRaftManager
 import kafka.server.QuotaFactory.QuotaManagers
-import kafka.server.metadata.{ClientQuotaMetadataManager, DynamicConfigPublisher, KRaftMetadataCachePublisher, UrsaPartitionedTopicsPublisher}
+import kafka.server.metadata.{ClientQuotaMetadataManager, DisklessTopicLifecycleReconciler, DynamicConfigPublisher, KRaftMetadataCachePublisher}
 
 import scala.collection.immutable
 import kafka.utils.Logging
@@ -44,7 +44,7 @@ import org.apache.kafka.security.{CredentialProvider, DelegationTokenManager}
 import org.apache.kafka.server.{ProcessRole, SimpleApiVersionManager}
 import org.apache.kafka.server.authorizer.Authorizer
 import org.apache.kafka.server.config.ServerLogConfigs.{ALTER_CONFIG_POLICY_CLASS_NAME_CONFIG, CREATE_TOPIC_POLICY_CLASS_NAME_CONFIG}
-import org.apache.kafka.server.common.{ApiMessageAndVersion, DisklessTopicPreCommitHandler, KRaftVersion, NodeToControllerChannelManager}
+import org.apache.kafka.server.common.{ApiMessageAndVersion, KRaftVersion, NodeToControllerChannelManager}
 import org.apache.kafka.server.config.{ConfigType, DelegationTokenManagerConfigs}
 import org.apache.kafka.server.metrics.{KafkaMetricsGroup, KafkaYammerMetrics, LinuxIoMetricsCollector}
 import org.apache.kafka.server.network.{EndpointReadyFutures, KafkaAuthorizerServerInfo}
@@ -52,7 +52,7 @@ import org.apache.kafka.server.policy.{AlterConfigPolicy, CreateTopicPolicy}
 import org.apache.kafka.server.util.{Deadline, FutureUtils}
 import org.apache.kafka.server.NodeToControllerChannelManagerImpl
 import org.apache.kafka.server.RaftControllerNodeProvider
-import org.apache.kafka.storage.diskless.{DisklessMetadataStoreLoader, UrsaPartitionedTopicsMetadataSync}
+import org.apache.kafka.storage.diskless.{DisklessTopicLifecycle, DisklessTopicLifecycleLoader}
 import org.apache.kafka.storage.diskless.handlers.UrsaStorageConfig
 
 import java.util
@@ -103,7 +103,7 @@ class ControllerServer(
   var clientQuotaMetadataManager: ClientQuotaMetadataManager = _
   var controllerApis: ControllerApis = _
   var controllerApisHandlerPool: KafkaRequestHandlerPool = _
-  var ursaOxiaSync: UrsaPartitionedTopicsMetadataSync = _
+  var disklessTopicLifecycle: DisklessTopicLifecycle = _
   def kafkaYammerMetrics: KafkaYammerMetrics = KafkaYammerMetrics.INSTANCE
   val metadataPublishers: util.List[MetadataPublisher] = new util.ArrayList[MetadataPublisher]()
   @volatile var metadataCache : KRaftMetadataCache = _
@@ -263,21 +263,14 @@ class ControllerServer(
           setUncleanLeaderElectionCheckIntervalMs(config.uncleanLeaderElectionCheckIntervalMs).
           setControllerPerformanceSamplePeriodMs(config.controllerPerformanceSamplePeriodMs).
           setControllerPerformanceAlwaysLogThresholdMs(config.controllerPerformanceAlwaysLogThresholdMs).
-          setDisklessStorageSystemEnabled(config.ursaStorageEnable).
-          setDisklessTopicPreCommitHandler({
-            if (config.ursaStorageEnable) {
-              val ursaConfig = UrsaStorageConfig.fromConfigs(config.props.asInstanceOf[util.Map[String, _]])
-              ursaOxiaSync = new UrsaPartitionedTopicsMetadataSync(
-                (msg: String, cause: Throwable) => sharedServer.metadataPublishingFaultHandler.handleFault(msg, cause),
-                DisklessMetadataStoreLoader.load(ursaConfig.getPulsarOxiaServiceUrl, ursaConfig.getClassPath))
-              Optional.of[DisklessTopicPreCommitHandler](
-                (topicName: String, partitions: Int, configs: util.Map[String, String]) => {
-                ursaOxiaSync.upsertPartitionedTopicMetadataSync(topicName, partitions, configs, 3000)
-              })
-            } else {
-              Optional.empty[DisklessTopicPreCommitHandler]()
-            }
-          })
+          setDisklessStorageSystemEnabled(config.ursaStorageEnable)
+      }
+      if (config.ursaStorageEnable) {
+        val ursaConfig = UrsaStorageConfig.fromConfigs(config.originals().asInstanceOf[util.Map[String, _]])
+        // Construct only non-blocking facades during controller startup. The active controller's
+        // lifecycle reconciler supervises provider initialization, timeouts, and retries so a
+        // temporary Ursa or Oxia outage cannot prevent this controller from joining the quorum.
+        disklessTopicLifecycle = DisklessTopicLifecycleLoader.loadLazily(ursaConfig)
       }
       controller = controllerBuilder.build()
 
@@ -348,11 +341,13 @@ class ControllerServer(
         ),
         "controller"))
 
-      // Mirror diskless topic lifecycle into Oxia for downstream topic discovery.
+      // Reconcile committed diskless topic state and clean up deleted topic state.
       if (config.ursaStorageEnable) {
-        metadataPublishers.add(new UrsaPartitionedTopicsPublisher(
+        metadataPublishers.add(new DisklessTopicLifecycleReconciler(
           config.nodeId,
-          ursaOxiaSync,
+          disklessTopicLifecycle,
+          (msg: String, cause: Throwable) => sharedServer.metadataPublishingFaultHandler.handleFault(msg, cause),
+          config.disklessLifecycleSweepIntervalMs,
         ))
       }
 
@@ -503,8 +498,8 @@ class ControllerServer(
         Utils.swallow(this.logger.underlying, () => quotaManagers.shutdown())
       Utils.closeQuietly(controller, "controller")
       Utils.closeQuietly(quorumControllerMetrics, "quorum controller metrics")
-      Utils.closeQuietly(ursaOxiaSync, "ursa oxia sync")
-      ursaOxiaSync = null
+      Utils.closeQuietly(disklessTopicLifecycle, "diskless topic lifecycle")
+      disklessTopicLifecycle = null
       authorizerPlugin.foreach(Utils.closeQuietly(_, "authorizer plugin"))
       createTopicPolicy.foreach(policy => Utils.closeQuietly(policy, "create topic policy"))
       alterConfigPolicy.foreach(policy => Utils.closeQuietly(policy, "alter config policy"))

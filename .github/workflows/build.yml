@@ -137,42 +137,28 @@ jobs:
 
       # Install ursa-storage artifacts into mavenLocal so :storage can resolve
       - name: Checkout ursa-storage
-        if: ${{ !inputs.is-public-fork }}
         uses: actions/checkout@v5
         with:
-          repository: ursaio/ursa-storage
+          repository: lakestream-io/ursa-storage
           ref: ${{ env.URSA_STORAGE_REF }}
           path: ursa-storage
-          token: ${{ secrets.SNBOT_GITHUB_TOKEN }}
           persist-credentials: false
 
       - name: Setup Java (for ursa-storage build)
-        if: ${{ !inputs.is-public-fork }}
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
-
-      - name: Configure Maven settings for GitHub Packages
-        if: ${{ !inputs.is-public-fork }}
-        uses: s4u/maven-settings-action@v3.1.0
-        with:
-          servers: |
-            [{
-                "id": "github",
-                "username": "streamnativebot",
-                "password": "${{ secrets.SNBOT_GITHUB_TOKEN }}"
-            }]
+          cache: maven
+          cache-dependency-path: 'ursa-storage/**/pom.xml'
 
       - name: Install ursa-storage into Maven Local
-        if: ${{ !inputs.is-public-fork }}
         working-directory: ursa-storage
         run: mvn -ntp -B -DskipTests install -U
 
       # Ensure the checked-out ursa-storage source tree does not affect Rat/license checks
       # executed as part of the Gradle build in this repo.
       - name: Remove ursa-storage source tree
-        if: ${{ !inputs.is-public-fork }}
         run: rm -rf ursa-storage
 
       - name: Setup Gradle
@@ -185,7 +171,6 @@ jobs:
       - name: Compile and validate
         env:
           SCAN_ARG: ${{ inputs.is-public-fork && '--no-scan' || '--scan' }}
-          SNBOT_GITHUB_TOKEN: ${{ secrets.SNBOT_GITHUB_TOKEN }}
         # Gradle flags
         # --build-cache:  Let Gradle restore the build cache
         # --info:         For now, we'll generate lots of logs while setting up the GH Actions
@@ -215,8 +200,6 @@ jobs:
       - name: Check generated documentation
         # Check if there are any empty files under ./site-docs/generated, If any empty files are found, print an error
         # message and list the empty files
-        env:
-          SNBOT_GITHUB_TOKEN: ${{ secrets.SNBOT_GITHUB_TOKEN }}
         run: |
           tar zxvf core/build/distributions/kafka_2.13-$(./gradlew properties | grep version: | awk '{print $NF}' | head -n 1)-site-docs.tgz
           if find ./site-docs/generated -type f -exec grep -L "." {} \; | grep -q "."; then
@@ -226,9 +209,9 @@ jobs:
           fi
       - name: Verify license file
         run: python committer-tools/verify_license.py --skip-build
-      - name: Docker compose smoke (localstack compaction)
+      - name: Docker compose smoke
         if: ${{ !inputs.is-public-fork }}
-        run: python committer-tools/docker_compaction_cluster_smoke.py --skip-build
+        run: python committer-tools/docker_cluster_smoke.py --skip-build
 
   test:
     needs: [configure, validate, load-catalog]
@@ -258,42 +241,28 @@ jobs:
 
       # Install ursa-storage artifacts into mavenLocal so tests can resolve
       - name: Checkout ursa-storage
-        if: ${{ !inputs.is-public-fork }}
         uses: actions/checkout@v5
         with:
-          repository: ursaio/ursa-storage
+          repository: lakestream-io/ursa-storage
           ref: ${{ env.URSA_STORAGE_REF }}
           path: ursa-storage
-          token: ${{ secrets.SNBOT_GITHUB_TOKEN }}
           persist-credentials: false
 
       - name: Setup Java (for ursa-storage build)
-        if: ${{ !inputs.is-public-fork }}
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
-
-      - name: Configure Maven settings for GitHub Packages
-        if: ${{ !inputs.is-public-fork }}
-        uses: s4u/maven-settings-action@v3.1.0
-        with:
-          servers: |
-            [{
-                "id": "github",
-                "username": "streamnativebot",
-                "password": "${{ secrets.SNBOT_GITHUB_TOKEN }}"
-            }]
+          cache: maven
+          cache-dependency-path: 'ursa-storage/**/pom.xml'
 
       - name: Install ursa-storage into Maven Local
-        if: ${{ !inputs.is-public-fork }}
         working-directory: ursa-storage
         run: mvn -ntp -B -DskipTests install -U
 
       # Ensure the checked-out ursa-storage source tree does not affect Rat/license checks
       # executed as part of the Gradle build in this repo.
       - name: Remove ursa-storage source tree
-        if: ${{ !inputs.is-public-fork }}
         run: rm -rf ursa-storage
 
       - name: Setup Gradle
@@ -316,8 +285,6 @@ jobs:
       - name: JUnit Tests
         id: junit-test
         uses: ./.github/actions/run-gradle
-        env:
-          SNBOT_GITHUB_TOKEN: ${{ secrets.SNBOT_GITHUB_TOKEN }}
         with:
           test-task: test
           # NOTE: GitHub-hosted runners enforce a 6-hour job timeout, so keep headroom for setup + uploads.
@@ -388,42 +355,28 @@ jobs:
 
       # Install ursa-storage artifacts into mavenLocal so tests can resolve
       - name: Checkout ursa-storage
-        if: ${{ !inputs.is-public-fork }}
         uses: actions/checkout@v5
         with:
-          repository: ursaio/ursa-storage
+          repository: lakestream-io/ursa-storage
           ref: ${{ env.URSA_STORAGE_REF }}
           path: ursa-storage
-          token: ${{ secrets.SNBOT_GITHUB_TOKEN }}
           persist-credentials: false
 
       - name: Setup Java (for ursa-storage build)
-        if: ${{ !inputs.is-public-fork }}
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
-
-      - name: Configure Maven settings for GitHub Packages
-        if: ${{ !inputs.is-public-fork }}
-        uses: s4u/maven-settings-action@v3.1.0
-        with:
-          servers: |
-            [{
-                "id": "github",
-                "username": "streamnativebot",
-                "password": "${{ secrets.SNBOT_GITHUB_TOKEN }}"
-            }]
+          cache: maven
+          cache-dependency-path: 'ursa-storage/**/pom.xml'
 
       - name: Install ursa-storage into Maven Local
-        if: ${{ !inputs.is-public-fork }}
         working-directory: ursa-storage
         run: mvn -ntp -B -DskipTests install -U
 
       # Ensure the checked-out ursa-storage source tree does not affect Rat/license checks
       # executed as part of the Gradle build in this repo.
       - name: Remove ursa-storage source tree
-        if: ${{ !inputs.is-public-fork }}
         run: rm -rf ursa-storage
 
       - name: Setup Gradle
@@ -437,11 +390,9 @@ jobs:
       - name: Isolated JUnit Tests
         id: junit-test
         uses: ./.github/actions/run-gradle
-        env:
-          SNBOT_GITHUB_TOKEN: ${{ secrets.SNBOT_GITHUB_TOKEN }}
         with:
           # Restrict to relevant modules to avoid compiling/running tests across the whole repo.
-          test-task: :server:test :storage:test :metadata:test
+          test-task: :server:test :storage:test :metadata:test :storage:storage-diskless-api:test :storage:storage-diskless-ursa:test
           timeout-minutes: 180  # 3 hours
           test-catalog-path: ""
           build-scan-artifact-name: build-scan-isolated-17

@@ -115,10 +115,9 @@
         <allow pkg="org.apache.kafka.server.storage.log" />
         <allow pkg="org.apache.kafka.storage.diskless" />
         <allow pkg="org.apache.kafka.storage.log.metrics" />
-        <allow pkg="io.streamnative.ursa.storage" />
+        <allow pkg="io.lakestream.api" />
         <allow pkg="io.netty.buffer" />
         <allow pkg="io.oxia.client.api" />
-        <allow pkg="io.opentelemetry.api" />
     </subpackage>
 
 	    <subpackage name="storage.diskless">
@@ -133,17 +132,9 @@
 	        <allow pkg="org.apache.kafka.storage.log.metrics" />
 	        <allow pkg="com.fasterxml.jackson" />
           <allow pkg="org.apache.commons.lang3.tuple" />
-	        <allow pkg="io.streamnative.ursa.storage" />
-	        <allow pkg="io.streamnative.ursa.metrics" />
-	        <allow pkg="io.streamnative.ursa.mledger" />
+	        <allow pkg="io.lakestream.api" />
 	        <allow pkg="io.netty.buffer" />
 	        <allow pkg="io.oxia.client.api" />
-	        <allow pkg="io.opentelemetry.api" />
-	        <allow pkg="io.opentelemetry.sdk" />
-	        <allow pkg="org.apache.pulsar.common" />
-	        <allow pkg="org.apache.bookkeeper.mledger" />
-	        <allow pkg="org.apache.pulsar.broker" />
-	        <allow pkg="org.apache.pulsar.metadata" />
 	    </subpackage>
 
     <!-- START OF TIERED STORAGE INTEGRATION TEST IMPORT DEPENDENCIES -->

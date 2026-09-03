@@ -22,6 +22,7 @@ import org.apache.kafka.common.network.ListenerName;
 
 import java.util.Collections;
 import java.util.Map;
+import java.util.OptionalInt;
 
 public interface DisklessStorageMetadataView {
 
@@ -32,6 +33,22 @@ public interface DisklessStorageMetadataView {
     Iterable<Node> getAliveBrokerNodes(ListenerName listenerName);
 
     Uuid getTopicId(String topicName);
+
+    /** Returns the current partition count for the topic, or empty when it is unknown. */
+    OptionalInt partitionCount(String topic);
+
+    /**
+     * The last metadata offset this broker has applied.
+     *
+     * <p>Storage this broker provisions is stamped with it, so the active controller's orphan sweep
+     * can tell state created from an image newer than its own from state it may delete. Never
+     * negative: a broker that has applied no metadata yet reports 0.
+     *
+     * <p>Nothing reads the offset through this view: the diskless storage engine is handed the raw
+     * {@code LongSupplier} instead. This method states the contract that supplier has to fulfil,
+     * and the implementations here are what hold it to it.
+     */
+    long imageOffset();
 
     DisklessStorageMetadataView DISABLED = new DisklessStorageMetadataView() {
         @Override
@@ -52,6 +69,17 @@ public interface DisklessStorageMetadataView {
         @Override
         public Uuid getTopicId(String topicName) {
             return Uuid.ZERO_UUID;
+        }
+
+        @Override
+        public OptionalInt partitionCount(String topic) {
+            return OptionalInt.empty();
+        }
+
+        @Override
+        public long imageOffset() {
+            // Diskless storage is off here, so nothing is ever created against this offset.
+            return 0L;
         }
     };
 }

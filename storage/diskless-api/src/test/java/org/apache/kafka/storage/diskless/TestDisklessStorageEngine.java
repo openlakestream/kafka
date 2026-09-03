@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.diskless;
 
 import org.apache.kafka.common.TopicIdPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse;
@@ -65,8 +66,11 @@ class TestDisklessStorageEngine implements DisklessStorageEngine {
     }
 
     @Override
-    public void deletePartitionData(TopicIdPartition tp) {
-        state.deletePartitionData(tp);
+    public void applyTopicConfig(String topicName, Uuid topicId, Map<String, String> config) {
+    }
+
+    @Override
+    public void fenceDeletedTopic(String topicName, Uuid topicId) {
     }
 
     @Override

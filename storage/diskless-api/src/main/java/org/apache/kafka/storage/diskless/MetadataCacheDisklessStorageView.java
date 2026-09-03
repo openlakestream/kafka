@@ -18,51 +18,53 @@ package org.apache.kafka.storage.diskless;
 
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.Uuid;
-import org.apache.kafka.common.config.TopicConfig;
-import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.network.ListenerName;
 
 import java.util.Collections;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 
 public class MetadataCacheDisklessStorageView implements DisklessStorageMetadataView {
 
     private final Function<String, Map<String, String>> topicConfigSupplier;
     private final Function<ListenerName, Iterable<Node>> aliveBrokerNodesSupplier;
     private final Function<String, Uuid> topicIdSupplier;
+    private final Function<String, OptionalInt> partitionCountSupplier;
+    private final LongSupplier imageOffsetSupplier;
     private final boolean disklessStorageSystemEnabled;
 
     public MetadataCacheDisklessStorageView(
             Function<String, Map<String, String>> topicConfigSupplier,
             boolean disklessStorageSystemEnabled) {
-        this(topicConfigSupplier, ln -> Collections.emptyList(), t -> Uuid.ZERO_UUID, disklessStorageSystemEnabled);
+        this(
+                topicConfigSupplier,
+                ln -> Collections.emptyList(),
+                t -> Uuid.ZERO_UUID,
+                t -> OptionalInt.empty(),
+                () -> 0L,
+                disklessStorageSystemEnabled);
     }
 
     public MetadataCacheDisklessStorageView(
             Function<String, Map<String, String>> topicConfigSupplier,
             Function<ListenerName, Iterable<Node>> aliveBrokerNodesSupplier,
             Function<String, Uuid> topicIdSupplier,
+            Function<String, OptionalInt> partitionCountSupplier,
+            LongSupplier imageOffsetSupplier,
             boolean disklessStorageSystemEnabled) {
         this.topicConfigSupplier = topicConfigSupplier;
         this.aliveBrokerNodesSupplier = aliveBrokerNodesSupplier;
         this.topicIdSupplier = topicIdSupplier;
+        this.partitionCountSupplier = partitionCountSupplier;
+        this.imageOffsetSupplier = imageOffsetSupplier;
         this.disklessStorageSystemEnabled = disklessStorageSystemEnabled;
     }
 
     @Override
     public boolean isDisklessStorageTopic(String topic) {
-        if (!disklessStorageSystemEnabled) {
-            return false;
-        }
-
-        if (Topic.isInternal(topic)) {
-            return false;
-        }
-
-        Map<String, String> config = getTopicConfig(topic);
-        String disklessStorageEnabled = config.get(TopicConfig.URSA_STORAGE_ENABLE_CONFIG);
-        return Boolean.parseBoolean(disklessStorageEnabled);
+        return disklessStorageSystemEnabled && DisklessTopics.isDiskless(topic, getTopicConfig(topic));
     }
 
     @Override
@@ -81,5 +83,18 @@ public class MetadataCacheDisklessStorageView implements DisklessStorageMetadata
     public Uuid getTopicId(String topicName) {
         Uuid id = topicIdSupplier.apply(topicName);
         return id != null ? id : Uuid.ZERO_UUID;
+    }
+
+    @Override
+    public OptionalInt partitionCount(String topic) {
+        OptionalInt partitionCount = partitionCountSupplier.apply(topic);
+        return partitionCount != null ? partitionCount : OptionalInt.empty();
+    }
+
+    @Override
+    public long imageOffset() {
+        // An empty metadata image reports -1; before any metadata is applied nothing is created,
+        // so 0 is reported instead of a revision no consumer accepts.
+        return imageOffsetSupplier != null ? Math.max(imageOffsetSupplier.getAsLong(), 0L) : 0L;
     }
 }

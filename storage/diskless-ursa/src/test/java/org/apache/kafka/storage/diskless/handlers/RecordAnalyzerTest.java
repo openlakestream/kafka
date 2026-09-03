@@ -20,12 +20,12 @@ import org.apache.kafka.common.InvalidRecordException;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.errors.RecordTooLargeException;
+import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.internal.CompressionType;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.record.internal.MemoryRecordsBuilder;
 import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.common.record.internal.SimpleRecord;
-import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.storage.diskless.handlers.RecordAnalyzer.RecordAnalysisResult;
 
 import org.junit.jupiter.api.Test;

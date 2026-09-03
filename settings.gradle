@@ -76,7 +76,6 @@ include 'clients',
     'connect:transforms',
     'coordinator-common',
     'core',
-    'core:sdt-ursa',
     'examples',
     'generator',
     'group-coordinator',
@@ -130,7 +129,6 @@ include 'clients',
     'test-common:test-common-runtime'
 
 project(":storage:api").name = "storage-api"
-project(":core:sdt-ursa").name = "core-sdt-ursa"
 project(":storage:diskless-api").name = "storage-diskless-api"
 project(":storage:diskless-ursa").name = "storage-diskless-ursa"
 rootProject.name = 'kafka'

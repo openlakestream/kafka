@@ -17,24 +17,19 @@
 package org.apache.kafka.storage.diskless.idempotent;
 
 import org.apache.kafka.common.TopicIdPartition;
+import org.apache.kafka.common.errors.NotLeaderOrFollowerException;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.storage.diskless.DisklessClientZone;
-import org.apache.kafka.storage.diskless.handlers.KafkaEntryFormatter;
+import org.apache.kafka.storage.diskless.DisklessFutures;
+import org.apache.kafka.storage.diskless.LogEntryUtils;
+import org.apache.kafka.storage.diskless.handlers.KafkaRecordsPayload;
 
-import org.apache.bookkeeper.mledger.AsyncCallbacks;
-import org.apache.bookkeeper.mledger.Entry;
-import org.apache.bookkeeper.mledger.ManagedCursor;
-import org.apache.bookkeeper.mledger.ManagedLedger;
-import org.apache.bookkeeper.mledger.ManagedLedgerException;
-import org.apache.bookkeeper.mledger.Position;
-import org.apache.bookkeeper.mledger.PositionFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -45,6 +40,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -54,8 +50,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
+import io.lakestream.api.Log;
+import io.lakestream.api.LogCursor;
+import io.lakestream.api.LogEntry;
 import io.oxia.client.api.AsyncOxiaClient;
-import io.streamnative.ursa.mledger.UrsaPosition;
+import io.oxia.client.api.GetResult;
+import io.oxia.client.api.PutResult;
+import io.oxia.client.api.exceptions.KeyAlreadyExistsException;
+import io.oxia.client.api.exceptions.UnexpectedVersionIdException;
+import io.oxia.client.api.options.DeleteOption;
+import io.oxia.client.api.options.PutOption;
 
 /**
  * Per-partition producer state manager for diskless idempotent produce.
@@ -71,6 +75,8 @@ public class ProducerStateManager implements Closeable {
     private static final int REPLAY_MAX_ENTRIES_PER_READ = 100;
     private static final long REPLAY_MAX_BYTES_PER_READ = 1024L * 1024L;
     private static final long MAX_SNAPSHOT_VALUE_BYTES = 4L * 1024L * 1024L;
+    private static final int SNAPSHOT_CLAIM_MAX_ATTEMPTS = 3;
+    private static final long CURSOR_CLOSE_RETRY_DELAY_MS = 100L;
 
     public enum RecoveryState {
         NOT_STARTED,
@@ -140,13 +146,12 @@ public class ProducerStateManager implements Closeable {
             CompletableFuture<PrepareResult> future) {
     }
 
-    private record SnapshotPayload(byte[] bytes, long lastOffset, int producerCount) {
+    private record SnapshotPayload(byte[] bytes, long lastOffset, int producerCount, long recordGeneration) {
     }
 
     private enum ReplayEntryResult {
-        HAS_PRODUCER_BATCH,
-        NO_PRODUCER_BATCH,
-        DECODE_FAILED
+        CONTINUE,
+        MANAGER_CLOSED
     }
 
     private static final class ProducerShadowState {
@@ -179,7 +184,7 @@ public class ProducerStateManager implements Closeable {
 
     private final TopicIdPartition topicIdPartition;
     private final Supplier<AsyncOxiaClient> oxiaClientSupplier;
-    private final Supplier<CompletableFuture<ManagedLedger>> managedLedgerSupplier;
+    private final Supplier<CompletableFuture<Log>> logSupplier;
     private final String zone;
     private final long snapshotIntervalMs;
     private final int snapshotRecordThreshold;
@@ -188,20 +193,32 @@ public class ProducerStateManager implements Closeable {
     private volatile ScheduledFuture<?> periodicSnapshotTask;
 
     private final AtomicBoolean closed = new AtomicBoolean(false);
+    private final ConcurrentHashMap<LogCursor, CompletableFuture<Void>> replayCursorCloses =
+            new ConcurrentHashMap<>();
     private final Map<Long, ProducerStateEntry> producers = new HashMap<>();
     private final List<PendingPrepareRequest> pendingPrepareRequests = new ArrayList<>();
+    private CompletableFuture<Void> snapshotWriteTail = CompletableFuture.completedFuture(null);
+    private CompletableFuture<Void> inFlightSnapshotWrite;
+    private CompletableFuture<Void> pendingSnapshotWrite;
+    private CompletableFuture<Void> asyncObservedSnapshotWrite;
+    private CompletableFuture<Void> recoveryDrain = CompletableFuture.completedFuture(null);
+    private String pendingSnapshotReason;
+    private Long ownedSnapshotVersionId;
+    private boolean snapshotOwnershipLost;
+    private boolean deleteSnapshotOnCleanup;
 
     private RecoveryState recoveryState = RecoveryState.NOT_STARTED;
     private boolean recoverySkippedDueToExcessiveReplay = false;
     private final Set<Long> bypassedProducerIdsAfterSkippedRecovery = new HashSet<>();
     private long nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
     private long recordsSinceSnapshot = 0L;
+    private long snapshotRecordGeneration = 0L;
 
     public ProducerStateManager(
             TopicIdPartition topicIdPartition,
             Supplier<AsyncOxiaClient> oxiaClientSupplier,
-            Supplier<CompletableFuture<ManagedLedger>> managedLedgerSupplier) {
-        this(topicIdPartition, oxiaClientSupplier, managedLedgerSupplier,
+            Supplier<CompletableFuture<Log>> logSupplier) {
+        this(topicIdPartition, oxiaClientSupplier, logSupplier,
             DisklessClientZone.NO_ZONE,
             DEFAULT_SNAPSHOT_INTERVAL_MS, DEFAULT_SNAPSHOT_RECORD_THRESHOLD,
             new ScheduledThreadPoolExecutor(1, runnable -> {
@@ -214,12 +231,12 @@ public class ProducerStateManager implements Closeable {
     public ProducerStateManager(
             TopicIdPartition topicIdPartition,
             Supplier<AsyncOxiaClient> oxiaClientSupplier,
-            Supplier<CompletableFuture<ManagedLedger>> managedLedgerSupplier,
+            Supplier<CompletableFuture<Log>> logSupplier,
             String zone,
             long snapshotIntervalMs,
             int snapshotRecordThreshold,
             ScheduledExecutorService scheduler) {
-        this(topicIdPartition, oxiaClientSupplier, managedLedgerSupplier,
+        this(topicIdPartition, oxiaClientSupplier, logSupplier,
             zone,
             snapshotIntervalMs, snapshotRecordThreshold, scheduler, false);
     }
@@ -227,7 +244,7 @@ public class ProducerStateManager implements Closeable {
     private ProducerStateManager(
             TopicIdPartition topicIdPartition,
             Supplier<AsyncOxiaClient> oxiaClientSupplier,
-            Supplier<CompletableFuture<ManagedLedger>> managedLedgerSupplier,
+            Supplier<CompletableFuture<Log>> logSupplier,
             String zone,
             long snapshotIntervalMs,
             int snapshotRecordThreshold,
@@ -235,7 +252,7 @@ public class ProducerStateManager implements Closeable {
             boolean ownsScheduler) {
         this.topicIdPartition = Objects.requireNonNull(topicIdPartition, "topicIdPartition must not be null");
         this.oxiaClientSupplier = Objects.requireNonNull(oxiaClientSupplier, "oxiaClientSupplier must not be null");
-        this.managedLedgerSupplier = Objects.requireNonNull(managedLedgerSupplier, "managedLedgerSupplier must not be null");
+        this.logSupplier = Objects.requireNonNull(logSupplier, "logSupplier must not be null");
         this.zone = DisklessClientZone.normalize(zone);
         this.snapshotIntervalMs = snapshotIntervalMs;
         this.snapshotRecordThreshold = snapshotRecordThreshold;
@@ -245,7 +262,6 @@ public class ProducerStateManager implements Closeable {
     }
 
     public CompletableFuture<PrepareResult> prepareAppend(List<AppendBatch> batches) {
-        ensurePeriodicSnapshotTaskStarted();
         if (batches == null || batches.isEmpty()) {
             return CompletableFuture.failedFuture(new IllegalArgumentException("batches must not be empty"));
         }
@@ -253,6 +269,9 @@ public class ProducerStateManager implements Closeable {
         synchronized (this) {
             if (closed.get()) {
                 return CompletableFuture.failedFuture(new IllegalStateException("ProducerStateManager is already closed"));
+            }
+            if (snapshotOwnershipLost) {
+                return CompletableFuture.failedFuture(snapshotOwnershipLostException());
             }
 
             if (recoveryState == RecoveryState.DONE) {
@@ -286,6 +305,7 @@ public class ProducerStateManager implements Closeable {
                 currentOffset += pendingBatch.appendBatch().recordCount();
             }
             recordsSinceSnapshot += pendingAppend.totalRecordCount;
+            snapshotRecordGeneration += pendingAppend.totalRecordCount;
             triggerSnapshot = snapshotRecordThreshold > 0 && recordsSinceSnapshot >= snapshotRecordThreshold;
         }
 
@@ -310,83 +330,257 @@ public class ProducerStateManager implements Closeable {
     }
 
     public CompletableFuture<Void> takeSnapshot(String reason) {
-        if (closed.get()) {
-            return CompletableFuture.completedFuture(null);
+        synchronized (this) {
+            if (closed.get()) {
+                return CompletableFuture.completedFuture(null);
+            }
+            return takeSnapshotLocked(reason);
+        }
+    }
+
+    private CompletableFuture<Void> takeSnapshotLocked(String reason) {
+        assert Thread.holdsLock(this) : "takeSnapshotLocked must be called under manager lock";
+        if (inFlightSnapshotWrite != null) {
+            if (pendingSnapshotWrite == null) {
+                pendingSnapshotWrite = new CompletableFuture<>();
+                snapshotWriteTail = pendingSnapshotWrite;
+            }
+            pendingSnapshotReason = reason;
+            return pendingSnapshotWrite;
         }
 
+        CompletableFuture<Void> snapshotFuture = new CompletableFuture<>();
+        snapshotWriteTail = snapshotFuture;
+        startSnapshotWriteLocked(reason, snapshotFuture);
+        return snapshotFuture;
+    }
+
+    private void startSnapshotWriteLocked(String reason, CompletableFuture<Void> result) {
+        assert Thread.holdsLock(this) : "startSnapshotWriteLocked must be called under manager lock";
+        SnapshotPayload payload = buildSnapshotPayloadForWriteLocked(result);
+        if (payload == null) {
+            return;
+        }
+        startPersistSnapshotLocked(payload, reason, result);
+    }
+
+    private SnapshotPayload buildSnapshotPayloadForWriteLocked(CompletableFuture<Void> result) {
+        assert Thread.holdsLock(this) : "buildSnapshotPayloadForWriteLocked must be called under manager lock";
         SnapshotPayload payload;
         try {
-            synchronized (this) {
-                payload = buildSnapshotPayloadLocked();
-            }
+            payload = buildSnapshotPayloadLocked();
         } catch (IOException e) {
             log.warn("[{}] Failed to serialize producer state snapshot", topicIdPartition, e);
-            return CompletableFuture.failedFuture(e);
+            result.completeExceptionally(e);
+            return null;
         }
-
         if (payload == null) {
-            return CompletableFuture.completedFuture(null);
+            result.complete(null);
+            return null;
         }
+        return payload;
+    }
 
+    private void startPersistSnapshotLocked(
+            SnapshotPayload payload,
+            String reason,
+            CompletableFuture<Void> result
+    ) {
+        assert Thread.holdsLock(this) : "startPersistSnapshotLocked must be called under manager lock";
         AsyncOxiaClient client = oxiaClientSupplier.get();
         if (client == null) {
-            return CompletableFuture.completedFuture(null);
+            result.complete(null);
+            return;
+        }
+        if (snapshotOwnershipLost || ownedSnapshotVersionId == null) {
+            result.completeExceptionally(new IllegalStateException(
+                    "Producer snapshot ownership is not held for " + topicIdPartition));
+            return;
         }
 
-        return client.put(snapshotKey(), payload.bytes())
-            .thenAccept(ignored -> {
-                synchronized (this) {
-                    recordsSinceSnapshot = 0L;
+        long expectedVersionId = ownedSnapshotVersionId;
+        CompletableFuture<Void> writeFuture;
+        try {
+            writeFuture = persistSnapshot(client, payload, reason, expectedVersionId);
+        } catch (Throwable error) {
+            loseSnapshotOwnership(expectedVersionId);
+            result.completeExceptionally(error);
+            return;
+        }
+        if (writeFuture == null) {
+            loseSnapshotOwnership(expectedVersionId);
+            result.completeExceptionally(new IllegalStateException(
+                    "Snapshot persistence returned null future for " + topicIdPartition));
+            return;
+        }
+
+        inFlightSnapshotWrite = result;
+        writeFuture.whenComplete((ignored, error) -> completeSnapshotWrite(result, error));
+    }
+
+    private void completeSnapshotWrite(CompletableFuture<Void> completedWrite, Throwable error) {
+        synchronized (this) {
+            if (inFlightSnapshotWrite != completedWrite) {
+                return;
+            }
+            inFlightSnapshotWrite = null;
+            if (pendingSnapshotWrite != null) {
+                CompletableFuture<Void> nextWrite = pendingSnapshotWrite;
+                String nextReason = pendingSnapshotReason;
+                pendingSnapshotWrite = null;
+                pendingSnapshotReason = null;
+                startSnapshotWriteLocked(nextReason, nextWrite);
+            }
+        }
+        if (error == null) {
+            completedWrite.complete(null);
+        } else {
+            completedWrite.completeExceptionally(DisklessFutures.unwrap(error));
+        }
+    }
+
+    private CompletableFuture<Void> persistSnapshot(
+            AsyncOxiaClient client,
+            SnapshotPayload payload,
+            String reason,
+            long expectedVersionId
+    ) {
+        String topicId = topicIdPartition.topicId().toString();
+        String snapshotKey = snapshotKey();
+        Set<PutOption> putOptions = snapshotPutOptions(
+                topicId, PutOption.IfVersionIdEquals(expectedVersionId));
+
+        return client.get(ProducerStateSnapshotKeys.deletedTopicMarkerKey(topicId))
+            .thenCompose(deletionFence -> {
+                if (deletionFence != null) {
+                    loseSnapshotOwnership(expectedVersionId);
+                    return CompletableFuture.completedFuture(false);
                 }
-                if (log.isDebugEnabled()) {
+                return client.put(snapshotKey, payload.bytes(), putOptions)
+                    .handle((putResult, putError) -> {
+                        if (putError != null) {
+                            loseSnapshotOwnership(expectedVersionId);
+                            throw new CompletionException(DisklessFutures.unwrap(putError));
+                        }
+                        return requireVersionId(putResult);
+                    })
+                    .thenApply(writtenVersionId -> {
+                        updateSnapshotOwnership(expectedVersionId, writtenVersionId);
+                        return true;
+                    });
+            })
+            .thenAccept(persisted -> {
+                if (persisted) {
+                    synchronized (this) {
+                        recordsSinceSnapshot = Math.max(0L,
+                                snapshotRecordGeneration - payload.recordGeneration());
+                    }
+                }
+                if (persisted && log.isDebugEnabled()) {
                     log.debug("[{}] Snapshot stored at offset {} ({} producers, reason: {})",
                         topicIdPartition, payload.lastOffset(), payload.producerCount(), reason);
                 }
             })
-            .exceptionally(error -> {
-                log.warn("[{}] Failed to persist producer state snapshot", topicIdPartition, error);
-                return null;
+            .whenComplete((ignored, error) -> {
+                if (error != null) {
+                    log.warn("[{}] Failed to persist producer state snapshot", topicIdPartition, error);
+                }
             });
     }
 
+    private CompletableFuture<Boolean> deleteOwnedSnapshotVersion(
+            AsyncOxiaClient client,
+            String snapshotKey,
+            long versionId
+    ) {
+        return client.delete(snapshotKey, Set.of(DeleteOption.IfVersionIdEquals(versionId)));
+    }
+
+    private Set<PutOption> snapshotPutOptions(String topicId, PutOption ownershipCondition) {
+        return Set.of(
+                ownershipCondition,
+                PutOption.SecondaryIndex(
+                        ProducerStateSnapshotKeys.topicIndexName(),
+                        ProducerStateSnapshotKeys.topicIndexKey(topicId)));
+    }
+
+    private static long requireVersionId(PutResult putResult) {
+        if (putResult == null || putResult.version() == null) {
+            throw new IllegalStateException("Oxia put result did not include a record version");
+        }
+        return putResult.version().versionId();
+    }
+
+    private synchronized void updateSnapshotOwnership(long expectedVersionId, long writtenVersionId) {
+        if (ownedSnapshotVersionId == null || ownedSnapshotVersionId != expectedVersionId) {
+            markSnapshotOwnershipLostLocked();
+            throw new IllegalStateException("Producer snapshot ownership changed while writing " + topicIdPartition);
+        }
+        ownedSnapshotVersionId = writtenVersionId;
+    }
+
+    private synchronized void loseSnapshotOwnership(long expectedVersionId) {
+        if (ownedSnapshotVersionId == null || ownedSnapshotVersionId == expectedVersionId) {
+            markSnapshotOwnershipLostLocked();
+        }
+    }
+
+    private void markSnapshotOwnershipLostLocked() {
+        assert Thread.holdsLock(this) : "markSnapshotOwnershipLostLocked must be called under manager lock";
+        ownedSnapshotVersionId = null;
+        snapshotOwnershipLost = true;
+        cancelPeriodicSnapshotTaskLocked();
+    }
+
+    private void cancelPeriodicSnapshotTaskLocked() {
+        assert Thread.holdsLock(this) : "cancelPeriodicSnapshotTaskLocked must be called under manager lock";
+        if (periodicSnapshotTask != null) {
+            periodicSnapshotTask.cancel(false);
+            periodicSnapshotTask = null;
+        }
+    }
+
     public CompletableFuture<Void> cleanup(boolean deleteSnapshot) {
-        if (!deleteSnapshot) {
-            takeSnapshotAsync("close");
-        }
-
-        if (closed.compareAndSet(false, true)) {
-            if (periodicSnapshotTask != null) {
-                periodicSnapshotTask.cancel(false);
-            }
-        }
-
         List<PendingPrepareRequest> requestsToFail;
+        CompletableFuture<Void> pendingRecovery;
+        CompletableFuture<Void> pendingSnapshotWrites;
         synchronized (this) {
+            deleteSnapshotOnCleanup |= deleteSnapshot;
+            if (closed.compareAndSet(false, true)) {
+                cancelPeriodicSnapshotTaskLocked();
+            }
             requestsToFail = new ArrayList<>(pendingPrepareRequests);
             pendingPrepareRequests.clear();
-            producers.clear();
-            recoveryState = RecoveryState.NOT_STARTED;
-            bypassedProducerIdsAfterSkippedRecovery.clear();
-            nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
-            recordsSinceSnapshot = 0L;
+            pendingRecovery = recoveryDrain;
+            pendingSnapshotWrites = snapshotWriteTail;
         }
         requestsToFail.forEach(request -> request.future().completeExceptionally(
             new IllegalStateException("ProducerStateManager is closed")));
 
-        CompletableFuture<Void> deleteFuture =
-                deleteSnapshot ? deleteSnapshotFromOxia() : CompletableFuture.completedFuture(null);
-        if (ownsScheduler && scheduler != null) {
-            scheduler.shutdown();
-            try {
-                if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                    scheduler.shutdownNow();
+        CompletableFuture<Void> cleanupFuture = pendingRecovery.handle((ignored, error) -> null)
+            .thenCompose(ignored -> {
+                if (deleteSnapshot) {
+                    return pendingSnapshotWrites.handle((writeIgnored, writeError) -> null)
+                            .thenCompose(writeIgnored -> deleteSnapshotFromOxia());
                 }
-            } catch (InterruptedException e) {
-                scheduler.shutdownNow();
-                Thread.currentThread().interrupt();
+                synchronized (this) {
+                    return takeSnapshotLocked("close");
+                }
+            });
+        return cleanupFuture.whenComplete((ignored, error) -> {
+            synchronized (this) {
+                producers.clear();
+                recoveryState = RecoveryState.NOT_STARTED;
+                bypassedProducerIdsAfterSkippedRecovery.clear();
+                nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
+                recordsSinceSnapshot = 0L;
+                snapshotRecordGeneration = 0L;
+                ownedSnapshotVersionId = null;
             }
-        }
-        return deleteFuture;
+            if (ownsScheduler && scheduler != null) {
+                scheduler.shutdown();
+            }
+        });
     }
 
     public synchronized Optional<ProducerState> producerState(long producerId) {
@@ -414,44 +608,90 @@ public class ProducerStateManager implements Closeable {
 
     @Override
     public void close() {
-        cleanup(false);
-    }
-
-    private void startRecovery() {
-        recover().whenComplete((ignored, recoveryError) -> {
-            List<PendingPrepareRequest> requestsToReplay;
-            synchronized (this) {
-                requestsToReplay = new ArrayList<>(pendingPrepareRequests);
-                pendingPrepareRequests.clear();
-                recoveryState = recoveryError == null ? RecoveryState.DONE : RecoveryState.NOT_STARTED;
-            }
-
-            if (recoveryError != null) {
-                log.warn("[{}] Failed to recover producer state", topicIdPartition, recoveryError);
-                requestsToReplay.forEach(request -> request.future().completeExceptionally(recoveryError));
-                return;
-            }
-
-            for (PendingPrepareRequest request : requestsToReplay) {
-                try {
-                    PrepareResult result;
-                    synchronized (this) {
-                        result = prepareAppendInternal(request.batches());
-                    }
-                    request.future().complete(result);
-                } catch (Throwable t) {
-                    request.future().completeExceptionally(t);
-                }
+        cleanup(false).whenComplete((ignored, error) -> {
+            if (error != null) {
+                log.warn("[{}] Failed to cleanup producer state manager while closing", topicIdPartition, error);
             }
         });
     }
 
+    private void startRecovery() {
+        CompletableFuture<Void> recoveryComplete = new CompletableFuture<>();
+        synchronized (this) {
+            recoveryDrain = recoveryComplete;
+        }
+        CompletableFuture<Void> recoveryAttempt;
+        try {
+            recoveryAttempt = recover();
+        } catch (Throwable error) {
+            recoveryAttempt = CompletableFuture.failedFuture(error);
+        }
+        recoveryAttempt.whenComplete((ignored, recoveryError) ->
+                completeRecovery(recoveryComplete, recoveryError));
+    }
+
+    private void completeRecovery(CompletableFuture<Void> recoveryComplete, Throwable recoveryError) {
+        try {
+            List<PendingPrepareRequest> requestsToReplay;
+            boolean managerClosed;
+            synchronized (this) {
+                requestsToReplay = new ArrayList<>(pendingPrepareRequests);
+                pendingPrepareRequests.clear();
+                managerClosed = closed.get();
+                recoveryState = recoveryError == null && !managerClosed
+                        ? RecoveryState.DONE
+                        : RecoveryState.NOT_STARTED;
+                if (recoveryError != null || managerClosed) {
+                    clearRecoveredStateLocked();
+                }
+            }
+
+            if (recoveryError != null || managerClosed) {
+                failRecoveryRequests(requestsToReplay, recoveryError, managerClosed);
+            } else {
+                ensurePeriodicSnapshotTaskStarted();
+                requestsToReplay.forEach(this::completeRecoveredPrepareRequest);
+            }
+        } finally {
+            recoveryComplete.complete(null);
+        }
+    }
+
+    private void failRecoveryRequests(
+            List<PendingPrepareRequest> requests,
+            Throwable recoveryError,
+            boolean managerClosed
+    ) {
+        Throwable failure = recoveryError == null
+                ? replayClosedException()
+                : DisklessFutures.unwrap(recoveryError);
+        if (recoveryError != null && !managerClosed) {
+            log.warn("[{}] Failed to recover producer state", topicIdPartition, failure);
+        }
+        requests.forEach(request -> request.future().completeExceptionally(failure));
+    }
+
+    private void completeRecoveredPrepareRequest(PendingPrepareRequest request) {
+        try {
+            PrepareResult result;
+            synchronized (this) {
+                if (closed.get()) {
+                    throw replayClosedException();
+                }
+                if (snapshotOwnershipLost) {
+                    throw snapshotOwnershipLostException();
+                }
+                result = prepareAppendInternal(request.batches());
+            }
+            request.future().complete(result);
+        } catch (Throwable error) {
+            request.future().completeExceptionally(error);
+        }
+    }
+
     private CompletableFuture<Void> recover() {
         return loadSnapshot()
-            .thenCompose(ignored -> replayFromManagedLedger())
-            .exceptionally(error -> {
-                throw new CompletionException(error);
-            });
+            .thenCompose(ignored -> replayFromLog());
     }
 
     private CompletableFuture<Void> loadSnapshot() {
@@ -462,76 +702,308 @@ public class ProducerStateManager implements Closeable {
             return CompletableFuture.completedFuture(null);
         }
 
-        return loadSnapshotFromKey(client, snapshotKey()).thenAccept(ignored -> { });
-    }
-
-    private CompletableFuture<Void> replayFromManagedLedger() {
-        return managedLedgerSupplier.get().thenCompose(this::replayManagedLedgerEntries);
-    }
-
-    private CompletableFuture<Void> replayManagedLedgerEntries(ManagedLedger managedLedger) {
-        Position lastConfirmed = managedLedger.getLastConfirmedEntry();
-        long endOffset = getNextOffsetForUrsa(lastConfirmed);
-
-        long startOffset;
         synchronized (this) {
-            startOffset = nextOffsetToRecover;
-        }
-        if (startOffset >= endOffset) {
-            return CompletableFuture.completedFuture(null);
+            if (snapshotOwnershipLost) {
+                return CompletableFuture.failedFuture(new IllegalStateException(
+                        "Producer snapshot ownership was lost for " + topicIdPartition));
+            }
+            ownedSnapshotVersionId = null;
         }
 
-        boolean hasNoSnapshot = startOffset == DEFAULT_NEXT_OFFSET;
-        long messagesToRecover = endOffset - startOffset;
-        if (hasNoSnapshot
-                && snapshotRecordThreshold > 0
-                && messagesToRecover > snapshotRecordThreshold) {
+        String topicId = topicIdPartition.topicId().toString();
+        String snapshotKey = snapshotKey();
+        return client.get(ProducerStateSnapshotKeys.deletedTopicMarkerKey(topicId))
+                .thenCompose(deletionFence -> {
+                    if (deletionFence != null) {
+                        synchronized (this) {
+                            markSnapshotOwnershipLostLocked();
+                        }
+                        return CompletableFuture.<Void>failedFuture(deletedTopicException());
+                    }
+                    return readAndClaimSnapshot(
+                            client, snapshotKey, topicId, SNAPSHOT_CLAIM_MAX_ATTEMPTS);
+                });
+    }
+
+    private IllegalStateException deletedTopicException() {
+        return new IllegalStateException(
+                "Producer state was permanently deleted for topic " + topicIdPartition.topicId());
+    }
+
+    private CompletableFuture<Void> readAndClaimSnapshot(
+            AsyncOxiaClient client,
+            String snapshotKey,
+            String topicId,
+            int attemptsRemaining
+    ) {
+        clearRecoveredStateLocked();
+        if (closed.get()) {
+            return CompletableFuture.failedFuture(replayClosedException());
+        }
+        return client.get(snapshotKey)
+                .thenCompose(snapshot -> claimSnapshotOwnership(
+                        client,
+                        snapshotKey,
+                        topicId,
+                        snapshot,
+                        attemptsRemaining));
+    }
+
+    private CompletableFuture<Void> claimSnapshotOwnership(
+            AsyncOxiaClient client,
+            String snapshotKey,
+            String topicId,
+            GetResult snapshot,
+            int attemptsRemaining
+    ) {
+        if (closed.get()) {
+            return CompletableFuture.failedFuture(replayClosedException());
+        }
+
+        byte[] claimPayload;
+        PutOption ownershipCondition;
+        try {
+            if (snapshot == null) {
+                claimPayload = ProducerStateSerDes.emptySnapshot();
+                ownershipCondition = PutOption.IfRecordDoesNotExist;
+            } else {
+                if (snapshot.version() == null) {
+                    throw new IllegalStateException("Oxia snapshot read did not include a record version");
+                }
+                claimPayload = restoreSnapshotForClaim(snapshot);
+                ownershipCondition = PutOption.IfVersionIdEquals(snapshot.version().versionId());
+            }
+        } catch (Throwable error) {
+            return CompletableFuture.failedFuture(error);
+        }
+
+        return client.put(snapshotKey, claimPayload, snapshotPutOptions(topicId, ownershipCondition))
+                .handle((putResult, putError) -> handleSnapshotClaimResult(
+                        client,
+                        snapshotKey,
+                        topicId,
+                        attemptsRemaining,
+                        putResult,
+                        putError))
+                .thenCompose(result -> result);
+    }
+
+    private CompletableFuture<Void> handleSnapshotClaimResult(
+            AsyncOxiaClient client,
+            String snapshotKey,
+            String topicId,
+            int attemptsRemaining,
+            PutResult putResult,
+            Throwable putError
+    ) {
+        if (putError != null) {
+            Throwable failure = DisklessFutures.unwrap(putError);
+            if (isDefinitiveClaimConflict(failure)) {
+                if (attemptsRemaining > 1) {
+                    return readAndClaimSnapshot(
+                            client,
+                            snapshotKey,
+                            topicId,
+                            attemptsRemaining - 1);
+                }
+                return CompletableFuture.failedFuture(failure);
+            }
+            synchronized (this) {
+                markSnapshotOwnershipLostLocked();
+            }
+            return CompletableFuture.failedFuture(failure);
+        }
+
+        long claimedVersionId;
+        try {
+            claimedVersionId = requireVersionId(putResult);
+        } catch (Throwable error) {
+            synchronized (this) {
+                markSnapshotOwnershipLostLocked();
+            }
+            return CompletableFuture.failedFuture(error);
+        }
+        return finishSnapshotClaim(client, snapshotKey, claimedVersionId);
+    }
+
+    private CompletableFuture<Void> finishSnapshotClaim(
+            AsyncOxiaClient client,
+            String snapshotKey,
+            long claimedVersionId
+    ) {
+        synchronized (this) {
+            if (snapshotOwnershipLost || ownedSnapshotVersionId != null) {
+                return deleteOwnedSnapshotVersion(client, snapshotKey, claimedVersionId)
+                        .thenCompose(ignored -> CompletableFuture.failedFuture(
+                                new IllegalStateException(
+                                        "Producer snapshot ownership changed while claiming "
+                                                + topicIdPartition)));
+            }
+            ownedSnapshotVersionId = claimedVersionId;
+        }
+        if (closed.get()) {
+            boolean deleteClaim;
+            synchronized (this) {
+                deleteClaim = deleteSnapshotOnCleanup;
+            }
+            if (deleteClaim) {
+                loseSnapshotOwnership(claimedVersionId);
+                return deleteOwnedSnapshotVersion(client, snapshotKey, claimedVersionId)
+                        .thenCompose(ignored -> CompletableFuture.failedFuture(replayClosedException()));
+            }
+            return CompletableFuture.failedFuture(replayClosedException());
+        }
+        return CompletableFuture.completedFuture(null);
+    }
+
+    private static boolean isDefinitiveClaimConflict(Throwable error) {
+        return error instanceof UnexpectedVersionIdException || error instanceof KeyAlreadyExistsException;
+    }
+
+    private byte[] restoreSnapshotForClaim(GetResult snapshot) throws IOException {
+        byte[] value = snapshot.value();
+        if (value == null || value.length == 0) {
+            clearRecoveredStateLocked();
+            return ProducerStateSerDes.emptySnapshot();
+        }
+        try {
+            Map<Long, ProducerStateEntry> snapshotProducers = ProducerStateSerDes.deserialize(value);
+            synchronized (this) {
+                restoreFromSnapshotLocked(snapshotProducers);
+            }
+            return value;
+        } catch (Exception parseError) {
+            log.warn("[{}] Replacing corrupt producer snapshot while claiming ownership",
+                    topicIdPartition, parseError);
+            clearRecoveredStateLocked();
+            return ProducerStateSerDes.emptySnapshot();
+        }
+    }
+
+    private CompletableFuture<Void> replayFromLog() {
+        return logSupplier.get().thenCompose(this::replayLogEntries);
+    }
+
+    private CompletableFuture<Void> replayLogEntries(Log logInstance) {
+        return logInstance.getLastOffset().thenCompose(lastOffset -> {
+            long endOffset = lastOffset.offset() < 0 ? 0L
+                    : lastOffset.offset() + Math.max(1, lastOffset.numberOfRecords());
+
+            long startOffset;
+            synchronized (this) {
+                startOffset = nextOffsetToRecover;
+            }
+            if (startOffset >= endOffset) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            boolean hasNoSnapshot = startOffset == DEFAULT_NEXT_OFFSET;
+            if (shouldSkipReplay(hasNoSnapshot, endOffset - startOffset)) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            long cursorStartOffset = startOffset == DEFAULT_NEXT_OFFSET ? 0L : startOffset;
+            return openReplayCursorAndReplay(logInstance, cursorStartOffset, endOffset);
+        });
+    }
+
+    private boolean shouldSkipReplay(boolean hasNoSnapshot, long messagesToRecover) {
+        if (hasNoSnapshot && snapshotRecordThreshold > 0 && messagesToRecover > snapshotRecordThreshold) {
             synchronized (this) {
                 recoverySkippedDueToExcessiveReplay = true;
                 bypassedProducerIdsAfterSkippedRecovery.clear();
             }
             log.warn("[{}] Skipping producer-state replay without snapshot because messages to recover {} "
                     + "exceed snapshot threshold {}", topicIdPartition, messagesToRecover, snapshotRecordThreshold);
-            return CompletableFuture.completedFuture(null);
+            return true;
         }
-        Position startPosition = startOffset == DEFAULT_NEXT_OFFSET
-            ? PositionFactory.EARLIEST
-            : PositionFactory.create(lastConfirmed.getLedgerId(), startOffset);
-
-        String cursorName = "producer-state-replay-" + topicIdPartition.topic() + "-"
-            + topicIdPartition.partition() + "-" + startOffset;
-        ManagedCursor cursor;
-        try {
-            cursor = managedLedger.newNonDurableCursor(startPosition, cursorName);
-        } catch (ManagedLedgerException e) {
-            throw new CompletionException(e);
-        }
-
-        CompletableFuture<Void> replayFuture = new CompletableFuture<>();
-        AtomicInteger replayEntries = new AtomicInteger();
-        replayFuture.whenComplete((__, error) -> {
-            cleanupReplayCursor(managedLedger, cursor.getName());
-            if (error != null) {
-                log.warn("[{}] Failed to replay producer state from managed ledger", topicIdPartition, error);
-            } else {
-                if (replayEntries.get() > 0) {
-                    takeSnapshotAsync("replay");
-                }
-                log.info("[{}] Finished replaying producer state from managed ledger, replayed {} entries",
-                    topicIdPartition, replayEntries.get());
-            }
-        });
-        scheduleNextReplayRead(cursor, lastConfirmed, endOffset, hasNoSnapshot, replayEntries, replayFuture);
-        return replayFuture;
+        return false;
     }
 
-    private void asyncReplayEntries(ManagedCursor cursor,
-                                    Position lastConfirmed,
+    private CompletableFuture<Void> openReplayCursorAndReplay(
+            Log logInstance, long cursorStartOffset, long endOffset) {
+        String cursorName = "producer-state-replay-" + topicIdPartition.topic() + "-"
+            + topicIdPartition.partition() + "-" + cursorStartOffset;
+
+        return logInstance.openEphemeralCursor(cursorName, cursorStartOffset)
+            .thenCompose(cursor -> {
+                CompletableFuture<Void> replayFuture = new CompletableFuture<>();
+                CompletableFuture<Void> result = new CompletableFuture<>();
+                AtomicInteger replayEntries = new AtomicInteger();
+                replayFuture.whenComplete((__, error) -> {
+                    closeReplayCursor(cursor).whenComplete((closeIgnored, closeError) -> {
+                        if (error != null) {
+                            log.warn("[{}] Failed to replay producer state from log", topicIdPartition, error);
+                            result.completeExceptionally(error);
+                        } else if (closeError != null) {
+                            result.completeExceptionally(closeError);
+                        } else {
+                            if (replayEntries.get() > 0) {
+                                takeSnapshotAsync("replay");
+                            }
+                            log.info("[{}] Finished replaying producer state from log, replayed {} entries",
+                                topicIdPartition, replayEntries.get());
+                            result.complete(null);
+                        }
+                    });
+                });
+                scheduleNextReplayRead(cursor, endOffset, replayEntries, replayFuture);
+                return result;
+            });
+    }
+
+    private CompletableFuture<Void> closeReplayCursor(LogCursor cursor) {
+        CompletableFuture<Void> closeDrain = new CompletableFuture<>();
+        CompletableFuture<Void> existing = replayCursorCloses.putIfAbsent(cursor, closeDrain);
+        if (existing != null) {
+            return existing;
+        }
+        closeDrain.whenComplete((ignored, error) -> replayCursorCloses.remove(cursor, closeDrain));
+        scheduleReplayCursorClose(cursor, closeDrain, false);
+        return closeDrain;
+    }
+
+    private void scheduleReplayCursorClose(
+            LogCursor cursor,
+            CompletableFuture<Void> closeDrain,
+            boolean delayed) {
+        if (closeDrain.isDone()) {
+            return;
+        }
+        Runnable closeTask = () -> {
+            try {
+                cursor.close();
+                closeDrain.complete(null);
+            } catch (Throwable closeError) {
+                log.warn("[{}] Failed to close replay cursor; retaining it for retry",
+                        topicIdPartition, closeError);
+                scheduleReplayCursorClose(cursor, closeDrain, true);
+            }
+        };
+        try {
+            if (delayed) {
+                scheduler.schedule(closeTask, CURSOR_CLOSE_RETRY_DELAY_MS, TimeUnit.MILLISECONDS);
+            } else {
+                scheduler.execute(closeTask);
+            }
+        } catch (RuntimeException scheduleError) {
+            log.warn("[{}] Failed to schedule replay cursor close; retaining it for retry",
+                    topicIdPartition, scheduleError);
+            CompletableFuture.delayedExecutor(
+                    CURSOR_CLOSE_RETRY_DELAY_MS,
+                    TimeUnit.MILLISECONDS).execute(closeTask);
+        }
+    }
+
+    private void asyncReplayEntries(LogCursor cursor,
                                     long endOffset,
-                                    boolean hasNoSnapshot,
                                     final AtomicInteger replayedEntries,
                                     CompletableFuture<Void> replayFuture) {
         if (replayFuture.isDone()) {
+            return;
+        }
+        if (closed.get()) {
+            replayFuture.completeExceptionally(replayClosedException());
             return;
         }
         long nextOffset;
@@ -542,129 +1014,171 @@ public class ProducerStateManager implements Closeable {
             replayFuture.complete(null);
             return;
         }
-        cursor.asyncReadEntries(REPLAY_MAX_ENTRIES_PER_READ, REPLAY_MAX_BYTES_PER_READ,
-                new AsyncCallbacks.ReadEntriesCallback() {
-                    @Override
-                    public void readEntriesComplete(List<Entry> entries, Object ctx) {
-                        if (replayFuture.isDone()) {
-                            if (entries != null && !entries.isEmpty()) {
-                                entries.forEach(ProducerStateManager::safeRelease);
-                            }
-                            return;
-                        }
-                        if (entries == null || entries.isEmpty()) {
-                            replayFuture.complete(null);
-                            return;
-                        }
-                        for (Entry entry : entries) {
-                            try {
-                                if (entry.getPosition().compareTo(lastConfirmed) > 0) {
-                                    replayFuture.complete(null);
-                                    return;
-                                }
-                                ReplayEntryResult replayEntryResult = replayEntry(entry);
-                                if (hasNoSnapshot
-                                        && replayedEntries.get() == 0
-                                        && replayEntryResult == ReplayEntryResult.NO_PRODUCER_BATCH) {
-                                    // Align with KoP behavior: when recovering from scratch and the first entry is
-                                    // non-idempotent, stop replay early and rebuild state from subsequent
-                                    // new idempotent writes.
-                                    replayFuture.complete(null);
-                                    return;
-                                }
-                                replayedEntries.incrementAndGet();
-                            } catch (Exception e) {
-                                log.error("[{}] Failed to replay entry at offset {}",
-                                        topicIdPartition, entry == null ? "null" : entry.getEntryId(), e);
-                                replayFuture.completeExceptionally(e);
-                                return;
-                            } finally {
-                                safeRelease(entry);
-                            }
-                        }
-                        scheduleNextReplayRead(cursor, lastConfirmed, endOffset,
-                            hasNoSnapshot, replayedEntries, replayFuture);
-                    }
-
-                    @Override
-                    public void readEntriesFailed(ManagedLedgerException exception, Object ctx) {
-                        if (!replayFuture.isDone()) {
-                            replayFuture.completeExceptionally(exception);
-                        }
-                    }
-                }, null, lastConfirmed);
+        CompletableFuture<List<LogEntry>> readFuture;
+        try {
+            readFuture = cursor.readEntries(
+                    REPLAY_MAX_ENTRIES_PER_READ, REPLAY_MAX_BYTES_PER_READ, null, endOffset);
+            if (readFuture == null) {
+                throw new IllegalStateException("LogCursor.readEntries returned null future");
+            }
+        } catch (Throwable readError) {
+            replayFuture.completeExceptionally(readError);
+            return;
+        }
+        readFuture.whenComplete((entries, readError) -> {
+            if (readError != null) {
+                Throwable closeError = closeLogEntries(entries, null);
+                if (closeError != null && closeError != readError) {
+                    readError.addSuppressed(closeError);
+                }
+                if (!replayFuture.isDone()) {
+                    replayFuture.completeExceptionally(readError);
+                } else if (closeError != null) {
+                    log.warn("[{}] Failed to close replay entries after a late failed read",
+                            topicIdPartition, closeError);
+                }
+                return;
+            }
+            processReplayBatch(entries, cursor, endOffset, replayedEntries, replayFuture);
+        });
     }
 
-    private void scheduleNextReplayRead(ManagedCursor cursor,
-                                        Position lastConfirmed,
+    private void processReplayBatch(List<LogEntry> entries,
+                                    LogCursor cursor,
+                                    long endOffset,
+                                    AtomicInteger replayedEntries,
+                                    CompletableFuture<Void> replayFuture) {
+        boolean replayComplete = false;
+        Throwable processingError = null;
+        if (!replayFuture.isDone()) {
+            if (closed.get()) {
+                processingError = replayClosedException();
+            } else if (entries == null || entries.isEmpty()) {
+                replayComplete = true;
+            } else {
+                for (LogEntry entry : entries) {
+                    try {
+                        if (closed.get()) {
+                            processingError = replayClosedException();
+                            break;
+                        }
+                        if (replayEntry(entry) == ReplayEntryResult.MANAGER_CLOSED) {
+                            processingError = replayClosedException();
+                            break;
+                        }
+                        replayedEntries.incrementAndGet();
+                    } catch (Throwable entryError) {
+                        log.error("[{}] Failed to replay entry at offset {}",
+                                topicIdPartition, replayEntryOffset(entry, entryError), entryError);
+                        processingError = entryError;
+                        break;
+                    }
+                }
+            }
+        }
+
+        processingError = closeLogEntries(entries, processingError);
+        if (replayFuture.isDone()) {
+            if (processingError != null) {
+                log.warn("[{}] Failed to finish a replay batch after replay completion",
+                        topicIdPartition, processingError);
+            }
+            return;
+        }
+        if (processingError != null) {
+            replayFuture.completeExceptionally(processingError);
+        } else if (replayComplete) {
+            replayFuture.complete(null);
+        } else {
+            scheduleNextReplayRead(cursor, endOffset, replayedEntries, replayFuture);
+        }
+    }
+
+    private static Object replayEntryOffset(LogEntry entry, Throwable entryError) {
+        if (entry == null) {
+            return "null";
+        }
+        try {
+            return entry.offset();
+        } catch (Throwable offsetError) {
+            if (entryError != offsetError) {
+                entryError.addSuppressed(offsetError);
+            }
+            return "unknown";
+        }
+    }
+
+    private static Throwable closeLogEntries(List<LogEntry> entries, Throwable precedingError) {
+        return LogEntryUtils.closeAll(entries, precedingError);
+    }
+
+    private void scheduleNextReplayRead(LogCursor cursor,
                                         long endOffset,
-                                        boolean hasNoSnapshot,
                                         AtomicInteger replayedEntries,
                                         CompletableFuture<Void> replayFuture) {
         if (replayFuture.isDone()) {
             return;
         }
+        if (closed.get()) {
+            replayFuture.completeExceptionally(replayClosedException());
+            return;
+        }
         try {
             scheduler.execute(() -> asyncReplayEntries(
-                cursor, lastConfirmed, endOffset, hasNoSnapshot, replayedEntries, replayFuture));
+                cursor, endOffset, replayedEntries, replayFuture));
         } catch (RuntimeException scheduleError) {
             replayFuture.completeExceptionally(scheduleError);
         }
     }
 
-    private void cleanupReplayCursor(ManagedLedger managedLedger, String cursorName) {
-        managedLedger.asyncDeleteCursor(cursorName, new AsyncCallbacks.DeleteCursorCallback() {
-            @Override
-            public void deleteCursorComplete(Object ctx) {
-                log.debug("[{}] Replay cursor {} deleted", topicIdPartition, cursorName);
-            }
-
-            @Override
-            public void deleteCursorFailed(ManagedLedgerException exception, Object ctx) {
-                log.warn("[{}] Failed to delete replay cursor {}", topicIdPartition, cursorName, exception);
-            }
-        }, null);
-    }
-
-    private ReplayEntryResult replayEntry(Entry entry) {
-        long baseOffset = entry.getEntryId();
-        long nextOffset = getNextOffsetForUrsa(entry.getPosition());
-
+    private ReplayEntryResult replayEntry(LogEntry entry) {
+        if (closed.get()) {
+            return ReplayEntryResult.MANAGER_CLOSED;
+        }
+        long baseOffset = entry.offset();
+        long nextOffset = Math.addExact(baseOffset, entry.numberOfRecords());
         try {
-            ByteBuffer kafkaRecordsBuffer = KafkaEntryFormatter.decode(entry.getDataBuffer().duplicate());
-            if (kafkaRecordsBuffer.remaining() >= Long.BYTES) {
-                kafkaRecordsBuffer.putLong(kafkaRecordsBuffer.position(), baseOffset);
-            }
-
-            MemoryRecords memoryRecords = MemoryRecords.readableRecords(kafkaRecordsBuffer);
-            long batchBaseOffset = baseOffset;
-            boolean hasProducerBatch = false;
-            for (RecordBatch batch : memoryRecords.batches()) {
-                int recordCount = batch.countOrNull() != null ? batch.countOrNull() : 0;
+            MemoryRecords records = KafkaRecordsPayload.readableRecords(
+                    entry.payload(), baseOffset, entry.numberOfRecords());
+            // Header-only: individual records are never decoded during replay.
+            for (RecordBatch batch : records.batches()) {
                 if (batch.hasProducerId()) {
-                    hasProducerBatch = true;
                     synchronized (this) {
+                        if (closed.get()) {
+                            return ReplayEntryResult.MANAGER_CLOSED;
+                        }
                         appendRecoveredBatchLocked(
                             batch.producerId(),
                             batch.producerEpoch(),
                             batch.baseSequence(),
                             batch.lastSequence(),
-                            batchBaseOffset,
+                            batch.baseOffset(),
                             batch.maxTimestamp()
                         );
                     }
                 }
-                batchBaseOffset += recordCount;
             }
-            return hasProducerBatch ? ReplayEntryResult.HAS_PRODUCER_BATCH : ReplayEntryResult.NO_PRODUCER_BATCH;
-        } catch (Exception decodeError) {
-            log.warn("[{}] Failed to replay entry at offset {}", topicIdPartition, baseOffset, decodeError);
-            return ReplayEntryResult.DECODE_FAILED;
+        } catch (RuntimeException malformed) {
+            // A single unreadable entry must not abort recovery for the whole partition.
+            log.warn("[{}] Skipping malformed entry at offset {} during producer-state replay",
+                    topicIdPartition, baseOffset, malformed);
         } finally {
             synchronized (this) {
-                nextOffsetToRecover = Math.max(nextOffsetToRecover, nextOffset);
+                if (!closed.get()) {
+                    nextOffsetToRecover = Math.max(nextOffsetToRecover, nextOffset);
+                }
             }
         }
+        return ReplayEntryResult.CONTINUE;
+    }
+
+    // Visible for testing: how far producer-state replay has advanced.
+    synchronized long nextOffsetToRecoverForTesting() {
+        return nextOffsetToRecover;
+    }
+
+    private IllegalStateException replayClosedException() {
+        return new IllegalStateException("ProducerStateManager is closed during replay for " + topicIdPartition);
     }
 
     private PrepareResult prepareAppendInternal(List<AppendBatch> batches) {
@@ -838,7 +1352,8 @@ public class ProducerStateManager implements Closeable {
         return new SnapshotPayload(
             serializationResult.bytes(),
             serializationResult.lastOffset(),
-            serializationResult.producerCount());
+            serializationResult.producerCount(),
+            snapshotRecordGeneration);
     }
 
     private void restoreFromSnapshotLocked(Map<Long, ProducerStateEntry> snapshotProducers) {
@@ -870,45 +1385,22 @@ public class ProducerStateManager implements Closeable {
         stateEntry.appendBatch(producerEpoch, new BatchMetadata(firstSequence, lastSequence, offsetFuture, timestamp));
     }
 
-    private CompletableFuture<Boolean> loadSnapshotFromKey(
-            AsyncOxiaClient client,
-            String snapshotKey) {
-        return client.get(snapshotKey)
-            .handle((getResult, error) -> {
-                if (error != null) {
-                    log.warn("[{}] Failed to load producer snapshot from key {}",
-                            topicIdPartition,
-                            snapshotKey,
-                            error);
-                    return false;
-                }
-                if (getResult == null || getResult.value() == null || getResult.value().length == 0) {
-                    return false;
-                }
-                try {
-                    Map<Long, ProducerStateEntry> snapshot = ProducerStateSerDes.deserialize(getResult.value());
-                    synchronized (this) {
-                        restoreFromSnapshotLocked(snapshot);
-                    }
-                    return true;
-                } catch (Exception parseError) {
-                    log.warn("[{}] Ignoring producer snapshot due to parse failure",
-                            topicIdPartition,
-                            parseError);
-                    clearRecoveredStateLocked();
-                    return false;
-                }
-            });
-    }
-
     private CompletableFuture<Void> deleteSnapshotFromOxia() {
         AsyncOxiaClient client = oxiaClientSupplier.get();
         if (client == null) {
             return CompletableFuture.completedFuture(null);
         }
-        return client.delete(snapshotKey())
+        Long ownedVersionId;
+        synchronized (this) {
+            ownedVersionId = ownedSnapshotVersionId;
+        }
+        if (ownedVersionId == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return deleteOwnedSnapshotVersion(client, snapshotKey(), ownedVersionId)
             .handle((ignored, error) -> {
-                if (error != null) {
+                if (error != null
+                        && !(DisklessFutures.unwrap(error) instanceof UnexpectedVersionIdException)) {
                     log.warn("[{}] Failed to delete producer snapshot", topicIdPartition, error);
                 }
                 return null;
@@ -916,18 +1408,35 @@ public class ProducerStateManager implements Closeable {
     }
 
     private void takeSnapshotAsync(String reason) {
-        if (closed.get()) {
-            return;
+        CompletableFuture<Void> snapshotFuture;
+        synchronized (this) {
+            if (closed.get() || snapshotOwnershipLost) {
+                return;
+            }
+            snapshotFuture = takeSnapshotLocked(reason);
+            if (asyncObservedSnapshotWrite == snapshotFuture) {
+                return;
+            }
+            asyncObservedSnapshotWrite = snapshotFuture;
         }
-        takeSnapshot(reason).exceptionally(error -> {
-            log.warn("[{}] Snapshot attempt failed ({})", topicIdPartition, reason, error);
-            return null;
+        snapshotFuture.whenComplete((ignored, error) -> {
+            synchronized (this) {
+                if (asyncObservedSnapshotWrite == snapshotFuture) {
+                    asyncObservedSnapshotWrite = null;
+                }
+            }
+            if (error != null) {
+                log.warn("[{}] Snapshot attempt failed ({})", topicIdPartition, reason, error);
+            }
         });
     }
 
     private void ensurePeriodicSnapshotTaskStarted() {
         synchronized (this) {
-            if (snapshotIntervalMs <= 0 || periodicSnapshotTask != null || closed.get()) {
+            if (snapshotIntervalMs <= 0
+                    || periodicSnapshotTask != null
+                    || closed.get()
+                    || snapshotOwnershipLost) {
                 return;
             }
             periodicSnapshotTask = scheduler.scheduleAtFixedRate(
@@ -936,6 +1445,11 @@ public class ProducerStateManager implements Closeable {
                 snapshotIntervalMs,
                 TimeUnit.MILLISECONDS);
         }
+    }
+
+    private NotLeaderOrFollowerException snapshotOwnershipLostException() {
+        return new NotLeaderOrFollowerException(
+                "Producer snapshot ownership was lost for " + topicIdPartition);
     }
 
     private String snapshotKey() {
@@ -947,24 +1461,6 @@ public class ProducerStateManager implements Closeable {
         producers.clear();
         bypassedProducerIdsAfterSkippedRecovery.clear();
         nextOffsetToRecover = DEFAULT_NEXT_OFFSET;
-    }
-
-    private static void safeRelease(Entry entry) {
-        try {
-            entry.release();
-        } catch (Exception releaseError) {
-            log.warn("Failed to release managed-ledger entry {}", entry.getPosition(), releaseError);
-        }
-    }
-
-    private static long getNextOffsetForUrsa(Position position) {
-        if (position == null || position.getEntryId() < 0) {
-            return 0L;
-        }
-        if (position instanceof UrsaPosition ursaPosition) {
-            return ursaPosition.getEntryId() + Math.max(1L, ursaPosition.numMessages());
-        }
-        return position.getEntryId() + 1L;
     }
 
     private static int nextSequence(int lastSequence) {

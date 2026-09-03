@@ -21,10 +21,10 @@ USER root
 
 ARG build_date
 
-LABEL org.label-schema.name="kafka-diskless" \
+LABEL org.label-schema.name="lakestream/kafka" \
       org.label-schema.description="Apache Kafka with Diskless/Ursa Storage" \
       org.label-schema.build-date="${build_date}" \
-      org.label-schema.vcs-url="https://github.com/streamnative/ursa-for-kafka"
+      org.label-schema.vcs-url="https://github.com/lakestream-io/kafka"
 
 COPY kafka.tgz kafka.tgz
 

@@ -146,6 +146,19 @@ class KafkaConfigTest {
   }
 
   @Test
+  def testDisklessLogConfigIncludesBrokerRetentionCheckInterval(): Unit = {
+    val props = TestUtils.createBrokerConfig(0, port = 8181)
+    props.setProperty(ServerLogConfigs.LOG_CLEANUP_INTERVAL_MS_CONFIG, "1234")
+
+    val cfg = KafkaConfig.fromProps(props)
+    assertFalse(cfg.extractLogConfigMap.containsKey(ServerLogConfigs.LOG_CLEANUP_INTERVAL_MS_CONFIG))
+    assertEquals(1234L, cfg.extractDisklessLogConfigMap
+      .get(ServerLogConfigs.LOG_CLEANUP_INTERVAL_MS_CONFIG)
+      .asInstanceOf[java.lang.Long]
+      .longValue())
+  }
+
+  @Test
   def testLogRetentionTimeBothMinutesAndHoursProvided(): Unit = {
     val props = TestUtils.createBrokerConfig(0, port = 8181)
     props.setProperty(ServerLogConfigs.LOG_RETENTION_TIME_MINUTES_CONFIG, "30")
@@ -913,12 +926,10 @@ class KafkaConfigTest {
         case ServerLogConfigs.LOG_CLEANUP_POLICY_CONFIG => assertPropertyInvalid(baseProperties, name, "unknown_policy", "0")
 
         // Ursa storage configs: many are plain strings, so do not treat "not_a_number" as invalid.
-        case ServerLogConfigs.URSA_STORAGE_OXIA_SERVICE_URL_CONFIG => // ignore string
-        case ServerLogConfigs.PULSAR_OXIA_SERVICE_URL_CONFIG => // ignore string
-        case ServerLogConfigs.INTERCEPTOR_CLASS_NAME_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_CLASS_PATH_CONFIG => // ignore string
+        case ServerLogConfigs.URSA_STORAGE_S3_SESSION_TOKEN_CONFIG => // ignore password string
+        case ServerLogConfigs.URSA_CATALOG_OXIA_SERVICE_URL_CONFIG => // ignore string
         case ServerLogConfigs.URSA_OXIA_SERVICE_URL_CONFIG => // ignore string
-        case ServerLogConfigs.URSA_STORAGE_WAL_DIRECTORY_CONFIG => // ignore string
-        case ServerLogConfigs.URSA_STORAGE_NAMESPACE_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_PATH_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_COMPACTION_PREFIX_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_COMPACTION_BUCKET_CONFIG => // ignore string
@@ -927,11 +938,6 @@ class KafkaConfigTest {
         case ServerLogConfigs.URSA_STORAGE_S3_SECRET_KEY_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_S3_BUCKET_CONFIG => // ignore string
         case ServerLogConfigs.URSA_STORAGE_S3_REGION_CONFIG => // ignore string
-        case ServerLogConfigs.URSA_STORAGE_EXTERNAL_READER_FACTORY_CLASS_CONFIG => // ignore string
-        case ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_URL_CONFIG => // ignore string
-        case ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_CONFIG => // ignore string
-        case ServerLogConfigs.URSA_STORAGE_KOP_SCHEMA_REGISTRY_HTTP_HEADER_AUTHORIZATION_FILE_CONFIG => // ignore string
-
         case CleanerConfig.LOG_CLEANER_IO_MAX_BYTES_PER_SECOND_PROP => assertPropertyInvalid(baseProperties, name, "not_a_number")
         case CleanerConfig.LOG_CLEANER_DEDUPE_BUFFER_SIZE_PROP => assertPropertyInvalid(baseProperties, name, "not_a_number", "1024")
         case CleanerConfig.LOG_CLEANER_DEDUPE_BUFFER_LOAD_FACTOR_PROP => assertPropertyInvalid(baseProperties, name, "not_a_number")
@@ -947,6 +953,8 @@ class KafkaConfigTest {
         case ServerLogConfigs.LOG_MESSAGE_TIMESTAMP_BEFORE_MAX_MS_CONFIG => assertPropertyInvalid(baseProperties, name, "not_a_number")
         case ServerLogConfigs.LOG_MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG => assertPropertyInvalid(baseProperties, name, "not_a_number")
         case ServerLogConfigs.LOG_FLUSH_START_OFFSET_CHECKPOINT_INTERVAL_MS_CONFIG => assertPropertyInvalid(baseProperties, name, "not_a_number")
+        case ServerLogConfigs.URSA_STORAGE_LIFECYCLE_SWEEP_INTERVAL_MS_CONFIG =>
+          assertPropertyInvalid(baseProperties, name, "not_a_number", "999")
         case ServerLogConfigs.URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_INTERVAL_MS_CONFIG =>
           assertPropertyInvalid(baseProperties, name, "not_a_number")
         case ServerLogConfigs.URSA_STORAGE_PRODUCER_STATE_SNAPSHOT_RECORD_THRESHOLD_CONFIG =>

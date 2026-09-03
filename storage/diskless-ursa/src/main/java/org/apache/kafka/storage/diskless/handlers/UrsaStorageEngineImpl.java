@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.diskless.handlers;
 
 import org.apache.kafka.common.TopicIdPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse;
@@ -30,15 +31,17 @@ import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 
 public class UrsaStorageEngineImpl implements DisklessStorageEngine {
 
     private final UrsaStorageState state;
-    private final UrsaManagedLedgerWriter writer;
-    private final UrsaManagedLedgerReader reader;
+    private final UrsaLakestreamWriter writer;
+    private final UrsaLakestreamReader reader;
 
     public UrsaStorageEngineImpl(
             Time time,
@@ -46,17 +49,21 @@ public class UrsaStorageEngineImpl implements DisklessStorageEngine {
             UrsaStorageConfig config,
             BrokerTopicStats brokerTopicStats,
             Map<String, Object> logConfigDefaults,
-            Function<String, Map<String, String>> topicConfigSupplier) {
+            Function<String, Map<String, String>> topicConfigSupplier,
+            Function<String, OptionalInt> partitionCountSupplier,
+            LongSupplier imageOffsetSupplier) {
         this.state = new UrsaStorageState(
                 time,
                 brokerId,
                 config,
                 brokerTopicStats,
                 logConfigDefaults,
-                topicConfigSupplier
+                topicConfigSupplier,
+                partitionCountSupplier,
+                imageOffsetSupplier
         );
-        this.writer = new UrsaManagedLedgerWriter(state);
-        this.reader = new UrsaManagedLedgerReader(state);
+        this.writer = new UrsaLakestreamWriter(state);
+        this.reader = new UrsaLakestreamReader(state);
     }
 
     @Override
@@ -85,11 +92,6 @@ public class UrsaStorageEngineImpl implements DisklessStorageEngine {
     }
 
     @Override
-    public void deletePartitionData(TopicIdPartition tp) {
-        state.deletePartitionData(tp);
-    }
-
-    @Override
     public Set<TopicIdPartition> snapshotTrackedPartitions() {
         return state.snapshotTrackedPartitions();
     }
@@ -103,13 +105,13 @@ public class UrsaStorageEngineImpl implements DisklessStorageEngine {
     }
 
     @Override
-    public void updateTopicConfig(String topic, Map<String, String> config) {
-        state.updateTopicConfig(topic, config);
+    public void applyTopicConfig(String topicName, Uuid topicId, Map<String, String> config) {
+        state.applyTopicConfig(topicName, topicId, config);
     }
 
     @Override
-    public void deleteTopicConfig(String topic) {
-        state.deleteTopicConfig(topic);
+    public void fenceDeletedTopic(String topicName, Uuid topicId) {
+        state.fenceDeletedTopic(topicName, topicId);
     }
 
     @Override

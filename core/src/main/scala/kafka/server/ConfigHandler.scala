@@ -110,7 +110,7 @@ class TopicConfigHandler(private val replicaManager: ReplicaManager,
     updateLogConfig(topic, topicConfig)
 
     if (replicaManager.disklessStorageSupport.isDisklessStorageTopic(topic)) {
-      replicaManager.disklessStorageSupport.updateTopicConfig(topic, topicConfig)
+      replicaManager.disklessStorageSupport.applyTopicConfig(topic, topicConfig)
     }
 
     def updateThrottledList(prop: String, quotaManager: ReplicationQuotaManager): Unit = {

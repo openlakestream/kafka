@@ -53,7 +53,7 @@ import org.apache.kafka.server.purgatory.DelayedProduce.ProducePartitionStatus
 import org.apache.kafka.server.LogAppendResult.LogAppendSummary
 import org.apache.kafka.server.common.{DirectoryEventHandler, RequestLocal, StopPartition, TransactionVersion}
 import org.apache.kafka.server.log.remote.TopicPartitionLog
-import org.apache.kafka.server.config.{ReplicationConfigs, ServerLogConfigs}
+import org.apache.kafka.server.config.ReplicationConfigs
 import org.apache.kafka.server.log.remote.storage.RemoteLogManager
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
 import org.apache.kafka.server.network.BrokerEndPoint
@@ -208,8 +208,6 @@ class ReplicaManager(val config: KafkaConfig,
     new DelayedOperationPurgatory[DelayedShareFetch](
       shareFetchPurgatoryName, delayedShareFetchTimer, config.brokerId,
       config.shareGroupConfig.shareFetchPurgatoryPurgeIntervalRequests))
-  private[server] val interceptor: ReplicaManagerInterceptor = createInterceptor()
-
   /* epoch of the controller that last changed the leader */
   protected val localBrokerId = config.brokerId
   protected val allPartitions = new ConcurrentHashMap[TopicPartition, HostedPartition[Partition]]
@@ -256,14 +254,6 @@ class ReplicaManager(val config: KafkaConfig,
   }
 
   def producerIdCount: Int = onlinePartitionsIterator.map(_.producerIdCount).sum
-
-  protected def createInterceptor(): ReplicaManagerInterceptor = {
-    ClassLoaderAwareReplicaManagerInterceptor.newInstance(
-      config.replicaManagerInterceptorClassName,
-      config,
-      metadataCache,
-      config.getString(ServerLogConfigs.URSA_STORAGE_CLASS_PATH_CONFIG))
-  }
 
   val isrExpandRate: Meter = metricsGroup.newMeter(IsrExpandsPerSecMetricName, "expands", TimeUnit.SECONDS)
   val isrShrinkRate: Meter = metricsGroup.newMeter(IsrShrinksPerSecMetricName, "shrinks", TimeUnit.SECONDS)
@@ -724,7 +714,6 @@ class ReplicaManager(val config: KafkaConfig,
         }
 
         updateDisklessProduceStats(disklessEntries, disklessResult)
-
         // Preserve the original request order (as much as the input Map provides).
         val combinedSeq = requestOrder.map { tp =>
           tp -> disklessResult.getOrElse(tp, classicResultScala.getOrElse(tp, new PartitionResponse(Errors.UNKNOWN_SERVER_ERROR)))
@@ -1568,10 +1557,6 @@ class ReplicaManager(val config: KafkaConfig,
           val info = partition.appendRecordsToLeader(records, origin, requiredAcks, requestLocal,
               verificationGuards.getOrElse(topicIdPartition.topicPartition(), VerificationGuard.SENTINEL), transactionVersion)
           val numAppendedMessages = info.numMessages
-          if (partition.isLeader) {
-            interceptor.onAppend(records, info, partition)
-          }
-
           // update stats for successfully appended bytes and messages as bytesInRate and messageInRate
           brokerTopicStats.topicStats(topicIdPartition.topic).bytesInRate.mark(records.sizeInBytes)
           brokerTopicStats.allTopicsStats.bytesInRate.mark(records.sizeInBytes)
@@ -2632,7 +2617,6 @@ class ReplicaManager(val config: KafkaConfig,
     removeAllTopicMetrics()
     addPartitionsToTxnManager.foreach(_.shutdown())
     disklessStorageSupport.close()
-    interceptor.close()
     info("Shut down completely")
   }
 
@@ -2839,7 +2823,8 @@ class ReplicaManager(val config: KafkaConfig,
         getOrCreatePartition(tp, delta, info.topicId).foreach { case (partition, isNew) =>
           try {
             val partitionAssignedDirectoryId = directoryIds.find(_._1.topicPartition() == tp).map(_._2)
-            partition.makeLeader(info.partition, isNew, offsetCheckpoints, Some(info.topicId), partitionAssignedDirectoryId)
+            partition.makeLeader(
+              info.partition, isNew, offsetCheckpoints, Some(info.topicId), partitionAssignedDirectoryId)
 
             changedPartitions.add(partition)
           } catch {

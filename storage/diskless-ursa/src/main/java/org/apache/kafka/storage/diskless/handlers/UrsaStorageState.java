@@ -17,49 +17,56 @@
 package org.apache.kafka.storage.diskless.handlers;
 
 import org.apache.kafka.common.TopicIdPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.errors.NotLeaderOrFollowerException;
+import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.server.config.ServerLogConfigs;
 import org.apache.kafka.storage.diskless.DisklessStorageStateOperations;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
 
-import org.apache.bookkeeper.mledger.AsyncCallbacks;
-import org.apache.bookkeeper.mledger.ManagedLedger;
-import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
-import org.apache.bookkeeper.mledger.ManagedLedgerException;
-import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.function.BiConsumer;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
+import io.lakestream.api.Log;
+import io.lakestream.api.StreamCatalog;
 import io.oxia.client.api.AsyncOxiaClient;
 
 /**
  * Shared state container for Ursa storage components.
- * Manages ManagedLedger instances for UrsaManagedLedgerReader and UrsaManagedLedgerWriter.
+ * Manages per-partition Lakestream logs for the diskless reader and writer.
  */
 public class UrsaStorageState implements DisklessStorageStateOperations {
 
     private static final Logger log = LoggerFactory.getLogger(UrsaStorageState.class);
-    private static final long TOPIC_CONFIG_UPDATE_TIMEOUT_SECONDS = 30;
+    private static final long SHUTDOWN_TIMEOUT_MS = 5_000;
 
     private final Time time;
     private final int brokerId;
@@ -69,12 +76,25 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
 
     private final ConcurrentHashMap<TopicIdPartition, UrsaPartitionLog> partitionLogs = new ConcurrentHashMap<>();
 
-    private final KafkaManagedLedgerFactoryHolder managedLedgerFactoryHolder;
-    private final ManagedLedgerFactory managedLedgerFactory;
+    private final LakestreamStorageHolder lakestreamStorageHolder;
     private final Supplier<AsyncOxiaClient> oxiaClientSupplier;
     private final ScheduledExecutorService producerStateScheduler;
+    /** One timer for every periodic and delayed task: retention checks and long-poll timeouts. */
+    private final ScheduledExecutorService disklessTimer;
+    private final ScheduledFuture<?> retentionTask;
     private final Map<String, Object> logConfigDefaults;
     private final Function<String, Map<String, String>> topicConfigSupplier;
+    private final Function<String, OptionalInt> partitionCountSupplier;
+    /** The last metadata offset this broker applied; stamped on streams it provisions. */
+    private final LongSupplier imageOffsetSupplier;
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final Object lifecycleLock = new Object();
+    private final Object shutdownLock = new Object();
+    private final Object producerStateCleanupLock = new Object();
+    private final CompletableFuture<Void> producerStateCleanupDrain = new CompletableFuture<>();
+    private int pendingProducerStateCleanups;
+    private boolean producerStateCleanupRegistrationSealed;
+    private boolean resourcesClosed;
 
     /**
      * Creates UrsaStorageState for production use.
@@ -86,7 +106,9 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
             BrokerTopicStats brokerTopicStats) {
         this(time, brokerId, config, brokerTopicStats,
             (Map<String, Object>) null,
-            (Function<String, Map<String, String>>) null);
+            (Function<String, Map<String, String>>) null,
+            topic -> OptionalInt.empty(),
+            () -> 0L);
     }
 
     public UrsaStorageState(
@@ -95,29 +117,36 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
             UrsaStorageConfig config,
             BrokerTopicStats brokerTopicStats,
             Map<String, Object> logConfigDefaults,
-            Function<String, Map<String, String>> topicConfigSupplier) {
+            Function<String, Map<String, String>> topicConfigSupplier,
+            Function<String, OptionalInt> partitionCountSupplier,
+            LongSupplier imageOffsetSupplier) {
         this.time = time;
         this.brokerId = brokerId;
         this.config = config;
         this.brokerTopicStats = brokerTopicStats;
         this.logConfigDefaults = logConfigDefaults != null ? logConfigDefaults : Collections.emptyMap();
         this.topicConfigSupplier = topicConfigSupplier;
+        this.partitionCountSupplier = partitionCountSupplier != null
+                ? partitionCountSupplier
+                : topic -> OptionalInt.empty();
+        this.imageOffsetSupplier = imageOffsetSupplier != null ? imageOffsetSupplier : () -> 0L;
         this.producerStateScheduler = new ScheduledThreadPoolExecutor(1, runnable -> {
             Thread thread = new Thread(runnable, "producer-state-manager");
             thread.setDaemon(true);
             return thread;
         });
+        this.disklessTimer = newDaemonScheduler("diskless-timer");
 
-        KafkaManagedLedgerFactoryHolder holder;
+        LakestreamStorageHolder holder;
         try {
-            holder = KafkaManagedLedgerFactoryHolder.create(config);
-            log.info("Initialized ManagedLedgerFactory for Kafka diskless storage");
+            holder = LakestreamStorageHolder.create(config);
+            log.info("Initialized StreamCatalog for Kafka diskless storage");
         } catch (Exception e) {
-            throw new RuntimeException("Failed to initialize ManagedLedgerFactory", e);
+            throw new RuntimeException("Failed to initialize StreamCatalog", e);
         }
-        this.managedLedgerFactoryHolder = holder;
-        this.managedLedgerFactory = holder.factory();
+        this.lakestreamStorageHolder = holder;
         this.oxiaClientSupplier = holder::oxiaClient;
+        this.retentionTask = startRetentionChecks();
     }
 
     UrsaStorageState(
@@ -125,21 +154,62 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
             int brokerId,
             UrsaStorageConfig config,
             BrokerTopicStats brokerTopicStats,
-            ManagedLedgerFactory managedLedgerFactory) {
+            StreamCatalog catalog) {
+        this(time, brokerId, config, brokerTopicStats, catalog, Collections.emptyMap(), null);
+    }
+
+    UrsaStorageState(
+            Time time,
+            int brokerId,
+            UrsaStorageConfig config,
+            BrokerTopicStats brokerTopicStats,
+            StreamCatalog catalog,
+            Map<String, Object> logConfigDefaults,
+            Function<String, Map<String, String>> topicConfigSupplier) {
+        this(time, brokerId, config, brokerTopicStats,
+                new LakestreamStorageHolder(
+                        Objects.requireNonNull(catalog, "catalog must not be null"), null),
+                logConfigDefaults, topicConfigSupplier);
+    }
+
+    UrsaStorageState(
+            Time time,
+            int brokerId,
+            UrsaStorageConfig config,
+            BrokerTopicStats brokerTopicStats,
+            LakestreamStorageHolder lakestreamStorageHolder,
+            Map<String, Object> logConfigDefaults,
+            Function<String, Map<String, String>> topicConfigSupplier) {
+        this(time, brokerId, config, brokerTopicStats, lakestreamStorageHolder, logConfigDefaults,
+                topicConfigSupplier, topic -> OptionalInt.empty(), () -> 0L);
+    }
+
+    UrsaStorageState(
+            Time time,
+            int brokerId,
+            UrsaStorageConfig config,
+            BrokerTopicStats brokerTopicStats,
+            LakestreamStorageHolder lakestreamStorageHolder,
+            Map<String, Object> logConfigDefaults,
+            Function<String, Map<String, String>> topicConfigSupplier,
+            Function<String, OptionalInt> partitionCountSupplier,
+            LongSupplier imageOffsetSupplier) {
         this.time = Objects.requireNonNull(time, "time must not be null");
         this.brokerId = brokerId;
         this.config = Objects.requireNonNull(config, "config must not be null");
         this.brokerTopicStats = Objects.requireNonNull(brokerTopicStats, "brokerTopicStats must not be null");
-        this.managedLedgerFactoryHolder = null;
-        this.managedLedgerFactory = Objects.requireNonNull(managedLedgerFactory, "managedLedgerFactory must not be null");
-        this.oxiaClientSupplier = () -> null;
-        this.producerStateScheduler = new ScheduledThreadPoolExecutor(1, runnable -> {
-            Thread thread = new Thread(runnable, "producer-state-manager-test");
-            thread.setDaemon(true);
-            return thread;
-        });
-        this.logConfigDefaults = Collections.emptyMap();
-        this.topicConfigSupplier = null;
+        this.lakestreamStorageHolder = Objects.requireNonNull(
+                lakestreamStorageHolder, "lakestreamStorageHolder must not be null");
+        this.oxiaClientSupplier = lakestreamStorageHolder::oxiaClient;
+        this.producerStateScheduler = newDaemonScheduler("producer-state-manager-test");
+        this.disklessTimer = newDaemonScheduler("diskless-timer-test");
+        this.logConfigDefaults = logConfigDefaults != null ? logConfigDefaults : Collections.emptyMap();
+        this.topicConfigSupplier = topicConfigSupplier;
+        this.partitionCountSupplier = Objects.requireNonNull(
+                partitionCountSupplier, "partitionCountSupplier must not be null");
+        this.imageOffsetSupplier = Objects.requireNonNull(
+                imageOffsetSupplier, "imageOffsetSupplier must not be null");
+        this.retentionTask = startRetentionChecks();
     }
 
     public Time time() {
@@ -150,6 +220,52 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
         return brokerId;
     }
 
+    /** The shared timer behind retention checks and long-poll timeouts. */
+    ScheduledExecutorService timer() {
+        return disklessTimer;
+    }
+
+    /** The scheduler behind producer-state snapshots. */
+    ScheduledExecutorService producerStateScheduler() {
+        return producerStateScheduler;
+    }
+
+    /**
+     * The effective {@code message.timestamp.type} of a topic. A partition writer resolves this
+     * once, when it is built, and {@link #applyTopicConfig} pushes every later change to it: the
+     * produce path must not rebuild a topic's configuration per append.
+     */
+    TimestampType timestampType(String topic) {
+        Map<String, String> topicConfig =
+                topicConfigSupplier == null ? null : topicConfigSupplier.apply(topic);
+        return timestampType(topic, topicConfig);
+    }
+
+    private TimestampType timestampType(String topic, Map<String, String> topicConfig) {
+        String configured = topicConfig == null
+                ? null
+                : topicConfig.get(TopicConfig.MESSAGE_TIMESTAMP_TYPE_CONFIG);
+        if (configured == null || configured.isBlank()) {
+            configured = defaultTimestampType();
+        }
+        try {
+            return TimestampType.forName(configured);
+        } catch (RuntimeException unknownType) {
+            log.warn("Unknown message timestamp type {} for topic {}, using {}",
+                    configured, topic, TimestampType.CREATE_TIME.name, unknownType);
+            return TimestampType.CREATE_TIME;
+        }
+    }
+
+    /** The broker default, which the log config map may carry under either the server or the topic name. */
+    private String defaultTimestampType() {
+        Object serverDefault = logConfigDefaults.get(ServerLogConfigs.LOG_MESSAGE_TIMESTAMP_TYPE_CONFIG);
+        if (serverDefault == null) {
+            serverDefault = logConfigDefaults.get(TopicConfig.MESSAGE_TIMESTAMP_TYPE_CONFIG);
+        }
+        return serverDefault == null ? TimestampType.CREATE_TIME.name : String.valueOf(serverDefault);
+    }
+
     public UrsaStorageConfig config() {
         return config;
     }
@@ -158,53 +274,98 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
         return brokerTopicStats;
     }
 
-    public void updateTopicConfig(String topic, Map<String, String> topicConfig) {
-        try {
-            updateTopicConfigAsync(topic, topicConfig).get(TOPIC_CONFIG_UPDATE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Interrupted while updating topic config for " + topic, e);
-        } catch (ExecutionException e) {
-            throw new RuntimeException("Failed to update topic config for " + topic, e.getCause());
-        } catch (TimeoutException e) {
-            throw new RuntimeException("Timed out after " + TOPIC_CONFIG_UPDATE_TIMEOUT_SECONDS
-                    + " seconds while updating topic config for " + topic, e);
-        }
+    /**
+     * Resolves a topic name to its current partition count as seen by the broker metadata cache,
+     * or empty when the cache does not know the topic.
+     */
+    public Function<String, OptionalInt> partitionCountSupplier() {
+        return partitionCountSupplier;
     }
 
-    private CompletableFuture<Void> updateTopicConfigAsync(String topic, Map<String, String> topicConfig) {
-        if (topic == null || topicConfig == null || managedLedgerFactoryHolder == null) {
-            return CompletableFuture.completedFuture(null);
-        }
-        Map<String, String> configSnapshot = Map.copyOf(topicConfig);
-        String mlName = KafkaManagedLedgerNaming.managedLedgerName(topic, 0);
-        return managedLedgerFactoryHolder.asyncUpdateTopicConfig(mlName, configSnapshot)
-                .whenComplete((ignored, error) -> {
-                    if (error != null) {
-                        log.warn("Failed to update topic config for managed ledger {}", mlName, error);
-                    }
-                });
-    }
-
-    public void deleteTopicConfig(String topic) {
-        if (topic == null || managedLedgerFactoryHolder == null) {
+    public void applyTopicConfig(String topicName, Uuid topicId, Map<String, String> topicConfig) {
+        if (topicName == null || topicId == null || topicConfig == null) {
             return;
         }
-        String mlName = KafkaManagedLedgerNaming.managedLedgerName(topic, 0);
-        managedLedgerFactoryHolder.asyncDeleteTopicConfig(mlName).join();
+        // Kafka metadata is authoritative for broker-side retention. Catalog properties are
+        // reconciled by the active controller's DisklessTopicLifecycleReconciler.
+        Map<String, String> config = Map.copyOf(topicConfig);
+        TimestampType timestampType = timestampType(topicName, config);
+        forEachPartitionOf(topicName, topicId, partitionLog -> partitionLog.applyTimestampType(timestampType));
+        triggerRetentionForTopic(topicName, topicId, config);
     }
 
+    /**
+     * Publishes the local lifecycle fence for a topic this broker has seen deleted. Nothing else
+     * happens here: the partition logs are closed by the deletion reconciler, and a topic on its
+     * way out has no retention left to enforce.
+     */
+    public void fenceDeletedTopic(String topicName, Uuid topicId) {
+        if (topicName == null || topicId == null) {
+            return;
+        }
+        lakestreamStorageHolder.markTopicDeleted(topicId);
+    }
+
+    /**
+     * The partition log for {@code tp}, opening one if this broker does not hold it yet. The common
+     * case - a partition that is already open - answers from the map without taking the lifecycle
+     * lock, so a produce or fetch never queues behind an open or a close.
+     * <p>
+     * That lock-free fast path can hand back a retiring log in the window between {@link #close()}
+     * setting {@code closed} and clearing {@code partitionLogs}; its requests then fail with the
+     * retriable {@code NOT_LEADER_OR_FOLLOWER} that a closed partition log reports.
+     */
     UrsaPartitionLog getOrCreatePartitionLog(TopicIdPartition tp) {
-        return partitionLogs.computeIfAbsent(tp,
-                ignored -> new UrsaPartitionLog(
-                        tp,
-                        this,
-                        logMetrics,
-                        openManagedLedger(tp),
-                        oxiaClientSupplier,
-                        config.getProducerStateSnapshotIntervalMs(),
-                        config.getProducerStateSnapshotRecordThreshold(),
-                        producerStateScheduler));
+        UrsaPartitionLog existing = partitionLogs.get(tp);
+        if (existing != null && !existing.initializationFailed()) {
+            return existing;
+        }
+        synchronized (lifecycleLock) {
+            if (closed.get()) {
+                throw new IllegalStateException("Ursa storage state is closed");
+            }
+            if (lakestreamStorageHolder.isTopicDeleted(tp.topicId())) {
+                throw new NotLeaderOrFollowerException(
+                        "Topic " + tp.topic() + " (" + tp.topicId() + ") was deleted");
+            }
+            UrsaPartitionLog partitionLog = partitionLogs.compute(tp, (key, current) ->
+                    current != null && !current.initializationFailed() ? current : newPartitionLog(key));
+            // An already-failed open completes in the constructor, before compute publishes the
+            // value and before the init callback can evict it. Remove it after publication so a
+            // subsequent request can retry.
+            if (partitionLog.initializationFailed()) {
+                partitionLogs.remove(tp, partitionLog);
+            } else {
+                try {
+                    RetentionConfig retentionConfig = buildRetentionConfig(tp);
+                    partitionLog.retention().request(
+                            retentionConfig.retentionMs(),
+                            retentionConfig.retentionBytes());
+                } catch (Throwable error) {
+                    log.warn("Failed to schedule initial retention for {}", tp, error);
+                }
+            }
+            return partitionLog;
+        }
+    }
+
+    private UrsaPartitionLog newPartitionLog(TopicIdPartition tp) {
+        return new UrsaPartitionLog(
+                tp,
+                this,
+                logMetrics,
+                openLog(tp),
+                oxiaClientSupplier,
+                config.getProducerStateSnapshotIntervalMs(),
+                config.getProducerStateSnapshotRecordThreshold(),
+                producerStateScheduler);
+    }
+
+    /** Test-only hook: runs {@code task} while holding the lock that guards partition lifecycle. */
+    void withLifecycleLock(Runnable task) {
+        synchronized (lifecycleLock) {
+            task.run();
+        }
     }
 
     UrsaPartitionLog partitionLog(TopicIdPartition tp) {
@@ -221,7 +382,7 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
     /**
      * Best-effort cleanup for a topic-partition that is no longer hosted by this broker.
      * <p>
-     * Removes in-memory state and closes any cached {@link ManagedLedger} instance.
+     * Removes in-memory state and closes any cached {@link Log} instance.
      *
      * @return true if any state was cleaned up; false if there was nothing to do.
      */
@@ -232,7 +393,7 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
     /**
      * Best-effort cleanup for a topic-partition that is no longer hosted by this broker.
      * <p>
-     * Removes in-memory state and closes any cached {@link ManagedLedger} instance. Optionally deletes any
+     * Removes in-memory state and closes any cached {@link Log} instance. Optionally deletes any
      * persisted producer-state snapshot when the partition is permanently deleted (for example, topic deletion).
      *
      * @param deletePartition whether to delete persisted producer-state data for this partition
@@ -242,12 +403,21 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
         if (tp == null) {
             return false;
         }
-        UrsaPartitionLog partitionLog = partitionLogs.remove(tp);
-        if (partitionLog != null) {
-            partitionLog.close(deletePartition);
-            return true;
+        synchronized (lifecycleLock) {
+            if (closed.get()) {
+                return false;
+            }
+            AtomicBoolean cleaned = new AtomicBoolean();
+            partitionLogs.computeIfPresent(tp, (ignored, partitionLog) -> {
+                // Publish the local closed state while this key is still locked in the map. A
+                // concurrent open can only install a new leased handle after the retired handle has
+                // stopped accepting broker requests.
+                partitionLog.close(deletePartition);
+                cleaned.set(true);
+                return null;
+            });
+            return cleaned.get();
         }
-        return false;
     }
 
     public boolean cleanupNonOwnedProducerStates(
@@ -265,73 +435,140 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
         return partitionLog.cleanupNonOwnedProducerStates(ownedZones, deletePartition);
     }
 
-    /**
-     * Permanently delete the managed ledger and underlying Ursa stream for a partition.
-     *
-     * <p>This path is idempotent: missing metadata is treated as success because the desired end state is already
-     * reached.
-     */
-    public void deletePartitionData(TopicIdPartition tp) {
-        if (tp == null) {
-            return;
-        }
-
-        String managedLedgerName = KafkaManagedLedgerNaming.managedLedgerName(tp);
-        try {
-            managedLedgerFactory.delete(managedLedgerName, CompletableFuture.completedFuture(null));
-        } catch (ManagedLedgerException.MetadataNotFoundException e) {
-            log.debug("ManagedLedger metadata already deleted for partition {}", tp, e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Interrupted deleting partition data for " + tp, e);
-        } catch (ManagedLedgerException e) {
-            throw new RuntimeException("Failed to delete partition data for " + tp, e);
-        }
-    }
-
     public Set<TopicIdPartition> snapshotTrackedPartitions() {
         return new LinkedHashSet<>(partitionLogs.keySet());
     }
 
-    ManagedLedger applyRetentionConfig(TopicIdPartition tp, ManagedLedger managedLedger) {
-        try {
-            RetentionConfig retentionConfig = buildRetentionConfig(tp);
-            maybeUpdateRetentionConfig(managedLedger, retentionConfig.retentionMs, retentionConfig.retentionBytes);
-        } catch (Exception e) {
-            log.warn("Failed to apply retention config for {}", tp, e);
+    Optional<CompletableFuture<Void>> startProducerStateCleanup(
+            Supplier<CompletableFuture<Void>> cleanupStarter
+    ) {
+        synchronized (producerStateCleanupLock) {
+            if (producerStateCleanupRegistrationSealed) {
+                return Optional.empty();
+            }
+            pendingProducerStateCleanups++;
         }
-        return managedLedger;
+
+        CompletableFuture<Void> cleanupFuture;
+        try {
+            cleanupFuture = cleanupStarter.get();
+            if (cleanupFuture == null) {
+                cleanupFuture = CompletableFuture.failedFuture(
+                        new IllegalStateException("Producer state cleanup returned a null future"));
+            }
+        } catch (Throwable error) {
+            cleanupFuture = CompletableFuture.failedFuture(error);
+        }
+        cleanupFuture.whenComplete((ignored, error) -> completeProducerStateCleanup());
+        return Optional.of(cleanupFuture);
     }
 
-    static void maybeUpdateRetentionConfig(ManagedLedger managedLedger, long retentionMs, long retentionBytes) {
-        ManagedLedgerConfig currentConfig = managedLedger.getConfig();
-        long targetRetentionMs = normalizeRetentionMs(retentionMs);
-        long targetRetentionSizeMb = toRetentionSizeMb(retentionBytes);
-
-        if (currentConfig.getRetentionTimeMillis() == targetRetentionMs
-                && currentConfig.getRetentionSizeInMB() == targetRetentionSizeMb) {
-            return;
+    private void completeProducerStateCleanup() {
+        boolean completeDrain;
+        synchronized (producerStateCleanupLock) {
+            pendingProducerStateCleanups--;
+            completeDrain = producerStateCleanupRegistrationSealed && pendingProducerStateCleanups == 0;
         }
+        if (completeDrain) {
+            producerStateCleanupDrain.complete(null);
+        }
+    }
 
-        ManagedLedgerConfig updatedConfig = copyConfig(currentConfig);
-        setRetentionTime(updatedConfig, targetRetentionMs);
-        updatedConfig.setRetentionSizeInMB(targetRetentionSizeMb);
-        managedLedger.setConfig(updatedConfig);
+    private CompletableFuture<Void> sealProducerStateCleanups() {
+        boolean completeDrain;
+        synchronized (producerStateCleanupLock) {
+            producerStateCleanupRegistrationSealed = true;
+            completeDrain = pendingProducerStateCleanups == 0;
+        }
+        if (completeDrain) {
+            producerStateCleanupDrain.complete(null);
+        }
+        return producerStateCleanupDrain;
     }
 
     private RetentionConfig buildRetentionConfig(TopicIdPartition tp) {
-        Properties overrides = new Properties();
+        Map<String, String> topicConfigs = null;
         if (topicConfigSupplier != null) {
-            Map<String, String> topicConfigs = topicConfigSupplier.apply(tp.topic());
-            if (topicConfigs != null) {
-                topicConfigs.forEach(overrides::setProperty);
-            }
+            topicConfigs = topicConfigSupplier.apply(tp.topic());
+        }
+        return buildRetentionConfig(topicConfigs);
+    }
+
+    private RetentionConfig buildRetentionConfig(Map<String, String> topicConfigs) {
+        Properties overrides = new Properties();
+        if (topicConfigs != null) {
+            topicConfigs.forEach(overrides::setProperty);
         }
         long retentionMs = getLongConfig(overrides, TopicConfig.RETENTION_MS_CONFIG,
                 getDefaultLongConfig(TopicConfig.RETENTION_MS_CONFIG, -1L));
         long retentionBytes = getLongConfig(overrides, TopicConfig.RETENTION_BYTES_CONFIG,
                 getDefaultLongConfig(TopicConfig.RETENTION_BYTES_CONFIG, -1L));
         return new RetentionConfig(retentionMs, retentionBytes);
+    }
+
+    private ScheduledFuture<?> startRetentionChecks() {
+        long retentionCheckMs = getDefaultLongConfig(
+                ServerLogConfigs.LOG_CLEANUP_INTERVAL_MS_CONFIG,
+                ServerLogConfigs.LOG_CLEANUP_INTERVAL_MS_DEFAULT);
+        if (retentionCheckMs <= 0) {
+            throw new IllegalArgumentException(
+                    ServerLogConfigs.LOG_CLEANUP_INTERVAL_MS_CONFIG + " must be greater than zero");
+        }
+        return disklessTimer.scheduleWithFixedDelay(
+                this::triggerPeriodicRetention,
+                retentionCheckMs,
+                retentionCheckMs,
+                TimeUnit.MILLISECONDS);
+    }
+
+    void triggerPeriodicRetention() {
+        if (closed.get()) {
+            return;
+        }
+        partitionLogs.forEach((tp, partitionLog) -> {
+            try {
+                RetentionConfig retentionConfig = buildRetentionConfig(tp);
+                partitionLog.retention().request(
+                        retentionConfig.retentionMs(), retentionConfig.retentionBytes());
+            } catch (Throwable error) {
+                log.warn("Failed to schedule retention for {}", tp, error);
+            }
+        });
+    }
+
+    private void triggerRetentionForTopic(
+            String topicName,
+            Uuid topicId,
+            Map<String, String> topicConfig
+    ) {
+        try {
+            RetentionConfig retentionConfig = buildRetentionConfig(topicConfig);
+            forEachPartitionOf(topicName, topicId, partitionLog -> partitionLog.retention().request(
+                    retentionConfig.retentionMs(), retentionConfig.retentionBytes()));
+        } catch (Throwable error) {
+            log.warn("Failed to schedule updated retention for topic {} ({})", topicName, topicId, error);
+        }
+    }
+
+    /** Applies {@code action} to every open partition log of one exact topic incarnation. */
+    private void forEachPartitionOf(String topicName, Uuid topicId, Consumer<UrsaPartitionLog> action) {
+        partitionLogs.forEach((tp, partitionLog) -> {
+            if (tp.topic().equals(topicName) && tp.topicId().equals(topicId)) {
+                action.accept(partitionLog);
+            }
+        });
+    }
+
+    private static ScheduledExecutorService newDaemonScheduler(String threadName) {
+        ScheduledThreadPoolExecutor scheduler = new ScheduledThreadPoolExecutor(1, runnable -> {
+            Thread thread = new Thread(runnable, threadName);
+            thread.setDaemon(true);
+            return thread;
+        });
+        // Long-poll timeouts are cancelled as soon as their fetch is answered; drop them from the
+        // delay queue instead of letting them linger until they would have fired.
+        scheduler.setRemoveOnCancelPolicy(true);
+        return scheduler;
     }
 
     private long getDefaultLongConfig(String key, long fallback) {
@@ -350,175 +587,73 @@ public class UrsaStorageState implements DisklessStorageStateOperations {
         return Long.parseLong(value);
     }
 
-    private static long toRetentionSizeMb(long retentionBytes) {
-        if (retentionBytes <= 0) {
-            return retentionBytes;
-        }
-        long mb = retentionBytes / (1024 * 1024);
-        return retentionBytes % (1024 * 1024) == 0 ? mb : mb + 1;
-    }
-
-    private static long normalizeRetentionMs(long retentionMs) {
-        if (retentionMs <= 0) {
-            return retentionMs;
-        }
-        return normalizeDurationMillis(retentionMs, true);
-    }
-
-    private static void setRetentionTime(ManagedLedgerConfig config, long retentionMs) {
-        if (retentionMs < 0) {
-            config.setRetentionTime(-1, TimeUnit.MILLISECONDS);
-            return;
-        }
-        if (retentionMs == 0) {
-            config.setRetentionTime(0, TimeUnit.MILLISECONDS);
-            return;
-        }
-        setDurationMillis(config::setRetentionTime, retentionMs);
-    }
-
-    private static void setDurationMillis(BiConsumer<Integer, TimeUnit> setter, long millis) {
-        setDurationMillisInternal(millis, true, (value, unit) -> setter.accept(value.intValue(), unit));
-    }
-
-    private static void setDurationMillisLong(BiConsumer<Long, TimeUnit> setter, long millis) {
-        setDurationMillisInternal(millis, false, setter);
-    }
-
-    private static long normalizeDurationMillis(long millis, boolean intBased) {
-        return setDurationMillisInternal(millis, intBased, null);
-    }
-
-    private static long setDurationMillisInternal(long millis,
-                                                  boolean intBased,
-                                                  BiConsumer<Long, TimeUnit> setter) {
-        TimeUnit[] units = new TimeUnit[]{
-            TimeUnit.MILLISECONDS,
-            TimeUnit.SECONDS,
-            TimeUnit.MINUTES,
-            TimeUnit.HOURS,
-            TimeUnit.DAYS
-        };
-        for (TimeUnit unit : units) {
-            long unitMillis = unit.toMillis(1);
-            long value = (millis + unitMillis - 1) / unitMillis;
-            long maxValue = intBased ? Integer.MAX_VALUE : Long.MAX_VALUE;
-            if (value <= maxValue) {
-                if (setter != null) {
-                    setter.accept(value, unit);
-                }
-                return unit.toMillis(value);
-            }
-        }
-        if (setter != null) {
-            setter.accept(intBased ? (long) Integer.MAX_VALUE : Long.MAX_VALUE, TimeUnit.DAYS);
-        }
-        long clampedValue = intBased ? Integer.MAX_VALUE : Long.MAX_VALUE;
-        return TimeUnit.DAYS.toMillis(clampedValue);
-    }
-
-    private static ManagedLedgerConfig copyConfig(ManagedLedgerConfig source) {
-        ManagedLedgerConfig target = new ManagedLedgerConfig();
-        target.setCreateIfMissing(source.isCreateIfMissing());
-        target.setLazyCursorRecovery(source.isLazyCursorRecovery());
-        target.setMaxEntriesPerLedger(source.getMaxEntriesPerLedger());
-        target.setMaxSizePerLedgerMb(source.getMaxSizePerLedgerMb());
-        setDurationMillis(target::setMinimumRolloverTime, source.getMinimumRolloverTimeMs());
-        setDurationMillis(target::setMaximumRolloverTime, source.getMaximumRolloverTimeMs());
-        target.setEnsembleSize(source.getEnsembleSize());
-        target.setWriteQuorumSize(source.getWriteQuorumSize());
-        target.setAckQuorumSize(source.getAckQuorumSize());
-        target.setDigestType(source.getDigestType());
-        target.setPassword(new String(source.getPassword(), StandardCharsets.UTF_8));
-        target.setUnackedRangesOpenCacheSetEnabled(source.isUnackedRangesOpenCacheSetEnabled());
-        target.setMetadataEnsembleSize(source.getMetadataEnsemblesize());
-        target.setMetadataWriteQuorumSize(source.getMetadataWriteQuorumSize());
-        target.setMetadataAckQuorumSize(source.getMetadataAckQuorumSize());
-        target.setMetadataMaxEntriesPerLedger(source.getMetadataMaxEntriesPerLedger());
-        target.setLedgerRolloverTimeout(source.getLedgerRolloverTimeout());
-        target.setThrottleMarkDelete(source.getThrottleMarkDelete());
-        target.setAutoSkipNonRecoverableData(source.isAutoSkipNonRecoverableData());
-        target.setLedgerForceRecovery(source.isLedgerForceRecovery());
-        target.setPersistIndividualAckAsLongArray(source.isPersistIndividualAckAsLongArray());
-        target.setMaxBatchDeletedIndexToPersist(source.getMaxBatchDeletedIndexToPersist());
-        target.setPersistentUnackedRangesWithMultipleEntriesEnabled(
-                source.isPersistentUnackedRangesWithMultipleEntriesEnabled());
-        target.setMaxUnackedRangesToPersist(source.getMaxUnackedRangesToPersist());
-        target.setMaxUnackedRangesToPersistInMetadataStore(source.getMaxUnackedRangesToPersistInMetadataStore());
-        target.setLedgerOffloader(source.getLedgerOffloader());
-        target.setClock(source.getClock());
-        target.setMetadataOperationsTimeoutSeconds(source.getMetadataOperationsTimeoutSeconds());
-        target.setReadEntryTimeoutSeconds(source.getReadEntryTimeoutSeconds());
-        target.setAddEntryTimeoutSeconds(source.getAddEntryTimeoutSeconds());
-        target.setBookKeeperEnsemblePlacementPolicyClassName(source.getBookKeeperEnsemblePlacementPolicyClassName());
-        target.setBookKeeperEnsemblePlacementPolicyProperties(source.getBookKeeperEnsemblePlacementPolicyProperties());
-        if (source.getProperties() != null) {
-            target.setProperties(new HashMap<>(source.getProperties()));
-        }
-        target.setDeletionAtBatchIndexLevelEnabled(source.isDeletionAtBatchIndexLevelEnabled());
-        target.setNewEntriesCheckDelayInMillis(source.getNewEntriesCheckDelayInMillis());
-        target.setManagedLedgerInterceptor(source.getManagedLedgerInterceptor());
-        setDurationMillis(target::setInactiveLedgerRollOverTime, source.getInactiveLedgerRollOverTimeMs());
-        setDurationMillisLong(target::setInactiveOffloadedLedgerEvictionTime,
-                source.getInactiveOffloadedLedgerEvictionTimeMs());
-        target.setMinimumBacklogCursorsForCaching(source.getMinimumBacklogCursorsForCaching());
-        target.setMinimumBacklogEntriesForCaching(source.getMinimumBacklogEntriesForCaching());
-        target.setMaxBacklogBetweenCursorsForCaching(source.getMaxBacklogBetweenCursorsForCaching());
-        target.setTriggerOffloadOnTopicLoad(source.isTriggerOffloadOnTopicLoad());
-        target.setStorageClassName(source.getStorageClassName());
-        target.setShadowSourceName(source.getShadowSourceName());
-        target.setCacheEvictionByMarkDeletedPosition(source.isCacheEvictionByMarkDeletedPosition());
-        target.setCacheEvictionByExpectedReadCount(source.isCacheEvictionByExpectedReadCount());
-        return target;
-    }
-
     private record RetentionConfig(long retentionMs, long retentionBytes) {
     }
 
     @Override
     public void close() throws IOException {
-        partitionLogs.values().forEach(UrsaPartitionLog::close);
-        partitionLogs.clear();
-        producerStateScheduler.shutdown();
-        try {
-            if (!producerStateScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                producerStateScheduler.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            producerStateScheduler.shutdownNow();
-            Thread.currentThread().interrupt();
+        close(SHUTDOWN_TIMEOUT_MS);
+    }
+
+    /**
+     * Retires every partition log and then releases the shared resources. The wait is bounded: a
+     * partition log that does not settle within {@code timeoutMs} is logged and left behind rather
+     * than allowed to hold the catalog, the Oxia client and the schedulers open.
+     */
+    void close(long timeoutMs) {
+        if (timeoutMs <= 0) {
+            throw new IllegalArgumentException("timeoutMs must be greater than zero");
         }
-        if (managedLedgerFactoryHolder != null) {
-            managedLedgerFactoryHolder.close();
+        synchronized (shutdownLock) {
+            if (resourcesClosed) {
+                return;
+            }
+            List<CompletableFuture<Void>> drains = new ArrayList<>();
+            synchronized (lifecycleLock) {
+                if (closed.compareAndSet(false, true)) {
+                    retentionTask.cancel(false);
+                }
+                partitionLogs.values().forEach(partitionLog -> drains.add(partitionLog.close(false)));
+            }
+            // Cleanups started by an earlier cleanupPartition are no longer reachable through a
+            // partition log, so they are drained separately.
+            drains.add(sealProducerStateCleanups());
+            try {
+                CompletableFuture.allOf(drains.toArray(new CompletableFuture<?>[0]))
+                        .get(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException | ExecutionException error) {
+                log.warn("Diskless partition logs did not close within {} ms", timeoutMs, error);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            } finally {
+                partitionLogs.clear();
+                Utils.closeQuietly(lakestreamStorageHolder, "Ursa storage resources");
+                shutdownScheduler(disklessTimer);
+                shutdownScheduler(producerStateScheduler);
+                resourcesClosed = true;
+            }
         }
     }
 
-    CompletableFuture<ManagedLedger> openManagedLedger(TopicIdPartition tp) {
-        String name = KafkaManagedLedgerNaming.managedLedgerName(tp);
-        ManagedLedgerConfig mlConfig = new ManagedLedgerConfig().setCreateIfMissing(true);
+    private static void shutdownScheduler(ScheduledExecutorService scheduler) {
+        scheduler.shutdownNow();
+    }
 
-        Map<String, String> topicConfig = topicConfigSupplier != null
-                ? topicConfigSupplier.apply(tp.topic())
-                : null;
-        CompletableFuture<Void> updateConfigFuture = topicConfig != null
-                ? updateTopicConfigAsync(tp.topic(), topicConfig)
-                : CompletableFuture.completedFuture(null);
-
-        return updateConfigFuture.thenCompose(ignored -> {
-            CompletableFuture<ManagedLedger> openFuture = new CompletableFuture<>();
-            managedLedgerFactory.asyncOpen(name, mlConfig, new AsyncCallbacks.OpenLedgerCallback() {
-                @Override
-                public void openLedgerComplete(ManagedLedger ledger, Object ctx) {
-                    openFuture.complete(ledger);
-                }
-
-                @Override
-                public void openLedgerFailed(ManagedLedgerException exception, Object ctx) {
-                    openFuture.completeExceptionally(exception);
-                }
-            }, null, null);
-            return openFuture;
-        }).thenApply(managedLedger -> applyRetentionConfig(tp, managedLedger));
+    /**
+     * Opens the partition with create-if-absent: the stream is created, or grown to the partition
+     * count the broker metadata reports, when the catalog does not have this partition yet.
+     */
+    CompletableFuture<Log> openLog(TopicIdPartition tp) {
+        Map<String, String> topicConfig =
+                topicConfigSupplier == null ? null : topicConfigSupplier.apply(tp.topic());
+        return lakestreamStorageHolder.openPartition(
+                tp,
+                partitionCountSupplier.apply(tp.topic()).orElse(tp.partition() + 1),
+                topicConfig == null ? Map.of() : topicConfig,
+                // An empty metadata image reports -1, which is not a usable source revision. A
+                // broker that has applied no metadata cannot know a diskless topic, so this clamp
+                // is defence in depth rather than a reachable case.
+                Math.max(imageOffsetSupplier.getAsLong(), 0L));
     }
 
 }

@@ -13,186 +13,619 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# The single Compose stack for Kafka with diskless Ursa storage.
+#
+#   docker compose up -d                      # oxia, minio, minio-init, kafka-1..3
+#   docker compose --profile demo up          # + producer/consumer perf workload
+#   docker compose --profile share-demo up    # + share-group workload
+#   docker compose --profile lakehouse up -d  # + polaris, polaris-setup, compactor
+#   docker compose --profile lakehouse --profile lakehouse-demo up
+#   docker compose --profile lakehouse --profile tools run --rm duckdb
+#
+# The default stack is the core cluster, which needs only the Kafka image. The
+# `lakehouse` profile adds the compaction/Iceberg services (and the locally
+# built compactor image); every other profile holds one-shot workloads.
+
 ---
+name: kafka-ursa
+
+x-kafka-environment: &kafka-environment
+  KAFKA_PROCESS_ROLES: "broker,controller"
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+  KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093"
+  KAFKA_LISTENERS: "PLAINTEXT://:19092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092"
+  KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+  KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+  CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+  # KRaft metadata lives on the data volume. A container recreate must not drop
+  # the metadata log, or the next producer re-creates its topics as classic ones.
+  KAFKA_LOG_DIRS: "/var/lib/kafka/data/kraft-combined-logs"
+  KAFKA_SOCKET_SERVER_ENABLE_REQUEST_PIPELINING: "true"
+
+  # Diskless storage and the two protocol-level Lakestream/Oxia endpoints.
+  KAFKA_URSA_STORAGE_ENABLE: "true"
+  KAFKA_URSA_CATALOG_OXIA_SERVICE_URL: "oxia://oxia:6648/default"
+  KAFKA_URSA_OXIA_SERVICE_URL: "oxia://oxia:6648/default"
+  KAFKA_URSA_STORAGE_BACKEND_TYPE: "S3"
+  # For remote backends `ursa.storage.path` is the object prefix, not a local path.
+  KAFKA_URSA_STORAGE_PATH: "ursa/wal"
+  KAFKA_URSA_STORAGE_S3_ENDPOINT: "http://minio:9000"
+  KAFKA_URSA_STORAGE_S3_ACCESS_KEY: "minioadmin"
+  KAFKA_URSA_STORAGE_S3_SECRET_KEY: "minioadmin"
+  KAFKA_URSA_STORAGE_S3_BUCKET: "kafka-ursa"
+  KAFKA_URSA_STORAGE_S3_REGION: "us-east-1"
+  KAFKA_URSA_STORAGE_S3_PATH_STYLE_ACCESS: "true"
+  KAFKA_URSA_STORAGE_COMPACTION_BUCKET: "kafka-ursa"
+  KAFKA_URSA_STORAGE_COMPACTION_PREFIX: "ursa/compacted"
+
+  # The WAL write buffer flushes on whichever comes first, the interval or the
+  # size. The interval is the produce-latency floor, so these are the general
+  # purpose values; `run-lakehouse-demo.sh` lowers both to shorten its loop.
+  KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: "${URSA_WRITE_BUFFER_FLUSH_INTERVAL_MS:-250}"
+  KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_SIZE: "${URSA_WRITE_BUFFER_FLUSH_SIZE:-268435456}"
+  KAFKA_URSA_STORAGE_WRITE_BUFFER_SIZE: "16777216" # 16 MiB (default is 4 MiB)
+
+x-kafka-service: &kafka-service
+  image: ${IMAGE:-lakestream/kafka:latest}
+  restart: unless-stopped
+  depends_on:
+    oxia:
+      condition: service_healthy
+    minio-init:
+      condition: service_completed_successfully
+  healthcheck:
+    test:
+      - CMD-SHELL
+      - /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1
+    interval: 5s
+    timeout: 30s
+    retries: 30
+    start_period: 60s
+
+# One-shot workload containers share the broker image for its CLI tools.
+x-kafka-cli: &kafka-cli
+  image: ${IMAGE:-lakestream/kafka:latest}
+  restart: "no"
+
 services:
   oxia:
-    image: oxia/oxia:main
+    image: ${OXIA_IMAGE:-oxia/oxia:0.16.7}
     hostname: oxia
-    container_name: oxia
-    ports:
-      - 6648:6648
-    entrypoint: ["/oxia/bin/oxia"]
-    # Use 8 shards to reduce concurrent write conflicts on single shard
-    # This mitigates the Oxia WAL offset gap bug (see https://github.com/streamnative/oxia/issues/796)
     command: ["standalone", "--data-dir=/data", "--shards=8"]
+    entrypoint: ["/oxia/bin/oxia"]
+    ports:
+      - "127.0.0.1:6648:6648"
     volumes:
       - oxia-data:/data
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://localhost:8080/metrics || exit 1"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
 
   minio:
-    image: minio/minio:latest
+    image: ${MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
     hostname: minio
-    container_name: minio
+    command: ["server", "/data", "--console-address", ":9001"]
     ports:
-      - 19000:9000
-      - 19001:9001
+      - "127.0.0.1:19000:9000"
+      - "127.0.0.1:19001:9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data --console-address ":9001"
     volumes:
       - minio-data:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
 
   minio-init:
-    image: minio/mc:latest
+    image: ${MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-04-16T18-13-26Z}
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 minioadmin minioadmin;
-      mc mb local/kafka-ursa --ignore-existing;
-      exit 0;
-      "
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        mc mb local/kafka-ursa --ignore-existing
+        mc mb local/lakehouse --ignore-existing
+
+  polaris:
+    image: ${POLARIS_IMAGE:-apache/polaris:1.7.0}
+    profiles: ["lakehouse"]
+    hostname: polaris
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:18181:8181"
+      - "127.0.0.1:18182:8182"
+    environment:
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      POLARIS_BOOTSTRAP_CREDENTIALS: "POLARIS,root,s3cr3t"
+      polaris.realm-context.realms: POLARIS
+      quarkus.otel.sdk.disabled: "true"
+      polaris.features."ALLOW_INSECURE_STORAGE_TYPES": "true"
+      polaris.features."ALLOW_SETTING_S3_ENDPOINTS": "true"
+      polaris.features."SUPPORTED_CATALOG_STORAGE_TYPES": '["S3"]'
+      # The stack intentionally uses Polaris' test-only in-memory metastore and
+      # an HTTP MinIO endpoint. Permit those dev-only readiness exceptions.
+      polaris.readiness.ignore-severe-issues: "true"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8182/q/health"]
+      interval: 3s
+      timeout: 10s
+      retries: 30
+      start_period: 15s
+
+  polaris-setup:
+    image: ${POLARIS_SETUP_IMAGE:-alpine/curl:8.21.0}
+    profiles: ["lakehouse"]
+    depends_on:
+      polaris:
+        condition: service_healthy
+    environment:
+      POLARIS_CLIENT_ID: root
+      POLARIS_CLIENT_SECRET: s3cr3t
+      POLARIS_REALM: POLARIS
+      POLARIS_CATALOG_NAME: ursa
+      POLARIS_OAUTH2_URI: http://polaris:8181/api/catalog/v1/oauth/tokens
+      POLARIS_MANAGEMENT_URI: http://polaris:8181/api/management
+      POLARIS_WAREHOUSE: s3://lakehouse/warehouse
+      POLARIS_S3_ENDPOINT: http://minio:9000
+      AWS_REGION: us-east-1
+    volumes:
+      - ./lakehouse/polaris-setup.sh:/opt/ursa-demo/polaris-setup.sh:ro
+    entrypoint: ["/bin/sh", "/opt/ursa-demo/polaris-setup.sh"]
+
+  compactor:
+    image: ${COMPACTOR_IMAGE:-lakestream/compactor:latest}
+    profiles: ["lakehouse"]
+    hostname: compactor
+    restart: unless-stopped
+    depends_on:
+      oxia:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      polaris-setup:
+        condition: service_completed_successfully
+    environment:
+      OTEL_SDK_DISABLED: "true"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
+      URSA_METADATA_STORE_URL: oxia://oxia:6648/default
+      URSA_OXIA_STORAGE_URL: oxia://oxia:6648/default
+      URSA_WAL_BUCKET: kafka-ursa
+      URSA_WAL_PREFIX: ursa/wal
+      URSA_COMPACTION_BUCKET: kafka-ursa
+      URSA_COMPACTION_PREFIX: ursa/compacted
+      URSA_S3_ENDPOINT: http://minio:9000
+      POLARIS_CATALOG_NAME: ursa
+      POLARIS_CATALOG_URI: http://polaris:8181/api/catalog
+      POLARIS_OAUTH2_URI: http://polaris:8181/api/catalog/v1/oauth/tokens
+      POLARIS_CLIENT_ID: root
+      POLARIS_CLIENT_SECRET: s3cr3t
+    volumes:
+      - ./lakehouse/compactor-entrypoint.sh:/opt/ursa-demo/compactor-entrypoint.sh:ro
+      - ./lakehouse/log4j2.properties:/opt/ursa-demo/log4j2.properties:ro
+    entrypoint: ["/bin/sh", "/opt/ursa-demo/compactor-entrypoint.sh"]
 
   kafka-1:
-    image: ${IMAGE:-kafka-diskless:latest}
+    <<: *kafka-service
     hostname: kafka-1
-    container_name: kafka-1
     ports:
-      - 29092:9092
-    depends_on:
-      oxia:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
+      - "127.0.0.1:29092:9092"
     environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093'
-      KAFKA_LISTENERS: 'PLAINTEXT://:19092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092'
-      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:19092,PLAINTEXT_HOST://localhost:29092
-      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      CLUSTER_ID: '4L6g3nShT-eMCtK--X86sw'
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
-      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
-      KAFKA_URSA_STORAGE_ENABLE: 'true'
-      KAFKA_URSA_STORAGE_OXIA_SERVICE_URL: 'oxia:6648'
-      KAFKA_URSA_STORAGE_BACKEND_TYPE: 'S3'
-      KAFKA_URSA_STORAGE_S3_ENDPOINT: 'http://minio:9000'
-      KAFKA_URSA_STORAGE_S3_ACCESS_KEY: 'minioadmin'
-      KAFKA_URSA_STORAGE_S3_SECRET_KEY: 'minioadmin'
-      KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: '250'
-      KAFKA_URSA_STORAGE_WRITE_BUFFER_SIZE: '16777216' # 16 MiB (default is 4 MiB)
-      KAFKA_SOCKET_SERVER_ENABLE_REQUEST_PIPELINING: 'true'
-      KAFKA_URSA_STORAGE_S3_BUCKET: 'kafka-ursa'
-      KAFKA_URSA_STORAGE_S3_REGION: 'us-east-1'
-      KAFKA_URSA_STORAGE_PATH: '/var/lib/kafka/ursa'
+      <<: *kafka-environment
+      KAFKA_NODE_ID: "1"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-1:19092,PLAINTEXT_HOST://localhost:29092"
     volumes:
       - kafka-1-data:/var/lib/kafka/data
-      - kafka-1-ursa:/var/lib/kafka/ursa
 
   kafka-2:
-    image: ${IMAGE:-kafka-diskless:latest}
+    <<: *kafka-service
     hostname: kafka-2
-    container_name: kafka-2
     ports:
-      - 39092:9092
-    depends_on:
-      oxia:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
+      - "127.0.0.1:39092:9092"
     environment:
-      KAFKA_NODE_ID: 2
-      KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093'
-      KAFKA_LISTENERS: 'PLAINTEXT://:19092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092'
-      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:19092,PLAINTEXT_HOST://localhost:39092
-      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      CLUSTER_ID: '4L6g3nShT-eMCtK--X86sw'
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
-      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
-      KAFKA_URSA_STORAGE_ENABLE: 'true'
-      KAFKA_URSA_STORAGE_OXIA_SERVICE_URL: 'oxia:6648'
-      KAFKA_URSA_STORAGE_BACKEND_TYPE: 'S3'
-      KAFKA_URSA_STORAGE_S3_ENDPOINT: 'http://minio:9000'
-      KAFKA_URSA_STORAGE_S3_ACCESS_KEY: 'minioadmin'
-      KAFKA_URSA_STORAGE_S3_SECRET_KEY: 'minioadmin'
-      KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: '250'
-      KAFKA_URSA_STORAGE_WRITE_BUFFER_SIZE: '16777216' # 16 MiB (default is 4 MiB)
-      KAFKA_SOCKET_SERVER_ENABLE_REQUEST_PIPELINING: 'true'
-      KAFKA_URSA_STORAGE_S3_BUCKET: 'kafka-ursa'
-      KAFKA_URSA_STORAGE_S3_REGION: 'us-east-1'
-      KAFKA_URSA_STORAGE_PATH: '/var/lib/kafka/ursa'
+      <<: *kafka-environment
+      KAFKA_NODE_ID: "2"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-2:19092,PLAINTEXT_HOST://localhost:39092"
     volumes:
       - kafka-2-data:/var/lib/kafka/data
-      - kafka-2-ursa:/var/lib/kafka/ursa
 
   kafka-3:
-    image: ${IMAGE:-kafka-diskless:latest}
+    <<: *kafka-service
     hostname: kafka-3
-    container_name: kafka-3
     ports:
-      - 49092:9092
-    depends_on:
-      oxia:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
+      - "127.0.0.1:49092:9092"
     environment:
-      KAFKA_NODE_ID: 3
-      KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093'
-      KAFKA_LISTENERS: 'PLAINTEXT://:19092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092'
-      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:19092,PLAINTEXT_HOST://localhost:49092
-      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      CLUSTER_ID: '4L6g3nShT-eMCtK--X86sw'
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
-      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
-      KAFKA_URSA_STORAGE_ENABLE: 'true'
-      KAFKA_URSA_STORAGE_OXIA_SERVICE_URL: 'oxia:6648'
-      KAFKA_URSA_STORAGE_BACKEND_TYPE: 'S3'
-      KAFKA_URSA_STORAGE_S3_ENDPOINT: 'http://minio:9000'
-      KAFKA_URSA_STORAGE_S3_ACCESS_KEY: 'minioadmin'
-      KAFKA_URSA_STORAGE_S3_SECRET_KEY: 'minioadmin'
-      KAFKA_URSA_STORAGE_WRITE_BUFFER_FLUSH_INTERVAL_MS: '250'
-      KAFKA_URSA_STORAGE_WRITE_BUFFER_SIZE: '16777216' # 16 MiB (default is 4 MiB)
-      KAFKA_SOCKET_SERVER_ENABLE_REQUEST_PIPELINING: 'true'
-      KAFKA_URSA_STORAGE_S3_BUCKET: 'kafka-ursa'
-      KAFKA_URSA_STORAGE_S3_REGION: 'us-east-1'
-      KAFKA_URSA_STORAGE_PATH: '/var/lib/kafka/ursa'
+      <<: *kafka-environment
+      KAFKA_NODE_ID: "3"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-3:19092,PLAINTEXT_HOST://localhost:49092"
     volumes:
       - kafka-3-data:/var/lib/kafka/data
-      - kafka-3-ursa:/var/lib/kafka/ursa
+
+  # ---------------------------------------------------------------------------
+  # Shared readiness gate for every demo profile.
+  # ---------------------------------------------------------------------------
+  # The gate polls the brokers itself instead of waiting on their health
+  # condition: a broker health probe starts a JVM, so on a loaded host it can
+  # time out for a while before the cluster is genuinely usable.
+  kafka-ready:
+    <<: *kafka-cli
+    profiles: ["demo", "share-demo", "lakehouse-demo"]
+    depends_on:
+      - kafka-1
+      - kafka-2
+      - kafka-3
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        echo "Waiting for the Kafka brokers..."
+        for attempt in $$(seq 1 60); do
+          if /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server kafka-1:19092 --list >/dev/null 2>&1; then
+            break
+          fi
+          echo "Brokers not ready yet, waiting... ($$attempt/60)"
+          sleep 5
+        done
+        echo "Waiting for the KRaft controller quorum..."
+        for attempt in $$(seq 1 60); do
+          if /opt/kafka/bin/kafka-metadata-quorum.sh \
+              --bootstrap-server kafka-1:19092 describe --status >/dev/null 2>&1; then
+            break
+          fi
+          echo "Controller quorum not ready yet, waiting... ($$attempt/60)"
+          sleep 5
+        done
+        /opt/kafka/bin/kafka-metadata-quorum.sh \
+          --bootstrap-server kafka-1:19092 describe --status
+        echo "Kafka cluster is ready."
+
+  # ---------------------------------------------------------------------------
+  # Profile: demo - topic creation plus producer/consumer perf tests.
+  # ---------------------------------------------------------------------------
+  create-topic:
+    <<: *kafka-cli
+    profiles: ["demo"]
+    depends_on:
+      kafka-ready:
+        condition: service_completed_successfully
+    environment:
+      DEMO_PARTITIONS: ${PARTITIONS:-12}
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        topic=test-diskless
+        bootstrap="kafka-1:19092,kafka-2:19092,kafka-3:19092"
+        # `--timeout-ms` only exists on some kafka-topics.sh builds.
+        extra_timeout=()
+        if /opt/kafka/bin/kafka-topics.sh --help 2>&1 | grep -q -- '--timeout-ms'; then
+          extra_timeout+=(--timeout-ms 120000)
+        fi
+        echo "Creating topic $$topic with $${DEMO_PARTITIONS} partitions..."
+        for attempt in $$(seq 1 60); do
+          if /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server "$$bootstrap" \
+              --create \
+              --if-not-exists \
+              --config ursa.storage.enable=true \
+              --topic "$$topic" \
+              --partitions "$${DEMO_PARTITIONS}" \
+              --replication-factor 1 \
+              "$${extra_timeout[@]}"; then
+            echo "Created topic: $$topic"
+            exit 0
+          fi
+          echo "Topic creation not ready yet, retrying... ($$attempt/60)"
+          sleep 5
+        done
+        echo "Failed to create topic after retries: $$topic" >&2
+        exit 1
+
+  producer-1: &producer-config
+    <<: *kafka-cli
+    profiles: ["demo"]
+    depends_on:
+      create-topic:
+        condition: service_completed_successfully
+    command: ["/opt/kafka/bin/kafka-producer-perf-test.sh",
+              "--producer-props", "bootstrap.servers=kafka-1:19092", "batch.size=1000000", "linger.ms=100", "max.request.size=64000000",
+              "--topic", "test-diskless",
+              "--record-size", "1000",
+              "--num-records", "5000000",
+              "--throughput", "10000"]
+
+  producer-2:
+    <<: *producer-config
+
+  consumer:
+    <<: *kafka-cli
+    profiles: ["demo"]
+    depends_on:
+      producer-1:
+        condition: service_started
+      producer-2:
+        condition: service_started
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx1G"
+    command: ["/opt/kafka/bin/kafka-consumer-perf-test.sh",
+              "--bootstrap-server", "kafka-1:19092",
+              "--topic", "test-diskless",
+              "--messages", "10000000",
+              "--reporting-interval", "5000",
+              "--show-detailed-stats",
+              "--timeout", "60000",
+              "--fetch-size", "512000"]
+
+  # ---------------------------------------------------------------------------
+  # Profile: share-demo - share-group consumption on a single-partition topic.
+  # ---------------------------------------------------------------------------
+  create-share-topic:
+    <<: *kafka-cli
+    profiles: ["share-demo"]
+    depends_on:
+      kafka-ready:
+        condition: service_completed_successfully
+    command: ["/opt/kafka/bin/kafka-topics.sh",
+              "--bootstrap-server", "kafka-1:19092",
+              "--create",
+              "--if-not-exists",
+              "--config", "ursa.storage.enable=true",
+              "--topic", "test-diskless-share-demo",
+              "--partitions", "1"]
+
+  # Set the share group reset behavior so the demo always starts from the beginning.
+  configure-share-group:
+    <<: *kafka-cli
+    profiles: ["share-demo"]
+    depends_on:
+      create-share-topic:
+        condition: service_completed_successfully
+    command: ["/opt/kafka/bin/kafka-configs.sh",
+              "--bootstrap-server", "kafka-1:19092",
+              "--entity-type", "groups",
+              "--entity-name", "test-diskless-share-demo-group",
+              "--alter",
+              "--add-config", "share.auto.offset.reset=earliest"]
+
+  share-producer:
+    <<: *kafka-cli
+    profiles: ["share-demo"]
+    depends_on:
+      configure-share-group:
+        condition: service_completed_successfully
+    command: ["/opt/kafka/bin/kafka-producer-perf-test.sh",
+              "--producer-props", "bootstrap.servers=kafka-1:19092", "acks=1", "linger.ms=25", "batch.size=65536",
+              "--topic", "test-diskless-share-demo",
+              "--record-size", "256",
+              "--num-records", "40000",
+              "--throughput", "2000"]
+
+  # Two share consumers in the same group.
+  share-consumer:
+    <<: *kafka-cli
+    profiles: ["share-demo"]
+    depends_on:
+      share-producer:
+        condition: service_started
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx1G"
+    command: ["/opt/kafka/bin/kafka-share-consumer-perf-test.sh",
+              "--bootstrap-server", "kafka-1:19092",
+              "--topic", "test-diskless-share-demo",
+              "--group", "test-diskless-share-demo-group",
+              "--num-records", "40000",
+              "--reporting-interval", "5000",
+              "--show-detailed-stats",
+              "--timeout", "30000",
+              "--fetch-size", "262144",
+              "--threads", "2",
+              "--show-consumer-stats"]
+
+  describe-share-group:
+    <<: *kafka-cli
+    profiles: ["share-demo"]
+    depends_on:
+      share-consumer:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "Waiting for share consumers to process records..."
+        sleep 5
+        for attempt in $$(seq 1 5); do
+          echo "Describe attempt $${attempt}..."
+          /opt/kafka/bin/kafka-share-groups.sh \
+            --bootstrap-server kafka-1:19092 \
+            --describe \
+            --group test-diskless-share-demo-group \
+            --offsets && break
+          sleep 3
+        done
+
+  # ---------------------------------------------------------------------------
+  # Profile: lakehouse-demo - Kafka -> Ursa WAL -> compaction -> Iceberg -> DuckDB.
+  # ---------------------------------------------------------------------------
+  lakehouse-create-topic:
+    <<: *kafka-cli
+    profiles: ["lakehouse-demo"]
+    depends_on:
+      kafka-ready:
+        condition: service_completed_successfully
+    environment:
+      DEMO_TOPIC: ${DEMO_TOPIC:-ursa-lakehouse-e2e}
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka-1:19092,kafka-2:19092,kafka-3:19092 \
+          --create \
+          --if-not-exists \
+          --config ursa.storage.enable=true \
+          --topic "$${DEMO_TOPIC}" \
+          --partitions 1 \
+          --replication-factor 1
+
+  raw-producer:
+    <<: *kafka-cli
+    profiles: ["lakehouse-demo"]
+    depends_on:
+      lakehouse-create-topic:
+        condition: service_completed_successfully
+    environment:
+      DEMO_TOPIC: ${DEMO_TOPIC:-ursa-lakehouse-e2e}
+      NUM_RECORDS: ${NUM_RECORDS:-100}
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        echo "Producing $${NUM_RECORDS} records to $${DEMO_TOPIC}..."
+        seq -f 'record-%06g' 1 "$${NUM_RECORDS}" \
+          | /opt/kafka/bin/kafka-console-producer.sh \
+              --bootstrap-server kafka-1:19092 \
+              --topic "$${DEMO_TOPIC}"
+
+  kafka-consumer-check:
+    <<: *kafka-cli
+    profiles: ["lakehouse-demo"]
+    depends_on:
+      raw-producer:
+        condition: service_completed_successfully
+    environment:
+      DEMO_TOPIC: ${DEMO_TOPIC:-ursa-lakehouse-e2e}
+      NUM_RECORDS: ${NUM_RECORDS:-100}
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        output=/tmp/kafka-consumed.txt
+        /opt/kafka/bin/kafka-console-consumer.sh \
+          --bootstrap-server kafka-2:19092 \
+          --topic "$${DEMO_TOPIC}" \
+          --from-beginning \
+          --max-messages "$${NUM_RECORDS}" \
+          --timeout-ms 120000 > "$$output"
+        count="$$(grep -c '^record-' "$$output" || true)"
+        test "$$count" = "$${NUM_RECORDS}"
+        echo "Kafka read back $$count records from Ursa storage."
+
+  # Wait until the compactor has written managed Parquet objects to MinIO.
+  wait-for-parquet:
+    image: ${MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-04-16T18-13-26Z}
+    profiles: ["lakehouse-demo"]
+    restart: "no"
+    depends_on:
+      raw-producer:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+    environment:
+      # Must cover the compactor's compaction bucket and prefix. The default
+      # prefix spans both `ursa/wal` and `ursa/compacted`; only compaction
+      # writes objects with a `.parquet` suffix.
+      COMPACTION_BUCKET: ${COMPACTION_BUCKET:-kafka-ursa}
+      COMPACTION_PREFIX: ${COMPACTION_PREFIX:-ursa}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null
+        echo "Waiting for Parquet objects under s3://$${COMPACTION_BUCKET}/$${COMPACTION_PREFIX}..."
+        for attempt in $$(seq 1 180); do
+          # The mc image ships no grep, so match with the shell itself. The
+          # pattern is anchored: a partial upload named `*.parquet.tmp` is not
+          # a compacted object.
+          listing="$$(mc ls --recursive "local/$${COMPACTION_BUCKET}/$${COMPACTION_PREFIX}" 2>/dev/null || true)"
+          for name in $$listing; do
+            case "$$name" in
+              *.parquet)
+                echo "Parquet found: $$name"
+                exit 0
+                ;;
+            esac
+          done
+          echo "No Parquet yet, waiting... ($$attempt/180)"
+          sleep 2
+        done
+        echo "Timed out waiting for Parquet under s3://$${COMPACTION_BUCKET}/$${COMPACTION_PREFIX}" >&2
+        exit 1
+
+  duckdb-query-check:
+    image: ${DUCKDB_IMAGE:-duckdb/duckdb:1.5.5}
+    profiles: ["lakehouse-demo"]
+    restart: "no"
+    depends_on:
+      wait-for-parquet:
+        condition: service_completed_successfully
+      # `required: false` keeps the ordering when the lakehouse profile is on
+      # without making this service undefined when it is not.
+      polaris-setup:
+        condition: service_completed_successfully
+        required: false
+    volumes:
+      - ./lakehouse/duckdb-init.sql:/opt/ursa-demo/duckdb-init.sql:ro
+      - duckdb-extensions:/root/.duckdb
+    entrypoint:
+      - /duckdb
+      - -init
+      - /opt/ursa-demo/duckdb-init.sql
+      - -noheader
+      - -list
+      - -c
+    command:
+      - |
+        SET VARIABLE target_table = (
+          SELECT format('lakehouse.default."{}"', table_name)
+          FROM duckdb_tables()
+          WHERE database_name = 'lakehouse'
+            AND schema_name = 'default'
+            AND table_name LIKE '${DEMO_TOPIC:-ursa-lakehouse-e2e}-topic-id-%'
+          ORDER BY table_name
+          LIMIT 1
+        );
+        SET VARIABLE actual_rows = (
+          SELECT count(*) FROM query_table(getvariable('target_table'))
+        );
+        SELECT CASE
+          WHEN getvariable('actual_rows') = ${NUM_RECORDS:-100}
+            THEN format('DuckDB read {} rows from {}.',
+                        getvariable('actual_rows'), getvariable('target_table'))
+          ELSE error('Iceberg table does not contain the expected row count yet')
+        END;
+
+  # ---------------------------------------------------------------------------
+  # Profile: tools - on-demand SQL shell against the local Polaris catalog.
+  # ---------------------------------------------------------------------------
+  duckdb:
+    image: ${DUCKDB_IMAGE:-duckdb/duckdb:1.5.5}
+    profiles: ["tools"]
+    depends_on:
+      polaris-setup:
+        condition: service_completed_successfully
+        required: false
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./lakehouse/duckdb-init.sql:/opt/ursa-demo/duckdb-init.sql:ro
+      - duckdb-extensions:/root/.duckdb
+    entrypoint: ["/duckdb", "-init", "/opt/ursa-demo/duckdb-init.sql"]
 
 volumes:
   oxia-data:
   minio-data:
   kafka-1-data:
-  kafka-1-ursa:
   kafka-2-data:
-  kafka-2-ursa:
   kafka-3-data:
-  kafka-3-ursa:
+  duckdb-extensions:

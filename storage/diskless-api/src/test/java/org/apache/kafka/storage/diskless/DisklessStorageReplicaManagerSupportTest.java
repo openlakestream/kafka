@@ -45,13 +45,16 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
@@ -69,15 +72,17 @@ class DisklessStorageReplicaManagerSupportTest {
         DisklessStorageEngine engine = mock(DisklessStorageEngine.class);
         DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
         DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
+        TopicIdPartition topicIdentity = topicIdPartition("diskless-topic", 0);
+        when(metadataView.getTopicId(topicIdentity.topic())).thenReturn(topicIdentity.topicId());
         Properties config = new Properties();
         config.setProperty("retention.ms", "1000");
         config.setProperty("retention.bytes", "2048");
 
         try (DisklessStorageReplicaManagerSupport support =
                      new DisklessStorageReplicaManagerSupport(metadataView, 1, selector, engine)) {
-            support.updateTopicConfig("diskless-topic", config);
+            support.applyTopicConfig(topicIdentity.topic(), config);
 
-            verify(engine).updateTopicConfig("diskless-topic", Map.of(
+            verify(engine).applyTopicConfig(topicIdentity.topic(), topicIdentity.topicId(), Map.of(
                     "retention.ms", "1000",
                     "retention.bytes", "2048"));
         }
@@ -88,12 +93,13 @@ class DisklessStorageReplicaManagerSupportTest {
         DisklessStorageEngine engine = mock(DisklessStorageEngine.class);
         DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
         DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
+        TopicIdPartition topicIdentity = topicIdPartition("diskless-topic", 0);
 
         try (DisklessStorageReplicaManagerSupport support =
                      new DisklessStorageReplicaManagerSupport(metadataView, 1, selector, engine)) {
-            support.deleteTopicConfig("diskless-topic");
+            support.fenceDeletedTopic(topicIdentity.topic(), topicIdentity.topicId());
 
-            verify(engine).deleteTopicConfig("diskless-topic");
+            verify(engine).fenceDeletedTopic(topicIdentity.topic(), topicIdentity.topicId());
         }
     }
 
@@ -181,6 +187,50 @@ class DisklessStorageReplicaManagerSupportTest {
     }
 
     @Test
+    void testStaleTopicIncarnationIsRejectedBeforeAllEngineRoutes() {
+        int localBrokerId = 1;
+        TopicIdPartition staleTp = topicIdPartition("recreated-diskless-topic", 0);
+        Uuid currentTopicId = Uuid.randomUuid();
+        Writer writer = mock(Writer.class);
+        Reader reader = mock(Reader.class);
+        DisklessStorageStateOperations ursaState = mock(DisklessStorageStateOperations.class);
+        DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
+        DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
+        when(metadataView.getTopicId(staleTp.topic())).thenReturn(currentTopicId);
+        when(metadataView.isDisklessStorageTopic(staleTp.topic())).thenReturn(true);
+        stubNoZoneSelection(selector, staleTp, localBrokerId);
+
+        FetchRequest.PartitionData fetchRequest = new FetchRequest.PartitionData(
+                staleTp.topicId(), 0L, 0L, 1024, Optional.empty());
+        ListOffsetsPartitionRequest offsetsRequest = new ListOffsetsPartitionRequest(
+                staleTp, ListOffsetsRequest.LATEST_TIMESTAMP, Optional.empty());
+
+        try (DisklessStorageReplicaManagerSupport support =
+                     new DisklessStorageReplicaManagerSupport(
+                             metadataView,
+                             localBrokerId,
+                             selector,
+                             new TestDisklessStorageEngine(writer, reader, ursaState))) {
+            Map<TopicIdPartition, ProduceResponse.PartitionResponse> appendResponses =
+                    support.handleAppend(Map.of(staleTp, MemoryRecords.EMPTY), null).join();
+            Map<TopicIdPartition, FetchPartitionData> fetchResponses = support.handleFetch(
+                    mock(FetchParams.class), Map.of(staleTp, fetchRequest), null).join();
+            Map<TopicIdPartition, ListOffsetsPartitionResponse> offsetsResponses =
+                    support.handleListOffsets(Map.of(staleTp, offsetsRequest), null).join();
+
+            assertEquals(Errors.NOT_LEADER_OR_FOLLOWER, appendResponses.get(staleTp).error);
+            assertEquals(Errors.NOT_LEADER_OR_FOLLOWER, fetchResponses.get(staleTp).error);
+            assertEquals(Errors.NOT_LEADER_OR_FOLLOWER, offsetsResponses.get(staleTp).error());
+            verify(selector, never()).selectBrokerForZone(any(), anyInt(), anyString());
+            verify(writer, never()).write(any(), anyString());
+            verify(reader, never()).fetch(any(), any());
+            verify(reader, never()).listOffsets(any());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test
     void testHandleAppendUsesClientZoneAwareOwnership() {
         int localBrokerId = 0;
         TopicIdPartition tp = topicIdPartition("diskless-zone-aware-append-topic", 0);
@@ -188,6 +238,8 @@ class DisklessStorageReplicaManagerSupportTest {
         Reader reader = mock(Reader.class);
         DisklessStorageStateOperations ursaState = mock(DisklessStorageStateOperations.class);
         DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
+        when(metadataView.getTopicId(tp.topic())).thenReturn(tp.topicId());
+        when(metadataView.isDisklessStorageTopic(tp.topic())).thenReturn(true);
         DisklessBrokerSelector selector = new DisklessBrokerSelector(
                 ignored -> List.of(
                         new Node(0, "host0", 9092, "zone-a"),
@@ -220,6 +272,8 @@ class DisklessStorageReplicaManagerSupportTest {
         Reader reader = mock(Reader.class);
         DisklessStorageStateOperations ursaState = mock(DisklessStorageStateOperations.class);
         DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
+        when(metadataView.getTopicId(tp.topic())).thenReturn(tp.topicId());
+        when(metadataView.isDisklessStorageTopic(tp.topic())).thenReturn(true);
         DisklessBrokerSelector selector = new DisklessBrokerSelector(
                 ignored -> List.of(
                         new Node(0, "host0", 9092, "zone-a"),
@@ -276,6 +330,109 @@ class DisklessStorageReplicaManagerSupportTest {
     }
 
     @Test
+    void testHandleLegacyZeroTopicIdFetchUsesCurrentIncarnationAndRemapsResponse() {
+        int localBrokerId = 1;
+        String topic = "legacy-fetch-topic";
+        TopicIdPartition canonicalTp = topicIdPartition(topic, 0);
+        TopicIdPartition requestTp = new TopicIdPartition(
+                Uuid.ZERO_UUID,
+                canonicalTp.topicPartition());
+        Writer writer = mock(Writer.class);
+        Reader reader = mock(Reader.class);
+        DisklessStorageStateOperations ursaState = mock(DisklessStorageStateOperations.class);
+        DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
+        DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
+        stubNoZoneSelection(selector, canonicalTp, localBrokerId);
+        when(metadataView.getTopicId(topic)).thenReturn(canonicalTp.topicId());
+        when(metadataView.isDisklessStorageTopic(topic)).thenReturn(true);
+
+        FetchRequest.PartitionData partitionData = new FetchRequest.PartitionData(
+                Uuid.ZERO_UUID,
+                0L,
+                0L,
+                1024,
+                Optional.empty());
+        FetchPartitionData fetchResponse = new FetchPartitionData(
+                Errors.NONE,
+                10L,
+                0L,
+                MemoryRecords.EMPTY,
+                Optional.empty(),
+                java.util.OptionalLong.empty(),
+                Optional.empty(),
+                java.util.OptionalInt.empty(),
+                false);
+        FetchParams params = mock(FetchParams.class);
+        when(reader.fetch(eq(params), any())).thenAnswer(invocation -> {
+            Map<TopicIdPartition, FetchRequest.PartitionData> engineFetches = invocation.getArgument(1);
+            assertEquals(Set.of(canonicalTp), engineFetches.keySet());
+            assertFalse(engineFetches.containsKey(requestTp));
+            return CompletableFuture.completedFuture(Map.of(canonicalTp, fetchResponse));
+        });
+
+        try (DisklessStorageReplicaManagerSupport support =
+                     new DisklessStorageReplicaManagerSupport(
+                             metadataView,
+                             localBrokerId,
+                             selector,
+                             new TestDisklessStorageEngine(writer, reader, ursaState))) {
+            Map<TopicIdPartition, FetchPartitionData> responses = support.handleFetch(
+                    params,
+                    Map.of(requestTp, partitionData),
+                    null).join();
+
+            assertEquals(Set.of(requestTp), responses.keySet());
+            assertEquals(Errors.NONE, responses.get(requestTp).error);
+            verify(selector).selectBrokerForZone(
+                    canonicalTp.topicId(),
+                    canonicalTp.partition(),
+                    DisklessClientZone.NO_ZONE);
+            verify(reader).fetch(eq(params), any());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test
+    void testHandleLegacyZeroTopicIdFetchDoesNotOpenUnknownIncarnation() {
+        int localBrokerId = 1;
+        TopicIdPartition requestTp = new TopicIdPartition(
+                Uuid.ZERO_UUID,
+                new TopicPartition("unknown-legacy-fetch-topic", 0));
+        Writer writer = mock(Writer.class);
+        Reader reader = mock(Reader.class);
+        DisklessStorageStateOperations ursaState = mock(DisklessStorageStateOperations.class);
+        DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
+        DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
+        when(selector.effectiveZone(any())).thenReturn(DisklessClientZone.NO_ZONE);
+        when(metadataView.getTopicId(requestTp.topic())).thenReturn(Uuid.ZERO_UUID);
+        FetchRequest.PartitionData partitionData = new FetchRequest.PartitionData(
+                Uuid.ZERO_UUID,
+                0L,
+                0L,
+                1024,
+                Optional.empty());
+
+        try (DisklessStorageReplicaManagerSupport support =
+                     new DisklessStorageReplicaManagerSupport(
+                             metadataView,
+                             localBrokerId,
+                             selector,
+                             new TestDisklessStorageEngine(writer, reader, ursaState))) {
+            Map<TopicIdPartition, FetchPartitionData> responses = support.handleFetch(
+                    mock(FetchParams.class),
+                    Map.of(requestTp, partitionData),
+                    null).join();
+
+            assertEquals(Errors.NOT_LEADER_OR_FOLLOWER, responses.get(requestTp).error);
+            verify(selector, never()).selectBrokerForZone(any(), anyInt(), anyString());
+            verify(reader, never()).fetch(any(), any());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test
     void testReconcileCleansTrackedPartitionWhenTopicDeleted() {
         int localBrokerId = 1;
         String topic = "diskless-topic";
@@ -286,6 +443,10 @@ class DisklessStorageReplicaManagerSupportTest {
         DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
         DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
         configureWriterState(writer, ursaState, true);
+        AtomicReference<Uuid> currentTopicId = new AtomicReference<>(tp.topicId());
+        AtomicBoolean diskless = new AtomicBoolean(true);
+        when(metadataView.getTopicId(topic)).thenAnswer(ignored -> currentTopicId.get());
+        when(metadataView.isDisklessStorageTopic(topic)).thenAnswer(ignored -> diskless.get());
         stubNoZoneSelection(selector, tp, localBrokerId);
 
         try (DisklessStorageReplicaManagerSupport support =
@@ -296,11 +457,12 @@ class DisklessStorageReplicaManagerSupportTest {
             assertTrue(support.hasTrackedPartitionsForTopic(topic));
             assertEquals(Set.of(topic), support.trackedTopicNames());
 
+            currentTopicId.set(Uuid.ZERO_UUID);
+            diskless.set(false);
             AtomicInteger callbackCount = new AtomicInteger(0);
             support.reconcileTrackedPartitions(Set.of(tp), ignored -> callbackCount.incrementAndGet());
 
             verify(ursaState).cleanupPartition(tp, true);
-            verify(ursaState).deletePartitionData(tp);
             assertEquals(1, callbackCount.get());
             assertTrue(support.snapshotTrackedPartitions().isEmpty());
             assertFalse(support.hasTrackedPartitionsForTopic(topic));
@@ -310,7 +472,7 @@ class DisklessStorageReplicaManagerSupportTest {
     }
 
     @Test
-    void testReconcileDeletesPartitionDataOnlyOnOwnerBroker() {
+    void testReconcileCleansDeletedTrackedPartitionWithoutPhysicalStorageDeletion() {
         int localBrokerId = 1;
         TopicIdPartition tp = topicIdPartition("diskless-delete-owned-by-other-topic", 0);
         Writer writer = mock(Writer.class);
@@ -319,6 +481,8 @@ class DisklessStorageReplicaManagerSupportTest {
         DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
         DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
         configureWriterState(writer, ursaState, true);
+        when(metadataView.getTopicId(tp.topic())).thenReturn(tp.topicId());
+        when(metadataView.isDisklessStorageTopic(tp.topic())).thenReturn(true);
         when(selector.effectiveZone(any())).thenReturn(DisklessClientZone.NO_ZONE);
         when(selector.selectBrokerForZone(tp.topicId(), tp.partition(), DisklessClientZone.NO_ZONE)).thenReturn(
                 java.util.OptionalInt.of(localBrokerId),
@@ -332,7 +496,6 @@ class DisklessStorageReplicaManagerSupportTest {
             support.reconcileTrackedPartitions(Set.of(tp), ignored -> { });
 
             verify(ursaState).cleanupPartition(tp, true);
-            verify(ursaState, never()).deletePartitionData(tp);
             assertTrue(support.snapshotTrackedPartitions().isEmpty());
         } catch (Exception e) {
             throw new RuntimeException(e);
@@ -364,7 +527,6 @@ class DisklessStorageReplicaManagerSupportTest {
             support.reconcileTrackedPartitions(Set.of(), ignored -> { });
 
             verify(ursaState).cleanupPartition(tp, false);
-            verify(ursaState, never()).deletePartitionData(tp);
             assertTrue(support.snapshotTrackedPartitions().isEmpty());
         } catch (Exception e) {
             throw new RuntimeException(e);
@@ -381,19 +543,20 @@ class DisklessStorageReplicaManagerSupportTest {
         DisklessStorageMetadataView metadataView = mock(DisklessStorageMetadataView.class);
         DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
         configureWriterState(writer, ursaState, true);
-        when(metadataView.getTopicId(tp.topic())).thenReturn(Uuid.randomUuid());
+        AtomicReference<Uuid> currentTopicId = new AtomicReference<>(tp.topicId());
+        when(metadataView.getTopicId(tp.topic())).thenAnswer(ignored -> currentTopicId.get());
         when(metadataView.isDisklessStorageTopic(tp.topic())).thenReturn(true);
         stubNoZoneSelection(selector, tp, localBrokerId);
 
         try (DisklessStorageReplicaManagerSupport support =
                      new DisklessStorageReplicaManagerSupport(metadataView, localBrokerId, selector, new TestDisklessStorageEngine(writer, reader, ursaState))) {
             support.handleAppend(Map.of(tp, MemoryRecords.EMPTY), null).join();
+            currentTopicId.set(Uuid.randomUuid());
             clearInvocations(selector);
 
             support.reconcileTrackedPartitions(Set.of(), ignored -> { });
 
             verify(ursaState).cleanupPartition(tp, false);
-            verify(ursaState, never()).deletePartitionData(tp);
             assertTrue(support.snapshotTrackedPartitions().isEmpty());
         } catch (Exception e) {
             throw new RuntimeException(e);
@@ -427,7 +590,6 @@ class DisklessStorageReplicaManagerSupportTest {
             support.reconcileTrackedPartitions(Set.of(), ignored -> { });
 
             verify(ursaState, never()).cleanupPartition(any(), eq(false));
-            verify(ursaState, never()).deletePartitionData(any());
             assertEquals(Set.of(tp), support.snapshotTrackedPartitions());
             assertTrue(support.hasTrackedPartitionsForTopic(tp.topic()));
         } catch (Exception e) {
@@ -513,19 +675,22 @@ class DisklessStorageReplicaManagerSupportTest {
         DisklessBrokerSelector selector = mock(DisklessBrokerSelector.class);
         configureWriterState(writer, ursaState, false);
         when(metadataView.getTopicId(tp.topic())).thenReturn(tp.topicId());
-        when(metadataView.isDisklessStorageTopic(tp.topic())).thenReturn(false);
+        AtomicBoolean diskless = new AtomicBoolean(true);
+        when(metadataView.isDisklessStorageTopic(tp.topic())).thenAnswer(ignored -> diskless.get());
         stubNoZoneSelection(selector, tp, localBrokerId);
         doThrow(new RuntimeException("boom")).when(ursaState).cleanupPartition(tp, false);
 
         try (DisklessStorageReplicaManagerSupport support =
                      new DisklessStorageReplicaManagerSupport(metadataView, localBrokerId, selector, new TestDisklessStorageEngine(writer, reader, ursaState))) {
             support.handleAppend(Map.of(tp, MemoryRecords.EMPTY), null).join();
+            diskless.set(false);
 
             AtomicInteger callbackCount = new AtomicInteger(0);
-            support.reconcileTrackedPartitions(Set.of(), ignored -> callbackCount.incrementAndGet());
+            support.reconcileTrackedPartitions(
+                    Set.of(),
+                    ignored -> callbackCount.incrementAndGet());
 
             verify(ursaState, times(1)).cleanupPartition(tp, false);
-            verify(ursaState, never()).deletePartitionData(tp);
             assertEquals(0, callbackCount.get());
             assertEquals(Set.of(tp), support.snapshotTrackedPartitions());
         } catch (Exception e) {
@@ -551,14 +716,13 @@ class DisklessStorageReplicaManagerSupportTest {
             support.reconcileTrackedPartitions(Set.of(), ignored -> { });
 
             verify(ursaState).cleanupPartition(tp, false);
-            verify(ursaState, never()).deletePartitionData(tp);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
     @Test
-    void testReconcileDeletesUntrackedDeletedPartitionDataWhenCurrentBrokerIsOwner() {
+    void testReconcileDoesNotPhysicallyDeleteUntrackedDeletedPartition() {
         int localBrokerId = 1;
         TopicIdPartition tp = topicIdPartition("diskless-deleted-untracked-topic", 0);
         Writer writer = mock(Writer.class);
@@ -572,8 +736,7 @@ class DisklessStorageReplicaManagerSupportTest {
                      new DisklessStorageReplicaManagerSupport(metadataView, localBrokerId, selector, new TestDisklessStorageEngine(writer, reader, ursaState))) {
             support.reconcileTrackedPartitions(Set.of(tp), ignored -> { });
 
-            verify(ursaState, never()).cleanupPartition(any(), eq(false));
-            verify(ursaState).deletePartitionData(tp);
+            verify(ursaState, never()).cleanupPartition(any(), anyBoolean());
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

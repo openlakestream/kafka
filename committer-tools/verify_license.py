@@ -44,6 +44,9 @@ SECTION_TITLES = {
     "./libs": "Additional bundled dependencies present in ./libs.",
     "./ursa-storage": "Additional bundled dependencies present in ./ursa-storage.",
 }
+FIRST_PARTY_JAR_PATTERN = re.compile(
+    r"^(?:kafka(?:_|-)|connect-|trogdor-)", re.IGNORECASE
+)
 
 def run_gradlew(project_dir):
     print("Running './gradlew clean releaseTarGz'")
@@ -78,7 +81,7 @@ def get_libs_set(libs_dir):
     return {
         fname[:-4]
         for fname in os.listdir(libs_dir)
-        if fname.endswith(".jar") and not re.search(r"(kafka|connect|trogdor)", fname, re.IGNORECASE)
+        if fname.endswith(".jar") and not FIRST_PARTY_JAR_PATTERN.search(fname)
     }
 
 def get_license_deps(license_text):

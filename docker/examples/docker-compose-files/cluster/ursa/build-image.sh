@@ -21,10 +21,13 @@
 #   ./build-image.sh [--platform <platform>] [IMAGE_NAME:TAG]
 #
 # Examples:
-#   ./build-image.sh                          # Builds kafka-diskless:latest
+#   ./build-image.sh                          # Builds lakestream/kafka:latest
 #   ./build-image.sh myrepo/kafka-ursa:v1     # Builds with custom name
 #   ./build-image.sh --amd64                  # Builds linux/amd64 image (x86_64)
 #   ./build-image.sh --platform linux/amd64   # Same as --amd64
+#
+# Environment:
+#   GRADLE_ARGS   Extra arguments for the release build, e.g. GRADLE_ARGS=--offline
 #
 
 set -euo pipefail
@@ -43,16 +46,20 @@ Options:
   --amd64                Alias for --platform linux/amd64 (x86_64)
   -h, --help              Show this help
 
+Environment:
+  GRADLE_ARGS             Extra arguments for the release build (default: empty),
+                          for example GRADLE_ARGS=--offline
+
 Examples:
   ./build-image.sh
-  ./build-image.sh myrepo/kafka-diskless:latest
+  ./build-image.sh myrepo/kafka:latest
   ./build-image.sh --amd64
-  ./build-image.sh --platform linux/amd64 myrepo/kafka-diskless:amd64
+  ./build-image.sh --platform linux/amd64 myrepo/kafka:amd64
 EOF
 }
 
 PLATFORM=""
-IMAGE_NAME="kafka-diskless:latest"
+IMAGE_NAME="${IMAGE:-lakestream/kafka:latest}"
 IMAGE_NAME_SET="false"
 
 while [[ $# -gt 0 ]]; do
@@ -105,7 +112,13 @@ echo ""
 cd "${PROJECT_ROOT}"
 
 echo "[1/3] Building Kafka release tarball..."
-./gradlew releaseTarGz --no-daemon -q
+GRADLE_BUILD_ARGS=(./gradlew releaseTarGz --no-daemon -q)
+if [[ -n "${GRADLE_ARGS:-}" ]]; then
+    # Word splitting is intended: GRADLE_ARGS may carry several flags.
+    # shellcheck disable=SC2206
+    GRADLE_BUILD_ARGS+=(${GRADLE_ARGS})
+fi
+"${GRADLE_BUILD_ARGS[@]}"
 
 TARBALL=$(find "${PROJECT_ROOT}/core/build/distributions" -name "kafka_2.13-*.tgz" | head -1)
 if [ -z "$TARBALL" ]; then

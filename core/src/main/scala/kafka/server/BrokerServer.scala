@@ -57,7 +57,7 @@ import org.apache.kafka.server.util.timer.{SystemTimer, SystemTimerReaper}
 import org.apache.kafka.server.util.{Deadline, FutureUtils, KafkaScheduler, NetworkPartitionMetadataClient, PartitionMetadataClient}
 import org.apache.kafka.server.{AssignmentsManager, BrokerFeatures, BrokerLifecycleManager, ClientMetricsManager, DefaultApiVersionManager, DelayedActionQueue, FetchManager, FetchSessionCacheShard, KRaftTopicCreator, NodeToControllerChannelManagerImpl, ProcessRole, RaftControllerNodeProvider}
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
-import org.apache.kafka.storage.diskless.DisklessStorageReplicaManagerSupport
+import org.apache.kafka.storage.diskless.{DisklessStorageReplicaManagerSupport, DisklessTopics}
 import org.apache.kafka.storage.internals.log.LogDirFailureChannel
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 import org.apache.kafka.storage.diskless.handlers.UrsaStorageConfig
@@ -346,13 +346,13 @@ class BrokerServer(
        */
       val defaultActionQueue = new DelayedActionQueue
 
-      val ursaStorageConfig = UrsaStorageConfig.fromConfigs(config.props.asInstanceOf[util.Map[String, _]])
+      val ursaStorageConfig = UrsaStorageConfig.fromConfigs(config.originals().asInstanceOf[util.Map[String, _]])
       val disklessStorageSupport = new DisklessStorageReplicaManagerSupport(
         time,
         config.brokerId,
         ursaStorageConfig,
         brokerTopicStats,
-        config.extractLogConfigMap,
+        config.extractDisklessLogConfigMap,
         (topic: String) => {
           val props = metadataCache.topicConfig(topic)
           val result = new util.HashMap[String, String]()
@@ -360,6 +360,10 @@ class BrokerServer(
           result
         },
         (topic: String) => metadataCache.getTopicId(topic),
+        (topic: String) => DisklessTopics.partitionCount(metadataCache.numPartitions(topic)),
+        // Streams this broker provisions are stamped with the metadata offset it has applied, so
+        // the controller's orphan sweep can tell them from state it may delete.
+        () => metadataCache.currentImage().offset(),
         (listenerName: ListenerName) => metadataCache.getAliveBrokerNodes(listenerName),
         config.interBrokerListenerName
       )
@@ -563,7 +567,7 @@ class BrokerServer(
         if (e != null) brokerMetadataPublisher.firstPublishFuture.completeExceptionally(e)
       })
       metadataPublishers.add(brokerMetadataPublisher)
-      metadataPublishers.add(new DisklessStateReconcilerPublisher(
+      metadataPublishers.add(new DisklessBrokerTopicDeletionReconciler(
         disklessStorageSupport,
         (topic: String) => replicaManager.maybeRemoveTopicMetrics(topic)
       ))

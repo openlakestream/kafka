@@ -73,11 +73,10 @@
   <allow pkg="org.apache.kafka.test" />
   <allow class="org.apache.kafka.controller.QuorumController" />
   <allow pkg="org.testcontainers" />
-  <allow pkg="io.streamnative.oxia.testcontainers" />
+  <allow pkg="io.oxia.testcontainers" />
   <allow pkg="io.oxia.client.api" />
   <allow pkg="org.awaitility" />
   <allow pkg="io.opentelemetry.api" />
-  <allow pkg="io.streamnative.ursa.storage" />
 
   <!-- persistent collection factories/non-library-specific wrappers -->
   <allow pkg="org.apache.kafka.server.immutable" exact-match="true" />
