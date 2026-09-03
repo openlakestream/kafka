@@ -1,362 +1,291 @@
-<p align="center">
-<picture>
-  <source media="(prefers-color-scheme: light)" srcset="docs/images/kafka-logo-readme-light.svg">
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/kafka-logo-readme-dark.svg">
-  <img src="docs/images/kafka-logo-readme-light.svg" alt="Kafka Logo" width="50%"> 
-</picture>
-</p>
+# Diskless Kafka with a Built-in Lakehouse
 
-[![CI](https://github.com/apache/kafka/actions/workflows/ci.yml/badge.svg?branch=trunk&event=push)](https://github.com/apache/kafka/actions/workflows/ci.yml?query=event%3Apush+branch%3Atrunk)
-[![Flaky Test Report](https://github.com/apache/kafka/actions/workflows/generate-reports.yml/badge.svg?branch=trunk&event=schedule)](https://github.com/apache/kafka/actions/workflows/generate-reports.yml?query=event%3Aschedule+branch%3Atrunk)
+[![CI](https://github.com/lakestream-io/kafka/actions/workflows/ci.yml/badge.svg?branch=4.3-ursa&event=push)](https://github.com/lakestream-io/kafka/actions/workflows/ci.yml?query=event%3Apush+branch%3A4.3-ursa)
 
-[**Apache Kafka**](https://kafka.apache.org) is an open-source distributed event streaming platform used by thousands of companies for high-performance data pipelines, streaming analytics, data integration, and mission-critical applications.
+A fork of [Apache Kafka](https://github.com/apache/kafka) with two additions:
 
-You need to have [Java](http://www.oracle.com/technetwork/java/javase/downloads/index.html) installed.
+- **Diskless Kafka.** Topics whose durability comes from object storage instead of broker disks. Brokers hold
+  no partition data, so failover moves no bytes, scaling is a CPU and network decision, and a zone-aware
+  client never pays for cross-AZ replication.
+- **Data in the lakehouse.** The records those topics write are compacted into Parquet and registered as an
+  Iceberg table, queryable from DuckDB, Trino or Spark. No copy job, no Connect sink, no second retention
+  policy — Kafka consumers and SQL engines read the same bytes out of your own bucket.
 
-We build and test Apache Kafka with Java versions 17 and 25. The `release` parameter in javac is set to `11` for the clients 
-and streams modules, and `17` for the rest, ensuring compatibility with their respective
-minimum Java versions. Similarly, the `release` parameter in scalac is set to `11` for the streams modules and `17`
-for the rest.
+Everything Apache Kafka does, this fork still does. Diskless storage is an additional, per-topic option, so a
+single cluster can serve latency-sensitive workloads on classic topics and cost-sensitive workloads on
+diskless topics at the same time.
 
-Scala 2.13 is the only supported version in Apache Kafka.
+## One cluster, two storage modes
 
-### Build a JAR and run it
-```bash
-./gradlew jar
+|                          | Classic topic (Apache Kafka)                     | Diskless topic (`ursa.storage.enable=true`)                            |
+| ------------------------ | ------------------------------------------------ | ---------------------------------------------------------------------- |
+| Optimized for            | Latency                                          | Cost                                                                   |
+| Durability               | Local log segments + ISR replication (RF ≥ 2)    | Object storage (S3 / GCS / Azure Blob) through Ursa, Kafka RF = 1      |
+| Cross-AZ traffic         | Producer → leader, plus leader → followers       | None in steady state with [zone-aware routing](#zone-aware-routing): clients reach an in-zone broker and that broker writes straight to object storage |
+| Broker state             | Stateful: partition data lives on the broker     | Stateless for record data                                              |
+| Failover                 | New leader must catch up on replicated data      | Any live broker can serve the partition immediately, no data movement  |
+| Elasticity               | Adding/removing brokers moves partition data     | Scale on CPU and network alone                                         |
+| Lakehouse                | –                                                | The same compacted Parquet can be registered as an Iceberg table       |
+
+Both modes share one controller quorum, one metadata log, one set of ACLs, one consumer-group coordinator,
+and the same client protocol. Consumer offsets stay in `__consumer_offsets`, which is always a classic topic.
+
+## Drop-in replacement
+
+- **Nothing changes until you turn it on.** `ursa.storage.enable` defaults to `false` on both the broker and
+  the topic, so a stock configuration behaves exactly like the Apache Kafka release it is built from
+  (currently 4.3).
+- **No protocol changes.** Existing producers, consumers, Kafka Streams, Kafka Connect, admin clients, and the
+  `bin/` tools work unmodified against diskless topics. Clients cannot tell the difference: the broker still
+  reports a leader, still serves `Fetch` and `ListOffsets`, still enforces offsets and idempotent producer
+  semantics.
+- **Per-topic, not per-cluster.** Diskless is a topic config. Migrating means creating new topics with
+  `ursa.storage.enable=true`; existing topics are untouched.
+- **Upstream-compatible codebase.** Diskless logic sits behind `isDisklessTopic()` checks; upstream code paths
+  are unchanged when diskless is disabled.
+
+## How it works
+
+Diskless storage is a bypass layer in `ReplicaManager` that routes storage operations for enabled topics to
+Ursa instead of local logs.
+
+```
+          Producers / Consumers
+                    │
+                    ▼
+            ┌───────────────┐
+            │   KafkaApis   │
+            └───────┬───────┘
+                    ▼
+          ┌───────────────────┐
+          │  ReplicaManager   │
+          └─────────┬─────────┘
+                    │  DisklessStorageReplicaManagerSupport
+          ┌─────────┴──────────┐
+      diskless              classic
+          │                    │
+          ▼                    ▼
+   ┌──────────────┐    ┌──────────────────┐
+   │ Ursa writer  │    │    Local log     │
+   │  and reader  │    │  (.log + ISR)    │
+   └──────┬───────┘    └──────────────────┘
+          │
+   ┌──────┴────────────┬──────────────────┐
+   ▼                   ▼                  ▼
+Object storage       Oxia            Compaction
+(WAL + Parquet)   (catalog +      (WAL → Parquet
+                 producer state)   → Iceberg)
 ```
 
-Follow instructions in https://kafka.apache.org/quickstart
+- **Writes** go into an Ursa write-ahead log in object storage. The write buffer flushes on an interval
+  (`ursa.storage.write.buffer.flush.interval.ms`, default 250 ms) or once
+  `ursa.storage.write.buffer.flush.size` bytes accumulate — the interval is the produce-latency floor for an
+  idle topic, throughput is the bound for a busy one.
+- **Reads** are served from the same storage, transparently spanning the WAL and the compacted objects that
+  compaction has already written.
+- **Compaction** consolidates the WAL into those compacted objects. It runs as a separate service, and it is
+  required: Kafka retention on a diskless topic issues a *soft* trim, and WAL objects are only physically
+  deleted up to the oldest un-compacted position across every stream. See
+  [Compaction is required](#compaction-is-required).
+- **Producer state** for idempotent producers is snapshotted into [Oxia](https://github.com/oxia-db/oxia)
+  instead of local `.snapshot` files, so a broker restart does not lose idempotence guarantees.
+- **Topic lifecycle** — creation, partition growth, deletion, and orphan cleanup — is reconciled by the active
+  controller against the stream catalog.
+- All storage calls are asynchronous; request-handler threads are never blocked on object storage.
 
-### Build source JAR
-```bash
-./gradlew srcJar
+## From topic to lakehouse
+
+Records written to a diskless topic are compacted out of the WAL into Parquet and registered in an Iceberg
+REST catalog, so the same data is queryable by engines like DuckDB, Trino, or Spark without a copy job, a
+Connect sink, or a second retention policy.
+
+```
+Kafka producer ──▶ broker ──▶ Ursa WAL (object storage)
+                                       │
+                                       ▼
+                              compaction (Parquet)
+                                  │          │
+                                  ▼          ▼
+                          compacted     Iceberg table
+                           objects      (REST catalog)
+                              │               │
+                              ▼               ▼
+                      Kafka consumers    SQL engines
 ```
 
-### Build aggregated javadoc
-```bash
-./gradlew aggregatedJavadoc --no-parallel
-```
+Compaction runs as a separate service (the Ursa compactor) rather than inside the broker, so it never
+competes with the request path. Kafka consumers and query engines read the same bytes: one copy of the data,
+one retention policy, in your own bucket.
 
-### Build javadoc and scaladoc
-```bash
-./gradlew javadoc
-./gradlew javadocJar # builds a javadoc jar for each module
-./gradlew scaladoc
-./gradlew scaladocJar # builds a scaladoc jar for each module
-./gradlew docsJar # builds both (if applicable) javadoc and scaladoc jars for each module
-```
+### Compaction is required
 
-### Run unit/integration tests
-```bash
-./gradlew test  # runs both unit and integration tests
-./gradlew unitTest
-./gradlew integrationTest
-./gradlew test -Pkafka.test.run.flaky=true  # runs tests that are marked as flaky
-```
+Compaction is not a lakehouse add-on — it is what makes diskless storage reclaimable:
 
-### Force re-running tests without code change
-```bash
-./gradlew test --rerun-tasks
-./gradlew unitTest --rerun-tasks
-./gradlew integrationTest --rerun-tasks
-```
+1. Kafka retention on a diskless topic issues a **soft trim**, which moves the log's first offset. Soft-trimmed
+   entries are logically gone but still occupy object storage.
+2. WAL objects are physically deleted by a cleaner that runs inside the broker's storage runtime.
+3. That cleaner's delete watermark is the **oldest un-compacted position across every stream**, and only
+   compaction advances it.
 
-### Running a particular unit/integration test
-```bash
-./gradlew clients:test --tests RequestResponseTest
-./gradlew streams:integration-tests:test --tests RestoreIntegrationTest
-```
+So a deployment with no compaction service has a WAL that only grows: `retention.ms` and `retention.bytes`
+hide records from consumers without freeing a byte. Because the watermark is a global minimum, one stream that
+never gets compacted also pins reclamation for every other stream.
 
-### Running a particular unit/integration test N times
-```bash
-N=500; I=0; while [ $I -lt $N ] && ./gradlew clients:test --tests RequestResponseTest --rerun --fail-fast; do (( I=$I+1 )); echo "Completed run: $I"; sleep 1; done
-```
+Registering an Iceberg table is a second, optional sink on the same compaction pass. You can run compaction
+without any catalog at all.
 
-### Running a particular test method within a unit/integration test
-```bash
-./gradlew core:test --tests kafka.api.ProducerFailureHandlingTest.testCannotSendToInternalTopic
-./gradlew clients:test --tests org.apache.kafka.clients.MetadataTest.testTimeToNextUpdate
-./gradlew streams:integration-tests:test --tests org.apache.kafka.streams.integration.RestoreIntegrationTest.shouldRestoreNullRecord
-```
+## Quick start
 
-### Running a particular unit/integration test with log4j output
-By default, there will be only a small number of logs output while testing. You can adjust it by changing the `log4j2.yaml` file in the module's `src/test/resources` directory.
-
-For example, if you want to see more logs for clients project tests, you can modify [the line](https://github.com/apache/kafka/blob/trunk/clients/src/test/resources/log4j2.yaml#L35) in `clients/src/test/resources/log4j2.yaml` 
-to `level: INFO` and then run:
+The fastest way to see it running is the Docker Compose stack — three brokers, Oxia, MinIO, and optionally the
+compactor plus an Iceberg catalog:
 
 ```bash
-./gradlew cleanTest clients:test --tests NetworkClientTest
+cd docker/examples/docker-compose-files/cluster/ursa
+
+# Both images: the broker, and the compactor built from a local ursa-storage checkout
+URSA_STORAGE_DIR=/path/to/ursa-storage ./build-images.sh
+
+make up                 # Oxia + MinIO + 3 brokers + compactor
+make create-topic       # create a diskless topic
+make demo               # producer/consumer perf demo
+make destroy            # tear everything down
 ```
 
-And you should see `INFO` level logs in the file under the `clients/build/test-results/test` directory.
-
-### Specifying test retries
-Retries are disabled by default, but you can set maxTestRetryFailures and maxTestRetries to enable retries.
-
-The following example declares -PmaxTestRetries=1 and -PmaxTestRetryFailures=3 to enable a failed test to be retried once, with a total retry limit of 3.
+Adding the Iceberg catalog is one more command — it starts Polaris and has the compactor write the external
+table alongside the compacted objects it already writes:
 
 ```bash
-./gradlew test -PmaxTestRetries=1 -PmaxTestRetryFailures=3
+make lakehouse-demo     # Kafka -> Parquet -> Iceberg -> DuckDB, asserted end to end
 ```
 
-See [Test Retry Gradle Plugin](https://github.com/gradle/test-retry-gradle-plugin) and [build.yml](.github/workflows/build.yml) for more details.
+See [the stack's README](docker/examples/docker-compose-files/cluster/ursa/README.md) for the full set of
+profiles, ports, and knobs.
 
-### Generating test coverage reports
-Generate coverage reports for the whole project:
+## Enabling diskless storage on your own cluster
+
+You need an object storage bucket, an [Oxia](https://github.com/oxia-db/oxia) service, the Ursa runtime jars
+in `$KAFKA_HOME/ursa-storage/` (the release tarball built by `./gradlew releaseTarGz` puts them there), and a
+running [compaction service](#compaction-is-required). An Iceberg catalog is optional on top of that.
+
+Broker/controller configuration:
+
+```properties
+# Turn the diskless storage system on for this cluster
+ursa.storage.enable=true
+
+# Metadata and producer state
+ursa.catalog.oxia.service.url=oxia://oxia:6648/default
+ursa.oxia.service.url=oxia://oxia:6648/default
+
+# Record storage
+ursa.storage.backend.type=S3
+ursa.storage.path=ursa/wal
+ursa.storage.s3.bucket=my-kafka-bucket
+ursa.storage.s3.region=us-east-1
+ursa.storage.s3.endpoint=https://s3.us-east-1.amazonaws.com
+ursa.storage.s3.access.key=...
+ursa.storage.s3.secret.key=...
+
+# Compacted objects
+ursa.storage.compaction.bucket=my-kafka-bucket
+ursa.storage.compaction.prefix=ursa/compacted
+```
+
+Then create a diskless topic:
 
 ```bash
-./gradlew reportCoverage -PenableTestCoverage=true -Dorg.gradle.parallel=false
+bin/kafka-topics.sh --create \
+  --topic events \
+  --partitions 12 \
+  --replication-factor 1 \
+  --config ursa.storage.enable=true \
+  --bootstrap-server localhost:9092
 ```
 
-Generate coverage for a single module, i.e.: 
+Every other topic in the cluster stays classic. To flip the default for new, non-internal topics, set
+`ursa.storage.topic.default.enable=true` on the brokers.
+
+`ursa.storage.enable` is immutable after topic creation — changing a topic between modes means deleting and
+recreating it.
+
+### Key configuration
+
+| Config | Default | Purpose |
+| ------ | ------- | ------- |
+| `ursa.storage.enable` | `false` | Broker: enable the diskless storage system. Topic: make this topic diskless. |
+| `ursa.storage.topic.default.enable` | `false` | Make new non-internal topics diskless unless overridden. |
+| `ursa.storage.backend.type` | `LOCAL` | `LOCAL`, `S3`, `GCS`, or `AZURE_BLOB`. |
+| `ursa.storage.path` | `/tmp/ursa-data` | Object prefix for the WAL (a local path for the `LOCAL` backend). |
+| `ursa.storage.s3.bucket` / `.region` / `.endpoint` / `.access.key` / `.secret.key` | – | Object storage connection. |
+| `ursa.storage.compaction.bucket` / `.prefix` | `kafka-ursa-storage` / `/tmp/compaction-data` | Where compacted objects live. |
+| `ursa.catalog.oxia.service.url` | `oxia://localhost:6648/default` | Oxia URL for the stream catalog. |
+| `ursa.oxia.service.url` | `oxia://localhost:6648/default` | Oxia URL for storage metadata and producer-state snapshots. |
+| `ursa.storage.write.buffer.flush.interval.ms` | `250` | Produce-latency floor; lower for latency, raise to batch more per PUT. |
+| `ursa.storage.write.buffer.flush.size` | `256 MiB` | Size that triggers an early flush. |
+| `ursa.storage.class.path` | `$KAFKA_HOME/ursa-storage/*` | Classpath for the isolated Ursa runtime. |
+| `ursa.storage.lifecycle.sweep.interval.ms` | `600000` | Controller sweep for storage left behind by deleted topics. |
+| `socket.server.enable.request.pipelining` | `false` | Process multiple produce requests per connection concurrently; reduces latency amplification against a flush-cycle storage backend. |
+
+Run `bin/kafka-configs.sh` or read
+[`ServerLogConfigs`](server-common/src/main/java/org/apache/kafka/server/config/ServerLogConfigs.java) for the
+complete list.
+
+### Zone-aware routing
+
+To keep diskless traffic inside an availability zone, set `broker.rack` on each broker and put a `zone_id`
+token in the client's `client.id`:
+
+```properties
+client.id=orders-service,zone_id=us-east-1a
+```
+
+The broker then picks an owner in the client's zone and reports it as the partition leader, falling back to
+the full set of live brokers when no in-zone broker is available. Clients need no code changes beyond the
+`client.id`. See [LIP-002](docs/LIP-ursa-zone-aware-owner-selection.md).
+
+## Limitations of diskless topics
+
+- **No transactional producers.** Transactional produce requests are rejected; idempotent producers are
+  supported.
+- **No key-based log compaction.** `cleanup.policy=compact` semantics are not implemented for diskless topics;
+  only WAL-to-Parquet compaction in the storage layer.
+- **Replication factor must be 1.** Durability comes from object storage, so Kafka-level ISR replication is
+  bypassed. `CreateTopics` rejects any other value.
+- **Internal topics are always classic.** `__consumer_offsets` and `__transaction_state` stay on local logs.
+- **Mode is fixed at creation.** `ursa.storage.enable` cannot be altered afterwards.
+- **Retention needs compaction to free storage.** Without a compaction service running, `retention.ms` and
+  `retention.bytes` remove records logically but reclaim nothing.
+
+## Building from source
+
+You need JDK 17 and the `io.lakestream:ursa-storage` artifacts in your local Maven repository (build them from
+[lakestream-io/ursa-storage](https://github.com/lakestream-io/ursa-storage) with `mvn -DskipTests install`).
 
 ```bash
-./gradlew clients:reportCoverage -PenableTestCoverage=true -Dorg.gradle.parallel=false
+./gradlew jar                                  # build
+./gradlew releaseTarGz                         # binary tarball, including ./ursa-storage/ runtime jars
+./gradlew test -Pkafka.ci.isolated.tests=exclude   # main test suite
+./gradlew test -Pkafka.ci.isolated.tests=only      # diskless integration tests
 ```
 
-Coverage reports are located within the module's build directory, categorized by module type:
+The standard Apache Kafka build, test, IDE, and code-quality instructions all still apply — see the
+[upstream README](https://github.com/apache/kafka/blob/trunk/README.md). Fork-specific conventions live in
+[AGENTS.md](AGENTS.md).
 
-Core Module (:core): `core/build/reports/scoverageTest/index.html`
+## Documentation
 
-Other Modules: `<module>/build/reports/jacoco/test/html/index.html`
+- [LIP-001: Diskless Storage with Ursa Integration](docs/LIP-diskless-storage-with-ursa-integration.md)
+- [LIP-002: Ursa Zone-Aware Owner Selection](docs/LIP-ursa-zone-aware-owner-selection.md)
+- [Docker Compose stack](docker/examples/docker-compose-files/cluster/ursa/README.md)
+- [AGENTS.md](AGENTS.md) — architecture, module layout, and build conventions
+- [Apache Kafka documentation](https://kafka.apache.org/documentation/) for everything inherited from upstream
 
-### Building a binary release gzipped tarball
-```bash
-./gradlew clean releaseTarGz
-```
+## Relationship to upstream
 
-The release file can be found inside `./core/build/distributions/`.
+This repository tracks Apache Kafka and keeps divergence minimal: changes are additive where possible, and the
+upstream test suite is expected to pass with diskless storage disabled. Bugs in Kafka itself belong upstream;
+issues with diskless storage or the lakehouse path belong here.
 
-### Building auto-generated messages
-Sometimes it is only necessary to rebuild the RPC auto-generated message data when switching between branches, as they could
-fail due to code changes. You can just run:
+## License
 
-```bash
-./gradlew processMessages processTestMessages
-```
-
-See [Apache Kafka Message Definitions](clients/src/main/resources/common/message/README.md) for details on Apache Kafka message protocol.
-
-### Running a Kafka broker
-
-Using compiled files:
-
-```bash
-KAFKA_CLUSTER_ID="$(./bin/kafka-storage.sh random-uuid)"
-./bin/kafka-storage.sh format --standalone -t $KAFKA_CLUSTER_ID -c config/server.properties
-./bin/kafka-server-start.sh config/server.properties
-```
-
-Using docker image:
-
-```bash
-docker run -p 9092:9092 apache/kafka:latest
-```
-
-See [docker/README.md](docker/README.md) for detailed information.
-
-### Cleaning the build
-```bash
-./gradlew clean
-```
-
-### Running a task for a specific project
-This is for `core`, `examples` and `clients`
-
-```bash
-./gradlew core:jar
-./gradlew core:test
-```
-
-Streams has multiple sub-projects, but you can run all the tests:
-
-```bash
-./gradlew :streams:testAll
-```
-
-### Listing all gradle tasks
-```bash
-./gradlew tasks
-```
-
-### Building IDE project
-*Note: Please ensure that JDK 17 is used when developing Kafka.*
-
-IntelliJ supports Gradle natively, and it will automatically check Java syntax and compatibility for each module, even if
-the Java version shown in the `Structure > Project Settings > Modules` may not be the correct one.
-
-When it comes to Eclipse, run:
-
-```bash
-./gradlew eclipse
-```
-
-The `eclipse` task has been configured to use `${project_dir}/build_eclipse` as Eclipse's build directory. Eclipse's default
-build directory (`${project_dir}/bin`) clashes with Kafka's scripts directory, and we don't use Gradle's build directory
-to avoid known issues with this configuration.
-
-### Publishing the streams quickstart archetype artifact to maven
-For the Streams archetype project, one cannot use gradle to upload to maven; instead the `mvn deploy` command needs to be called at the quickstart folder:
-
-```bash
-cd streams/quickstart
-mvn deploy
-```
-
-Please note for this to work you should create/update user maven settings (typically, `${USER_HOME}/.m2/settings.xml`) to assign the following variables
-
-    <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-       xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
-                           https://maven.apache.org/xsd/settings-1.0.0.xsd">
-    ...                           
-    <servers>
-       ...
-       <server>
-          <id>apache.snapshots.https</id>
-          <username>${maven_username}</username>
-          <password>${maven_password}</password>
-       </server>
-       <server>
-          <id>apache.releases.https</id>
-          <username>${maven_username}</username>
-          <password>${maven_password}</password>
-        </server>
-        ...
-     </servers>
-     ...
-
-### Installing all projects to the local Maven repository
-
-```bash
-./gradlew -PskipSigning=true publishToMavenLocal
-```
-
-### Installing specific projects to the local Maven repository
-
-```bash
-./gradlew -PskipSigning=true :streams:publishToMavenLocal
-```
-
-### Building the test JAR
-```bash
-./gradlew testJar
-```
-
-### Running code quality checks
-There are two code quality analysis tools that we regularly run, SpotBugs and Checkstyle.
-
-#### Checkstyle
-Checkstyle enforces a consistent coding style in Kafka.
-You can run Checkstyle using:
-
-```bash
-./gradlew checkstyleMain checkstyleTest spotlessCheck
-```
-
-The Checkstyle warnings will be found in `reports/checkstyle/reports/main.html` and `reports/checkstyle/reports/test.html` files in the
-subproject build directories. They are also printed to the console. The build will fail if Checkstyle fails.
-For experiments (or regression testing purposes) add `-PcheckstyleVersion=X.y.z` switch (to override project-defined checkstyle version).
-
-#### Spotless
-The import order is a part of static check. Please call `spotlessApply` to optimize Java imports before filing a pull request.
-
-```bash
-./gradlew spotlessApply
-```
-
-#### SpotBugs
-SpotBugs uses static analysis to look for bugs in the code.
-You can run SpotBugs using:
-
-```bash
-./gradlew spotbugsMain spotbugsTest -x test
-```
-
-The SpotBugs warnings will be found in `reports/spotbugs/main.html` and `reports/spotbugs/test.html` files in the subproject build
-directories.  Use -PxmlSpotBugsReport=true to generate an XML report instead of an HTML one.
-
-### JMH microbenchmarks
-We use [JMH](https://openjdk.java.net/projects/code-tools/jmh/) to write microbenchmarks that produce reliable results in the JVM.
-
-See [jmh-benchmarks/README.md](https://github.com/apache/kafka/blob/trunk/jmh-benchmarks/README.md) for details on how to run the microbenchmarks.
-
-### Dependency Analysis
-
-The gradle [dependency debugging documentation](https://docs.gradle.org/current/userguide/viewing_debugging_dependencies.html) mentions using the `dependencies` or `dependencyInsight` tasks to debug dependencies for the root project or individual subprojects.
-
-Alternatively, use the `allDeps` or `allDepInsight` tasks for recursively iterating through all subprojects:
-
-```bash
-./gradlew allDeps
-
-./gradlew allDepInsight --configuration runtimeClasspath --dependency com.fasterxml.jackson.core:jackson-databind
-```
-
-These take the same arguments as the built-in variants.
-
-### Determining if any dependencies could be updated
-```bash
-./gradlew dependencyUpdates --no-parallel
-```
-
-### Common build options ###
-
-The following options should be set with a `-P` switch, for example `./gradlew -PmaxParallelForks=1 test`.
-
-* `commitId`: sets the build commit ID as .git/HEAD might not be correct if there are local commits added for build purposes.
-* `mavenUrl`: sets the URL of the maven deployment repository (`file://path/to/repo` can be used to point to a local repository).
-* `maxParallelForks`: maximum number of test processes to start in parallel. Defaults to the number of processors available to the JVM.
-* `maxScalacThreads`: maximum number of worker threads for the scalac backend. Defaults to the lowest of `8` and the number of processors
-available to the JVM. The value must be between 1 and 16 (inclusive). 
-* `ignoreFailures`: ignore test failures from junit
-* `showStandardStreams`: shows standard output and standard error of the test JVM(s) on the console.
-* `skipSigning`: skips signing of artifacts.
-* `testLoggingEvents`: unit test events to be logged, separated by comma. For example `./gradlew -PtestLoggingEvents=started,passed,skipped,failed test`.
-* `xmlSpotBugsReport`: enable XML reports for SpotBugs. This also disables HTML reports as only one can be enabled at a time.
-* `maxTestRetries`: maximum number of retries for a failing test case.
-* `maxTestRetryFailures`: maximum number of test failures before retrying is disabled for subsequent tests.
-* `enableTestCoverage`: enables test coverage plugins and tasks, including bytecode enhancement of classes required to track said
-coverage. Note that this introduces some overhead when running tests and hence why it's disabled by default (the overhead
-varies, but 15-20% is a reasonable estimate).
-* `keepAliveMode`: configures the keep-alive mode for the Gradle compilation daemon - reuse improves start-up time. The values should 
-be one of `daemon` or `session` (the default is `daemon`). `daemon` keeps the daemon alive until it's explicitly stopped while
-`session` keeps it alive until the end of the build session. This currently only affects the Scala compiler, see
-https://github.com/gradle/gradle/pull/21034 for a PR that attempts to do the same for the Java compiler.
-* `scalaOptimizerMode`: configures the optimizing behavior of the Scala compiler, the value should be one of `none`, `method`, `inline-kafka` or
-`inline-scala` (the default is `inline-kafka`). `none` is the Scala compiler default, which only eliminates unreachable code. `method` also
-includes method-local optimizations. `inline-kafka` adds inlining of methods within the kafka packages. Finally, `inline-scala` also
-includes inlining of methods within the scala library (which avoids lambda allocations for methods like `Option.exists`). `inline-scala` is
-only safe if the Scala library version is the same at compile time and runtime. Since we cannot guarantee this for all cases (for example, users
-may depend on the kafka jar for integration tests where they may include a scala library with a different version), we don't enable it by
-default. See https://www.lightbend.com/blog/scala-inliner-optimizer for more details.
-
-### Upgrading Gradle version
-
-See [gradle/wrapper/README.md](gradle/wrapper/README.md) for instructions on upgrading the Gradle version.
-
-### Running system tests
-
-See [tests/README.md](tests/README.md).
-
-### Using Trogdor for testing
-
-We use Trogdor as a test framework for Apache Kafka. You can use it to run benchmarks and other workloads.
-
-See [trogdor/README.md](trogdor/README.md).
-
-### Running in Vagrant
-
-See [vagrant/README.md](vagrant/README.md).
-
-### Kafka client examples
-
-See [examples/README.md](examples/README.md).
-
-### Contribution
-
-Apache Kafka is interested in building the community; we would welcome any thoughts or [patches](https://issues.apache.org/jira/browse/KAFKA). You can reach us [on the Apache mailing lists](http://kafka.apache.org/contact.html).
-
-To contribute follow the instructions here:
- * https://kafka.apache.org/contributing.html
+Apache License 2.0, the same as Apache Kafka. See [LICENSE](LICENSE).
