@@ -106,6 +106,11 @@ final class IsolatedUrsaCatalogInspector implements AutoCloseable {
                 cluster, KAFKA_STREAM_IDENTITY_CLASS, "KAFKA_MANAGED_PROPERTY");
     }
 
+    static String sourceLogicalNameProperty(KafkaClusterTestKit cluster) throws Exception {
+        return implementationStringConstant(
+                cluster, KAFKA_STREAM_IDENTITY_CLASS, "SOURCE_LOGICAL_NAME_PROPERTY");
+    }
+
     static String kafkaTopicNameProperty(KafkaClusterTestKit cluster) throws Exception {
         return implementationStringConstant(
                 cluster, KAFKA_STREAM_IDENTITY_CLASS, "KAFKA_TOPIC_NAME_PROPERTY");

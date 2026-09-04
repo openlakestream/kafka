@@ -79,14 +79,9 @@ if [ "${URSA_MATERIALIZATION_ENABLED:-false}" = "true" ]; then
   property streamTableMode EXTERNAL
   property catalog.name polaris
 
-  # Name the table after the Kafka topic rather than the stream. Kafka scopes a diskless stream by
-  # topic incarnation - `<topic>-topic-id-<uuid>` - so that a topic deleted and recreated under the
-  # same name cannot attach to the dead incarnation's log. That scoping is right for the log and
-  # wrong for a table people have to reference, so read the logical name off the stream property
-  # Kafka records. Single quotes: the ${...} belongs to Ursa's interpolation, not to the shell.
-  # A topic recreated under the same name appends to the existing table; drop the table first when
-  # that is not wanted.
-  property tableNameTemplate '${stream.property.lakestream.kafka.topic.name}'
+  # Kafka records its logical topic name as system-owned stream metadata. Ursa uses it as the
+  # default external table name while keeping the UUID-qualified stream identity for managed data.
+  # A topic recreated under the same name therefore appends to the existing external table.
 
   # Iceberg REST catalog and S3FileIO configuration. Polaris authentication is
   # deliberately static in this local-only stack; credential vending is not

@@ -23,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -59,10 +60,22 @@ class KafkaStreamIdentityTest {
         Map<String, String> properties = KafkaStreamIdentity.streamProperties(
                 "orders",
                 Uuid.fromString("65WMNfybQpCDVulYOxMCTw"),
-                Map.of("retention.ms", "60000"),
+                Map.of(
+                        "retention.ms", "60000",
+                        KafkaStreamIdentity.SOURCE_LOGICAL_NAME_PROPERTY, "user-value",
+                        KafkaStreamIdentity.KAFKA_TOPIC_NAME_PROPERTY, "user-value",
+                        "lakestream.kafka.user.injected", "user-value",
+                        "lakestream.materialization.resolved.table.namespace", "user-value",
+                        "lakestream.materialization.resolved.table.name", "user-value",
+                        "ursa.materialization.source.topic", "user-value"),
                 42L);
 
+        assertEquals("orders", properties.get(KafkaStreamIdentity.SOURCE_LOGICAL_NAME_PROPERTY));
         assertEquals("orders", properties.get(KafkaStreamIdentity.KAFKA_TOPIC_NAME_PROPERTY));
+        assertFalse(properties.containsKey("lakestream.kafka.user.injected"));
+        assertFalse(properties.containsKey("lakestream.materialization.resolved.table.namespace"));
+        assertFalse(properties.containsKey("lakestream.materialization.resolved.table.name"));
+        assertFalse(properties.containsKey("ursa.materialization.source.topic"));
         assertEquals("true", properties.get(KafkaStreamIdentity.KAFKA_MANAGED_PROPERTY));
         assertEquals(
                 "65WMNfybQpCDVulYOxMCTw",
