@@ -134,9 +134,11 @@ class DisklessTopicLifecycleReconcilerTest {
         when(lifecycle.deleteTopic(any(), any())).thenReturn(completedFuture(null));
         activateWithEmptyImage();
         reconciler.onMetadataUpdate(delta(image(20L, disklessTopic("a", A, 3))), image(20L, disklessTopic("a", A, 3)), manifest());
-        reconciler.onMetadataUpdate(deltaDeleting(A, image(20L, disklessTopic("a", A, 3))), image(21L), manifest());
         InOrder inOrder = inOrder(lifecycle);
+        // Wait for the asynchronous reconciler to start the create before publishing the deletion;
+        // otherwise it may legitimately coalesce both desired states directly into the deletion.
         inOrder.verify(lifecycle, timeout(5000)).ensureTopic("a", A, 3, Map.of("ursa.storage.enable", "true"), 20L);
+        reconciler.onMetadataUpdate(deltaDeleting(A, image(20L, disklessTopic("a", A, 3))), image(21L), manifest());
         inOrder.verify(lifecycle, timeout(5000)).deleteTopic("a", A);
     }
 
