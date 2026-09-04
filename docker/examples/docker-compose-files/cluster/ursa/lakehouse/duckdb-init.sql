@@ -13,6 +13,10 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
+-- Set-up statements return result sets ("Success"); keep them out of the
+-- demo output and the interactive shell. `.output` alone restores stdout.
+.output /dev/null
+
 INSTALL httpfs;
 LOAD httpfs;
 INSTALL iceberg;
@@ -44,3 +48,5 @@ ATTACH 'ursa' AS lakehouse (
     ACCESS_DELEGATION_MODE 'none',
     SUPPORT_NESTED_NAMESPACES true
 );
+
+.output

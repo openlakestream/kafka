@@ -30,11 +30,12 @@ The compactor is part of the core stack rather than the `lakehouse` profile beca
                  ┌────────▼────────┐      ┌──────────┐
                  │  Ursa compactor │─────▶│ Polaris  │
                  │ (tasks + data)  │      │ (Iceberg)│
-                 └─────────────────┘      └────┬─────┘
-                                               │
-                                          ┌────▼────┐
-                                          │ DuckDB  │
-                                          └─────────┘
+                 └────────┬────────┘      └────┬─────┘
+                          │ <topic>-value      │
+                 ┌────────▼────────┐      ┌────▼────┐
+                 │ Schema Registry │      │ DuckDB  │
+                 │   (Karapace)    │      └─────────┘
+                 └─────────────────┘
 ```
 
 Core cluster (started by default):
@@ -47,23 +48,25 @@ Core cluster (started by default):
 `lakehouse` profile (opt in):
 
 - **Polaris**: Iceberg REST catalog
+- **Schema Registry**: [Karapace](https://github.com/Aiven-Open/karapace) (Apache 2.0), which implements the Confluent Schema Registry REST API, backed by a classic `_schemas` topic on the same brokers. Producers register Avro, JSON Schema, or Protobuf schemas under `<topic>-value`; the compactor resolves that subject to give the Iceberg table typed columns. See [Schemas](#schemas).
+- **Kafka REST proxy**: Karapace's second mode. HTTP produce/consume with registry-backed encoding, so `curl` can write Confluent wire-format Avro records; the demo uses it because the Apache Kafka distribution ships no schema-aware console producer.
 - **Ursa compactor, with materialization on**: `URSA_MATERIALIZATION_ENABLED=true` adds a second sink to the same WAL read, registering an external Iceberg table in Polaris, named after the Kafka topic. Compose recreates the compactor when that variable changes.
 - **DuckDB** (`tools` profile): on-demand SQL engine used for queries and for the end-to-end assertion
 
 ```text
-Kafka producer -> Kafka broker -> Ursa WAL (MinIO)
-                                     |
-                                     v
-                     Ursa compactor (publishes tasks)
-                              |           |
-                              v           v
-                    managed objects   Iceberg table      <- lakehouse profile,
-                                      |     |               materialization on
-                                      v     v
-                                  Polaris  MinIO
-                                      |
-                                      v
-                                   DuckDB
+Kafka producer (or curl -> Kafka REST proxy) -> Kafka broker -> Ursa WAL (MinIO)
+      |                                                            |
+      | registers schema                                           v
+      v                                            Ursa compactor (publishes tasks)
+Schema Registry (Karapace) <------ resolves ------------  |           |
+  <topic>-value                                          v           v
+                                               managed objects   Iceberg table   <- lakehouse profile,
+                                                                 |     |            materialization on
+                                                                 v     v
+                                                             Polaris  MinIO
+                                                                 |
+                                                                 v
+                                                              DuckDB
 ```
 
 The left branch is the core stack: it is what Kafka fetch reads after compaction and what lets the WAL be reclaimed. The right branch is the opt-in lakehouse.
@@ -138,10 +141,10 @@ Each demo is a Compose profile of one-shot containers. They never run during a p
 
 | Profile | Services | What it does |
 |---------|----------|--------------|
-| `lakehouse` | `polaris`, `polaris-setup` | Adds the Iceberg REST catalog (long-running, not one-shot). Pair with `URSA_MATERIALIZATION_ENABLED=true` so the already-running compactor also writes the external table. |
+| `lakehouse` | `polaris`, `polaris-setup`, `schema-registry`, `kafka-rest` | Adds the Iceberg REST catalog, the schema registry and the REST proxy (long-running, not one-shot). Pair with `URSA_MATERIALIZATION_ENABLED=true` so the already-running compactor also writes the external table. |
 | `demo` | `kafka-ready`, `create-topic`, `producer-1`, `producer-2`, `consumer` | Creates `test-diskless` (`PARTITIONS`, default 12) and runs two producers plus a consumer perf test |
 | `share-demo` | `kafka-ready`, `create-share-topic`, `configure-share-group`, `share-producer`, `share-consumer`, `describe-share-group` | Share-group consumption on a single-partition diskless topic |
-| `lakehouse-demo` | `kafka-ready`, `lakehouse-create-topic`, `raw-producer`, `kafka-consumer-check`, `wait-for-parquet`, `duckdb-query-check` | Kafka -> Ursa WAL -> compaction -> Iceberg -> DuckDB assertions (combine with `lakehouse`) |
+| `lakehouse-demo` | `kafka-ready`, `lakehouse-create-topic`, `avro-producer`, `kafka-consumer-check`, `wait-for-parquet`, `duckdb-query-check` | Kafka (Avro) -> Ursa WAL -> compaction -> Iceberg -> DuckDB assertions (combine with `lakehouse`) |
 | `tools` | `duckdb` | On-demand SQL shell against the local Polaris catalog |
 
 ```bash
@@ -149,6 +152,7 @@ make demo             # perf demo, torn down on exit (including on Ctrl+C)
 make share-demo       # share-group demo, torn down on exit
 make lakehouse-demo   # end-to-end lakehouse assertion
 make duckdb           # DuckDB shell
+make schemas          # subjects in the schema registry
 
 # Or drive the profiles directly
 docker compose --profile demo up
@@ -160,7 +164,22 @@ URSA_MATERIALIZATION_ENABLED=true docker compose --profile lakehouse --profile t
 
 ### Lakehouse end-to-end
 
-`make lakehouse-demo` runs `run-lakehouse-demo.sh`, which needs both local images. It creates a diskless topic, writes 100 raw Kafka records, reads all 100 back through Kafka, waits for the compactor to write Parquet into MinIO, polls DuckDB until the external Iceberg table holds the same row count, and asserts that the range was materialized exactly once without compactor errors. On success it removes the demo containers and volumes.
+`make lakehouse-demo` runs `run-lakehouse-demo.sh`, which needs both local images. It creates a diskless topic, registers the `Order` schema as `ursa-lakehouse-e2e-value` and produces 100 Avro orders through the REST proxy, then decodes all 100 back through the proxy's Avro consumer while the brokers still serve the range from the WAL. It waits for the compactor to write Parquet into MinIO and reads all 100 back a second time, now served from the compacted objects and their per-file index. Then it polls DuckDB until the external Iceberg table holds every order. The DuckDB step is a real query against the typed table: it asserts `count(*)` and `sum(order_id)` (the producer numbers orders `1..N`), and once that passes it prints the table's columns, the first five orders, and a per-region aggregate. Finally the script asserts that the range was materialized exactly once without compactor errors. On success it removes the demo containers and volumes.
+
+The records are generated by `lakehouse/avro-producer.sh` from this schema:
+
+```json
+{"type": "record", "name": "Order", "namespace": "io.lakestream.demo", "fields": [
+  {"name": "order_id",    "type": "long"},
+  {"name": "customer",    "type": "string"},
+  {"name": "region",      "type": "string"},
+  {"name": "quantity",    "type": "int"},
+  {"name": "amount",      "type": "double"},
+  {"name": "order_ts_ms", "type": "long"}
+]}
+```
+
+which the compactor turns into the Iceberg columns `order_id BIGINT`, `customer VARCHAR`, `region VARCHAR`, `quantity INTEGER`, `amount DOUBLE`, `order_ts_ms BIGINT`. The timestamp is epoch milliseconds in a plain `long` because Karapace's REST proxy validates Avro logical types against native date/time values, which JSON cannot carry; the compactor itself maps `timestamp-millis` to an Iceberg `TIMESTAMP`, so a Kafka client using the Avro serializer can use the logical type.
 
 ```bash
 KEEP_RUNNING=true ./run-lakehouse-demo.sh   # keep the stack for inspection
@@ -178,8 +197,45 @@ Inside DuckDB (`make duckdb`), the table is named after the Kafka topic:
 
 ```sql
 SHOW ALL TABLES;
-SELECT count(*) FROM lakehouse.default."ursa-lakehouse-e2e";
+DESCRIBE lakehouse.default."ursa-lakehouse-e2e";
+SELECT region, count(*) AS orders, round(sum(amount), 2) AS revenue,
+       min(epoch_ms(order_ts_ms)) AS first_order
+FROM lakehouse.default."ursa-lakehouse-e2e"
+GROUP BY region ORDER BY region;
 ```
+
+### Schemas
+
+The compactor decodes records with the Confluent schema-registry client (Apache 2.0, like the Avro serializer), so any registry that speaks the Confluent REST API works: [Karapace](https://github.com/Aiven-Open/karapace) (Apache 2.0, used here), Confluent Schema Registry (Confluent Community License), or [Apicurio Registry](https://www.apicur.io/registry/) through its `ccompat` endpoint. Point `URSA_SCHEMA_REGISTRY_URL` (the compactor's `schemaRegistryUrl` property, set in `lakehouse/compactor-entrypoint.sh`) at it. Records must use the Confluent wire format — a `0x00` magic byte and the 4-byte schema id — which is what the Confluent serializers, Karapace's REST proxy, and Confluent's `kafka-*-console-producer` tools write. Avro, JSON Schema, and Protobuf are supported.
+
+To put your own schema-backed records into a diskless topic without writing a client, use the REST proxy. It registers the schema under `<topic>-value` and encodes each record:
+
+```bash
+make create-topic TOPIC=events PARTITIONS=1
+curl -X POST localhost:18082/topics/events \
+  -H 'Content-Type: application/vnd.kafka.avro.v2+json' \
+  -d '{"value_schema": "{\"type\":\"record\",\"name\":\"Event\",\"fields\":[{\"name\":\"id\",\"type\":\"long\"},{\"name\":\"kind\",\"type\":\"string\"}]}",
+       "records": [{"value": {"id": 1, "kind": "click"}}, {"value": {"id": 2, "kind": "view"}}]}'
+```
+
+The compactor looks up the `<topic>-value` subject (`TopicNameStrategy`). What it finds decides the table's shape:
+
+| Subject `<topic>-value` | Iceberg table |
+|-------------------------|---------------|
+| Avro / JSON Schema / Protobuf schema | One column per schema field, with Avro logical types mapped to Iceberg types (`timestamp-millis` -> `TIMESTAMP`, `date` -> `DATE`, `decimal` -> `DECIMAL`, ...) |
+| No subject | A single `payload` binary column holding the raw record value (`make console-producer` topics end up here) |
+
+Two things to keep in mind:
+
+- The compactor caches a missing subject per topic and keeps treating that topic as raw bytes until it restarts. Register the schema, or produce with a schema-aware producer, before the first record reaches the compactor.
+- Only the Iceberg sink reads schemas. The managed compacted objects that Kafka consumers fetch keep the original record batches, so the brokers do not talk to the registry and a schema is never required for a diskless topic to work as a Kafka topic.
+
+```bash
+make schemas                                                             # list subjects
+curl -s localhost:18081/subjects/ursa-lakehouse-e2e-value/versions/latest # inspect one
+```
+
+The compactor also writes a per-file `ManagedTableFileIndex` into each compacted entry index (`managedTableSchemaEvolutionEnabled=true` in `lakehouse/compactor-entrypoint.sh`). That index is how the brokers serve fetches of compacted ranges, so it is required with or without a schema registry.
 
 The stream behind it is named `<topic>-topic-id-<uuid>`, because Kafka lets a deleted topic be
 recreated under the same name and the two incarnations must not share a log. Kafka records the
@@ -252,8 +308,9 @@ latency, raise it to batch more per PUT.
 | `make console-consumer` | Start interactive console consumer |
 | `make demo` | Run the producer/consumer perf demo and tear it down on exit |
 | `make share-demo` | Run the share-group demo and tear it down on exit |
-| `make lakehouse-demo` | Run the Kafka-to-DuckDB end-to-end assertion |
+| `make lakehouse-demo` | Run the Kafka (Avro) -> Iceberg -> DuckDB end-to-end assertion |
 | `make duckdb` | Open DuckDB against the local Polaris catalog |
+| `make schemas` | List the subjects registered in the schema registry |
 
 **Note**: Diskless topics enforce RF=1 (replication factor of 1) because data is stored in remote storage, not replicated across brokers.
 
@@ -271,6 +328,8 @@ Every port binds to `127.0.0.1`.
 | minio | 19001 | MinIO console |
 | polaris | 18181 | Iceberg REST and management APIs |
 | polaris | 18182 | Health and metrics APIs |
+| schema-registry | 18081 | Karapace schema registry (Confluent-compatible REST API) |
+| kafka-rest | 18082 | Karapace Kafka REST proxy |
 
 ## MinIO console
 
@@ -319,10 +378,10 @@ KRaft metadata lives under `/var/lib/kafka/data/kraft-combined-logs` on each bro
 |----------|---------|-------------|
 | `IMAGE` | `lakestream/kafka:latest` | Kafka broker and CLI image |
 | `COMPACTOR_IMAGE` | `lakestream/compactor:latest` | Ursa compactor image |
-| `OXIA_IMAGE`, `MINIO_IMAGE`, `MINIO_MC_IMAGE`, `POLARIS_IMAGE`, `POLARIS_SETUP_IMAGE`, `DUCKDB_IMAGE` | pinned versions | Third-party images |
+| `OXIA_IMAGE`, `MINIO_IMAGE`, `MINIO_MC_IMAGE`, `POLARIS_IMAGE`, `KARAPACE_IMAGE`, `CURL_IMAGE`, `DUCKDB_IMAGE` | pinned versions | Third-party images. `KARAPACE_IMAGE` runs both the schema registry and the REST proxy; `CURL_IMAGE` runs the Polaris setup and the demo's producer and consumer scripts |
 | `PARTITIONS` | `12` | Partition count for the `demo` profile's `create-topic` |
 | `DEMO_TOPIC` | `ursa-lakehouse-e2e` | Topic used by the `lakehouse-demo` profile |
-| `NUM_RECORDS` | `100` | Record count used by the `lakehouse-demo` profile |
+| `NUM_RECORDS` | `100` | Number of Avro orders produced by the `lakehouse-demo` profile |
 | `COMPACTION_BUCKET` | `kafka-ursa` | Bucket `wait-for-parquet` watches |
 | `COMPACTION_PREFIX` | `ursa` | Prefix `wait-for-parquet` watches (spans `ursa/wal` and `ursa/compacted`) |
 | `URSA_WRITE_BUFFER_FLUSH_INTERVAL_MS` | `250` | Broker WAL write-buffer flush interval |

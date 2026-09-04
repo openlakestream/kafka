@@ -35,8 +35,8 @@ export URSA_WRITE_BUFFER_FLUSH_SIZE="${URSA_WRITE_BUFFER_FLUSH_SIZE:-4096}"
 # makes Compose recreate the compactor with the catalog configured.
 export URSA_MATERIALIZATION_ENABLED=true
 
-# Polaris lives in the `lakehouse` profile and the demo workload in
-# `lakehouse-demo`; this verifier needs both.
+# Polaris, the schema registry and the REST proxy live in the `lakehouse`
+# profile and the demo workload in `lakehouse-demo`; this verifier needs both.
 compose() {
   docker compose --project-name "$project" -f "$compose_file" \
     --profile lakehouse --profile lakehouse-demo "$@"
@@ -74,19 +74,30 @@ cleanup() {
     compose_all down -v --remove-orphans >/dev/null
   elif [[ "$passed" != "true" ]]; then
     echo "E2E failed; containers were left running for inspection." >&2
-    echo "Logs: docker compose -f $compose_file logs compactor polaris" >&2
+    echo "Logs: docker compose -f $compose_file logs compactor polaris schema-registry kafka-rest" >&2
   fi
 }
 trap cleanup EXIT
 
 compose up -d \
-  oxia minio minio-init polaris polaris-setup compactor kafka-1 kafka-2 kafka-3
+  oxia minio minio-init polaris polaris-setup schema-registry kafka-rest compactor \
+  kafka-1 kafka-2 kafka-3
 
+# Pulls in kafka-ready, lakehouse-create-topic and avro-producer through its
+# dependency chain, then decodes every record back through the REST proxy. At
+# this point the brokers serve the range from the WAL.
 compose run --rm kafka-consumer-check
 
-# The stack is already up and raw-producer has completed; --no-deps keeps the
+# The stack is already up and avro-producer has completed; --no-deps keeps the
 # one-shot producer from running a second time.
 compose run --rm --no-deps wait-for-parquet
+
+# Read everything back once more with a fresh consumer group. The range is
+# compacted now, so the brokers serve it from the managed compacted objects and
+# their per-file index instead of the WAL; a compactor that does not write that
+# index (managedTableSchemaEvolutionEnabled) passes the first read and fails
+# this one.
+compose run --rm --no-deps kafka-consumer-check
 
 attempt=1
 last_query_output=""
@@ -123,7 +134,7 @@ if grep -F -q "Internal compaction task publisher is disabled" <<< "$compactor_l
 fi
 
 passed=true
-echo "E2E passed: Kafka -> Ursa WAL -> compaction -> Polaris/Iceberg -> DuckDB."
+echo "E2E passed: Kafka (Avro, Schema Registry) -> Ursa WAL -> compaction -> Polaris/Iceberg -> DuckDB."
 if [[ "${KEEP_RUNNING:-false}" == "true" ]]; then
   echo "The stack is still running under Compose project '$project'."
 fi

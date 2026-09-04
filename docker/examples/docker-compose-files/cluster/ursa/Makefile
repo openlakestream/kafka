@@ -20,9 +20,10 @@ COMPOSE := $(DOCKER) compose
 # this list in sync with ALL_PROFILES in committer-tools/docker_cluster_smoke.py
 # and compose_all() in run-lakehouse-demo.sh.
 ALL_PROFILES := --profile lakehouse --profile demo --profile share-demo --profile lakehouse-demo --profile tools
-# Polaris and its setup job are not part of the default stack. The compactor is:
-# without it the WAL delete watermark never advances and Kafka retention frees no
-# storage. The `lakehouse` profile adds the Iceberg catalog, and
+# Polaris, its setup job, the schema registry and the REST proxy are not part of
+# the default stack. The compactor is: without it the WAL delete watermark never
+# advances and Kafka retention frees no storage. The `lakehouse` profile adds the
+# Iceberg catalog plus the Karapace registry and proxy, and
 # URSA_MATERIALIZATION_ENABLED makes the compactor write the external table too.
 LAKEHOUSE_PROFILE := --profile lakehouse
 LAKEHOUSE_ENV := URSA_MATERIALIZATION_ENABLED=true
@@ -51,9 +52,10 @@ help:
 	@echo ""
 	@echo "  make demo             - Producer/consumer perf demo, torn down on exit"
 	@echo "  make share-demo       - Share-group demo, torn down on exit"
-	@echo "  make lakehouse-demo   - Kafka -> Iceberg -> DuckDB end-to-end assertion"
-	@echo "                          (adds Polaris and the compactor)"
+	@echo "  make lakehouse-demo   - Kafka (Avro) -> Iceberg -> DuckDB end-to-end assertion"
+	@echo "                          (adds Polaris and the schema registry)"
 	@echo "  make duckdb           - Open DuckDB against the local Polaris catalog"
+	@echo "  make schemas          - List the subjects in the schema registry"
 	@echo "  make compaction-logs  - Follow compactor logs"
 	@echo ""
 
@@ -69,7 +71,7 @@ up:
 	@$(COMPOSE) exec kafka-1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:19092 --list 2>/dev/null || echo "Cluster still starting..."
 	@echo ""
 	@echo "Cluster started. Use 'make create-topic' to create a diskless topic."
-	@echo "For the Iceberg catalog, add:"
+	@echo "For the Iceberg catalog, schema registry and REST proxy, add:"
 	@echo "  URSA_MATERIALIZATION_ENABLED=true docker compose --profile lakehouse up -d"
 
 .PHONY: down
@@ -168,3 +170,9 @@ lakehouse-demo:
 .PHONY: duckdb
 duckdb:
 	$(LAKEHOUSE_ENV) $(COMPOSE) $(LAKEHOUSE_PROFILE) --profile tools run --rm duckdb
+
+# Subjects are `<topic>-value`; append /versions/latest to one for its schema.
+.PHONY: schemas
+schemas:
+	$(COMPOSE) $(LAKEHOUSE_PROFILE) exec schema-registry curl -sS --fail http://localhost:8081/subjects
+	@echo
