@@ -63,6 +63,12 @@ property metastoreRequestRateLimitPerSecond "${URSA_METASTORE_RATE_LIMIT:-500}"
 # Lakestream logs and publishes each range before materializing it.
 property internalCompactionTaskPublisherEnabled true
 
+# Record a per-file ManagedTableFileIndex in each compacted entry index. The
+# brokers' Kafka-only reader serves fetches of compacted ranges from that index
+# and refuses entries without it, so without this flag consumers stop seeing
+# data as soon as a range is compacted.
+property managedTableSchemaEvolutionEnabled true
+
 # Everything above is what compaction needs on its own: the WAL is compacted into
 # the managed objects Kafka fetch reads, which is also what advances the WAL
 # delete watermark so retention can free storage. That runs with no catalog.
@@ -82,6 +88,16 @@ if [ "${URSA_MATERIALIZATION_ENABLED:-false}" = "true" ]; then
   # Kafka records its logical topic name as system-owned stream metadata. Ursa uses it as the
   # default external table name while keeping the UUID-qualified stream identity for managed data.
   # A topic recreated under the same name therefore appends to the existing external table.
+
+  # Schema registry speaking the Confluent REST API (Karapace here; Confluent Schema Registry
+  # or Apicurio's ccompat API work the same). The compactor looks up the `<topic>-value`
+  # subject: a topic whose records carry an Avro, JSON Schema or Protobuf schema id is decoded
+  # into typed Iceberg columns, a topic without a subject lands as a single `payload` binary
+  # column. Only the Iceberg sink reads schemas; the managed objects Kafka fetch reads stay
+  # raw batches, so the brokers never need this URL.
+  if [ -n "${URSA_SCHEMA_REGISTRY_URL:-}" ]; then
+    property schemaRegistryUrl "$URSA_SCHEMA_REGISTRY_URL"
+  fi
 
   # Iceberg REST catalog and S3FileIO configuration. Polaris authentication is
   # deliberately static in this local-only stack; credential vending is not

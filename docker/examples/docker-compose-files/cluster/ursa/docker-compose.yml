@@ -18,7 +18,7 @@
 #   docker compose up -d                      # oxia, minio, minio-init, kafka-1..3
 #   docker compose --profile demo up          # + producer/consumer perf workload
 #   docker compose --profile share-demo up    # + share-group workload
-#   docker compose --profile lakehouse up -d  # + polaris, polaris-setup, compactor
+#   docker compose --profile lakehouse up -d  # + polaris, polaris-setup, schema-registry
 #   docker compose --profile lakehouse --profile lakehouse-demo up
 #   docker compose --profile lakehouse --profile tools run --rm duckdb
 #
@@ -167,7 +167,7 @@ services:
       start_period: 15s
 
   polaris-setup:
-    image: ${POLARIS_SETUP_IMAGE:-alpine/curl:8.21.0}
+    image: ${CURL_IMAGE:-alpine/curl:8.21.0}
     profiles: ["lakehouse"]
     depends_on:
       polaris:
@@ -186,6 +186,91 @@ services:
       - ./lakehouse/polaris-setup.sh:/opt/ursa-demo/polaris-setup.sh:ro
     entrypoint: ["/bin/sh", "/opt/ursa-demo/polaris-setup.sh"]
 
+  # Schema registry: Karapace (Apache 2.0) implements the Confluent Schema
+  # Registry REST API, so the compactor's Confluent client, the Confluent
+  # serializers and any other registry-aware tooling work against it unchanged.
+  # Schemas live in a classic `_schemas` topic on the same brokers. The
+  # compactor resolves each topic's `<topic>-value` subject to turn Avro, JSON
+  # Schema, or Protobuf records into typed Iceberg columns; the registry is not
+  # on the broker read path. Karapace retries until the brokers are up, so it
+  # only needs them started, not healthy.
+  schema-registry:
+    image: ${KARAPACE_IMAGE:-ghcr.io/aiven-open/karapace:6.2.2}
+    profiles: ["lakehouse"]
+    hostname: schema-registry
+    restart: unless-stopped
+    depends_on:
+      - kafka-1
+      - kafka-2
+      - kafka-3
+    ports:
+      - "127.0.0.1:18081:8081"
+    # The image has no entrypoint; this module is the schema registry.
+    entrypoint: ["python3", "-m", "karapace"]
+    environment:
+      KARAPACE_KARAPACE_REGISTRY: "true"
+      KARAPACE_KARAPACE_REST: "false"
+      KARAPACE_BOOTSTRAP_URI: kafka-1:19092,kafka-2:19092,kafka-3:19092
+      KARAPACE_HOST: 0.0.0.0
+      KARAPACE_PORT: "8081"
+      KARAPACE_ADVERTISED_HOSTNAME: schema-registry
+      KARAPACE_CLIENT_ID: schema-registry
+      KARAPACE_GROUP_ID: schema-registry
+      KARAPACE_TOPIC_NAME: _schemas
+      KARAPACE_REPLICATION_FACTOR: "3"
+      KARAPACE_COMPATIBILITY: BACKWARD
+      KARAPACE_LOG_LEVEL: INFO
+    healthcheck:
+      # `/_health` answers 200 as soon as `_schemas` exists; registrations also
+      # need the reader caught up and this node elected primary, so gate on both.
+      test:
+        - CMD-SHELL
+        - >-
+          health="$$(curl -sf http://localhost:8081/_health)" &&
+          echo "$$health" | grep -Eq '"schema_registry_ready": ?true' &&
+          echo "$$health" | grep -Eq '"schema_registry_is_primary": ?true'
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  # Kafka REST proxy (also Karapace): HTTP produce/consume with registry-backed
+  # Avro, JSON Schema, and Protobuf encoding. The Apache Kafka distribution has no
+  # schema-aware console producer, so this is how the demo, and `curl`, get
+  # Confluent wire-format records into a topic. It is not needed by the compactor.
+  kafka-rest:
+    image: ${KARAPACE_IMAGE:-ghcr.io/aiven-open/karapace:6.2.2}
+    profiles: ["lakehouse"]
+    hostname: kafka-rest
+    restart: unless-stopped
+    depends_on:
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18082:8082"
+    entrypoint: ["python3", "-m", "karapace.kafka_rest_apis"]
+    environment:
+      KARAPACE_KARAPACE_REST: "true"
+      KARAPACE_KARAPACE_REGISTRY: "false"
+      KARAPACE_BOOTSTRAP_URI: kafka-1:19092,kafka-2:19092,kafka-3:19092
+      KARAPACE_HOST: 0.0.0.0
+      KARAPACE_PORT: "8082"
+      KARAPACE_ADVERTISED_HOSTNAME: kafka-rest
+      KARAPACE_REGISTRY_SCHEME: http
+      KARAPACE_REGISTRY_HOST: schema-registry
+      KARAPACE_REGISTRY_PORT: "8081"
+      # Refresh topic metadata on every request so a topic created a moment ago
+      # is visible to the producer at once.
+      KARAPACE_ADMIN_METADATA_MAX_AGE: "0"
+      KARAPACE_LOG_LEVEL: INFO
+    healthcheck:
+      # Listing topics needs a working broker connection, so it doubles as readiness.
+      test: ["CMD", "curl", "-sf", "http://localhost:8082/topics"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+
   # Part of the core stack, not the `lakehouse` profile: without compaction the
   # WAL delete watermark never advances, so Kafka retention frees no storage.
   # `lakehouse` adds Polaris and, with URSA_MATERIALIZATION_ENABLED=true, the
@@ -202,9 +287,14 @@ services:
       polaris-setup:
         condition: service_completed_successfully
         required: false
+      schema-registry:
+        condition: service_healthy
+        required: false
     environment:
       OTEL_SDK_DISABLED: "true"
       URSA_MATERIALIZATION_ENABLED: "${URSA_MATERIALIZATION_ENABLED:-false}"
+      # Read by the entrypoint only when materialization is on.
+      URSA_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_REGION: us-east-1
@@ -465,6 +555,9 @@ services:
 
   # ---------------------------------------------------------------------------
   # Profile: lakehouse-demo - Kafka -> Ursa WAL -> compaction -> Iceberg -> DuckDB.
+  # Avro records with a schema in the registry, so the Iceberg table has typed
+  # columns and the DuckDB check can query values, not only count rows. Needs
+  # the `lakehouse` profile for Polaris and the schema registry.
   # ---------------------------------------------------------------------------
   lakehouse-create-topic:
     <<: *kafka-cli
@@ -486,46 +579,48 @@ services:
           --partitions 1 \
           --replication-factor 1
 
-  raw-producer:
-    <<: *kafka-cli
+  # Registers the Order schema and produces Avro records through the REST proxy,
+  # which writes Confluent wire-format values (magic byte + schema id + Avro).
+  avro-producer:
+    image: ${CURL_IMAGE:-alpine/curl:8.21.0}
     profiles: ["lakehouse-demo"]
+    restart: "no"
     depends_on:
       lakehouse-create-topic:
         condition: service_completed_successfully
+      # `required: false` keeps the service defined when the lakehouse profile is
+      # off; the demo itself needs both services and fails fast without them.
+      schema-registry:
+        condition: service_healthy
+        required: false
+      kafka-rest:
+        condition: service_healthy
+        required: false
     environment:
       DEMO_TOPIC: ${DEMO_TOPIC:-ursa-lakehouse-e2e}
       NUM_RECORDS: ${NUM_RECORDS:-100}
-    entrypoint: ["/bin/bash", "-ec"]
-    command:
-      - |
-        echo "Producing $${NUM_RECORDS} records to $${DEMO_TOPIC}..."
-        seq -f 'record-%06g' 1 "$${NUM_RECORDS}" \
-          | /opt/kafka/bin/kafka-console-producer.sh \
-              --bootstrap-server kafka-1:19092 \
-              --topic "$${DEMO_TOPIC}"
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      KAFKA_REST_URL: http://kafka-rest:8082
+    volumes:
+      - ./lakehouse/avro-producer.sh:/opt/ursa-demo/avro-producer.sh:ro
+    entrypoint: ["/bin/sh", "/opt/ursa-demo/avro-producer.sh"]
 
+  # Reads every record back through the REST proxy's Avro consumer, which decodes
+  # them with the registry, before the lakehouse side is checked.
   kafka-consumer-check:
-    <<: *kafka-cli
+    image: ${CURL_IMAGE:-alpine/curl:8.21.0}
     profiles: ["lakehouse-demo"]
+    restart: "no"
     depends_on:
-      raw-producer:
+      avro-producer:
         condition: service_completed_successfully
     environment:
       DEMO_TOPIC: ${DEMO_TOPIC:-ursa-lakehouse-e2e}
       NUM_RECORDS: ${NUM_RECORDS:-100}
-    entrypoint: ["/bin/bash", "-ec"]
-    command:
-      - |
-        output=/tmp/kafka-consumed.txt
-        /opt/kafka/bin/kafka-console-consumer.sh \
-          --bootstrap-server kafka-2:19092 \
-          --topic "$${DEMO_TOPIC}" \
-          --from-beginning \
-          --max-messages "$${NUM_RECORDS}" \
-          --timeout-ms 120000 > "$$output"
-        count="$$(grep -c '^record-' "$$output" || true)"
-        test "$$count" = "$${NUM_RECORDS}"
-        echo "Kafka read back $$count records from Ursa storage."
+      KAFKA_REST_URL: http://kafka-rest:8082
+    volumes:
+      - ./lakehouse/avro-consumer-check.sh:/opt/ursa-demo/avro-consumer-check.sh:ro
+    entrypoint: ["/bin/sh", "/opt/ursa-demo/avro-consumer-check.sh"]
 
   # Wait until the compactor has written managed Parquet objects to MinIO.
   wait-for-parquet:
@@ -533,7 +628,7 @@ services:
     profiles: ["lakehouse-demo"]
     restart: "no"
     depends_on:
-      raw-producer:
+      avro-producer:
         condition: service_completed_successfully
       minio:
         condition: service_healthy
@@ -586,8 +681,6 @@ services:
       - /duckdb
       - -init
       - /opt/ursa-demo/duckdb-init.sql
-      - -noheader
-      - -list
       - -c
     command:
       - |
@@ -600,15 +693,33 @@ services:
           ORDER BY table_name
           LIMIT 1
         );
-        SET VARIABLE actual_rows = (
-          SELECT count(*) FROM query_table(getvariable('target_table'))
-        );
+        -- The assertion comes first: the shell stops at the first error, so the
+        -- statements after it only print once the table holds every order. The
+        -- producer numbers orders 1..N, so sum(order_id) also checks that the
+        -- Avro values were decoded into the typed columns, not only counted.
         SELECT CASE
-          WHEN getvariable('actual_rows') = ${NUM_RECORDS:-100}
-            THEN format('DuckDB read {} rows from {}.',
-                        getvariable('actual_rows'), getvariable('target_table'))
-          ELSE error('Iceberg table does not contain the expected row count yet')
-        END;
+          WHEN count(*) = ${NUM_RECORDS:-100}
+           AND sum(order_id) = ${NUM_RECORDS:-100} * (${NUM_RECORDS:-100} + 1) // 2
+            THEN format('DuckDB read {} rows from {}; sum(order_id) matches the producer.',
+                        count(*), getvariable('target_table'))
+          ELSE error(format('Iceberg table holds {} of the expected {} rows so far',
+                            count(*), ${NUM_RECORDS:-100}))
+        END AS result
+        FROM query_table(getvariable('target_table'));
+        SELECT column_name, column_type, "null" AS nullable
+        FROM (DESCRIBE SELECT * FROM query_table(getvariable('target_table')));
+        SELECT order_id, customer, region, quantity, amount,
+               epoch_ms(order_ts_ms) AS order_time
+        FROM query_table(getvariable('target_table'))
+        ORDER BY order_id
+        LIMIT 5;
+        SELECT region,
+               count(*) AS orders,
+               sum(quantity) AS units,
+               round(sum(amount), 2) AS revenue
+        FROM query_table(getvariable('target_table'))
+        GROUP BY region
+        ORDER BY region;
 
   # ---------------------------------------------------------------------------
   # Profile: tools - on-demand SQL shell against the local Polaris catalog.
