@@ -80,6 +80,7 @@ class LakestreamStorageHolderTest {
         verify(catalog).createStream(eq(id), any(), partitioning.capture(), any(), properties.capture());
         assertEquals(3, partitioning.getValue().numPartitions());
         assertEquals("true", properties.getValue().get(KafkaStreamIdentity.KAFKA_MANAGED_PROPERTY));
+        assertEquals("orders", properties.getValue().get(KafkaStreamIdentity.SOURCE_LOGICAL_NAME_PROPERTY));
         assertEquals("orders", properties.getValue().get(KafkaStreamIdentity.KAFKA_TOPIC_NAME_PROPERTY));
         assertEquals("1", properties.getValue().get("retention.ms"));
         // The broker's own metadata offset, not 0, so the controller's sweep cannot treat a topic

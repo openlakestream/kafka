@@ -215,7 +215,9 @@ class UrsaDisklessTopicLifecycleTest {
         verify(catalog).replaceStreamProperties(
                 eq(id),
                 argThat(properties ->
-                        "orders".equals(properties.get(KafkaStreamIdentity.KAFKA_TOPIC_NAME_PROPERTY))
+                        "orders".equals(properties.get(KafkaStreamIdentity.SOURCE_LOGICAL_NAME_PROPERTY))
+                                && "orders".equals(
+                                        properties.get(KafkaStreamIdentity.KAFKA_TOPIC_NAME_PROPERTY))
                                 && "5".equals(properties.get("retention.ms"))),
                 eq(42L));
     }

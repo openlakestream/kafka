@@ -29,9 +29,16 @@ public final class KafkaStreamIdentity {
 
     public static final String NAMESPACE = "default";
     public static final String KAFKA_MANAGED_PROPERTY = "lakestream.kafka.managed";
+    public static final String SOURCE_LOGICAL_NAME_PROPERTY = "lakestream.source.logical.name";
     public static final String KAFKA_TOPIC_NAME_PROPERTY = "lakestream.kafka.topic.name";
     public static final String KAFKA_TOPIC_ID_PROPERTY = "lakestream.kafka.topic.id";
     public static final String KAFKA_SOURCE_REVISION_PROPERTY = "lakestream.kafka.source.revision";
+    private static final String RESOLVED_TABLE_NAMESPACE_PROPERTY =
+            "lakestream.materialization.resolved.table.namespace";
+    private static final String RESOLVED_TABLE_NAME_PROPERTY =
+            "lakestream.materialization.resolved.table.name";
+    private static final String MATERIALIZATION_SOURCE_TOPIC_PROPERTY =
+            "ursa.materialization.source.topic";
 
     private KafkaStreamIdentity() {
     }
@@ -72,11 +79,27 @@ public final class KafkaStreamIdentity {
         if (sourceRevision < 0) {
             throw new IllegalArgumentException("sourceRevision must not be negative");
         }
-        Map<String, String> properties = new HashMap<>(topicConfig == null ? Map.of() : topicConfig);
+        Map<String, String> properties = new HashMap<>();
+        if (topicConfig != null) {
+            topicConfig.forEach((key, value) -> {
+                if (!isReservedSourceMetadata(key)) {
+                    properties.put(key, value);
+                }
+            });
+        }
         properties.put(KAFKA_MANAGED_PROPERTY, "true");
+        properties.put(SOURCE_LOGICAL_NAME_PROPERTY, topicName);
         properties.put(KAFKA_TOPIC_NAME_PROPERTY, topicName);
         properties.put(KAFKA_TOPIC_ID_PROPERTY, topicId.toString());
         properties.put(KAFKA_SOURCE_REVISION_PROPERTY, Long.toString(sourceRevision));
         return Map.copyOf(properties);
+    }
+
+    private static boolean isReservedSourceMetadata(String key) {
+        return SOURCE_LOGICAL_NAME_PROPERTY.equals(key)
+                || key.startsWith("lakestream.kafka.")
+                || RESOLVED_TABLE_NAMESPACE_PROPERTY.equals(key)
+                || RESOLVED_TABLE_NAME_PROPERTY.equals(key)
+                || MATERIALIZATION_SOURCE_TOPIC_PROPERTY.equals(key);
     }
 }

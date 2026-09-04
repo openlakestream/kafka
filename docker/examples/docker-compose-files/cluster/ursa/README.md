@@ -182,10 +182,11 @@ SELECT count(*) FROM lakehouse.default."ursa-lakehouse-e2e";
 ```
 
 The stream behind it is named `<topic>-topic-id-<uuid>`, because Kafka lets a deleted topic be
-recreated under the same name and the two incarnations must not share a log. The table drops that
-suffix — `tableNameTemplate` in the compactor's config names it from the topic instead — so queries,
-views and dashboards keep working across a topic's lifetimes. The flip side is that a topic recreated
-under the same name appends to the existing table; drop the table first when that is not wanted.
+recreated under the same name and the two incarnations must not share a log. Kafka records the
+logical topic name as system-owned stream metadata, and Ursa automatically uses it as the default
+external table name. No `tableNameTemplate` setting is required. Queries, views and dashboards
+therefore keep working across a topic's lifetimes. The flip side is that a topic recreated under the
+same name appends to the existing table; drop the table first when that is not wanted.
 
 Polaris intentionally uses its in-memory development metastore and static MinIO credentials. It suits a reproducible local run, not a durable or production catalog. DuckDB is on demand rather than a resident server; use Trino instead when a shared JDBC/HTTP query endpoint is a requirement. All published ports bind to `127.0.0.1` because the stack uses fixed development credentials.
 

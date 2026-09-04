@@ -755,9 +755,15 @@ For topic ID `<uuid>`, Kafka derives the topic-level `StreamIdentifier`
 per Kafka partition, in partition-index order. Kafka opens data-plane logs only through
 `StreamCatalog.openLog(StreamIdentifier, LogId)`; it does not derive partition-log names.
 
-Kafka also stores the stable logical topic name in the topic-level stream property
-`lakestream.kafka.topic.name`. Ursa materialization uses that value for Schema Registry subjects;
-it must not infer the logical topic from the UUID-qualified StreamIdentifier name.
+Kafka also stores the stable logical topic name in system-owned stream properties
+`lakestream.source.logical.name` and `lakestream.kafka.topic.name`. Ursa uses that value for Schema
+Registry subjects and as the default SDT table name; users do not configure either property or a
+`tableNameTemplate`. Kafka discards caller-supplied source-metadata and internal materialization
+values and writes the authoritative source metadata itself. Materialization must not infer the
+logical topic from the UUID-qualified StreamIdentifier
+name. An explicit SDT `tableIdentifier` or naming template still takes precedence. This SDT name
+never replaces the incarnation-qualified identity used for SBT Compacted Objects, partition layout,
+or Oxia indexes; when SBT and SDT are both enabled they are independent outputs from one source read.
 
 The Ursa compactor uses these incarnation-qualified StreamIdentifiers and their committed layout
 LogIds; there is no Kafka-side compaction-task publisher or cache. The catalog's Oxia keys, stream-ID mappings,

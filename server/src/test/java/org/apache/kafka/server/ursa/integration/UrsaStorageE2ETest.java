@@ -711,6 +711,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
                 setTopicConfig(admin, topicResource, TopicConfig.RETENTION_MS_CONFIG, "60000");
                 waitForUrsaTopicConfig(topicIdPartition, Map.of(
                         IsolatedUrsaCatalogInspector.kafkaManagedProperty(cluster), "true",
+                        IsolatedUrsaCatalogInspector.sourceLogicalNameProperty(cluster), topicName,
                         IsolatedUrsaCatalogInspector.kafkaTopicNameProperty(cluster), topicName,
                         IsolatedUrsaCatalogInspector.kafkaTopicIdProperty(cluster), topicId.toString(),
                         TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true",
@@ -719,6 +720,7 @@ public class UrsaStorageE2ETest extends UrsaStorageE2ETestBase {
                 setTopicConfig(admin, topicResource, TopicConfig.RETENTION_BYTES_CONFIG, "1048576");
                 waitForUrsaTopicConfig(topicIdPartition, Map.of(
                         IsolatedUrsaCatalogInspector.kafkaManagedProperty(cluster), "true",
+                        IsolatedUrsaCatalogInspector.sourceLogicalNameProperty(cluster), topicName,
                         IsolatedUrsaCatalogInspector.kafkaTopicNameProperty(cluster), topicName,
                         IsolatedUrsaCatalogInspector.kafkaTopicIdProperty(cluster), topicId.toString(),
                         TopicConfig.URSA_STORAGE_ENABLE_CONFIG, "true",
