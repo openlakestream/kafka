@@ -141,7 +141,7 @@ if [[ ${gradle_status} -ne 0 ]]; then
     exit "${gradle_status}"
 fi
 
-TARBALL=$(find "${PROJECT_ROOT}/core/build/distributions" -name "kafka_2.13-*.tgz" | head -1)
+TARBALL=$(find "${PROJECT_ROOT}/core/build/distributions" -name "kafka_2.13-*.tgz" -not -name "*-site-docs.tgz" | head -1)
 if [ -z "$TARBALL" ]; then
     echo "ERROR: Could not find kafka tarball in core/build/distributions/"
     exit 1
