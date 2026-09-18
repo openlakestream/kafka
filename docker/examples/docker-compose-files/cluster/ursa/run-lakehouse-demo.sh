@@ -20,7 +20,6 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 compose_file="$here/docker-compose.yml"
 project="${COMPOSE_PROJECT_NAME:-kafka-ursa}"
 kafka_image="${IMAGE:-lakestream/kafka:latest}"
-compactor_image="${COMPACTOR_IMAGE:-lakestream/compactor:latest}"
 num_records="${NUM_RECORDS:-100}"
 passed=false
 
@@ -52,13 +51,11 @@ compose_all() {
     --profile lakehouse-demo --profile tools "$@"
 }
 
-for image in "$kafka_image" "$compactor_image"; do
-  if ! docker image inspect "$image" >/dev/null 2>&1; then
-    echo "Required local image is missing: $image" >&2
-    echo "Run ./build-images.sh first." >&2
-    exit 2
-  fi
-done
+if ! docker image inspect "$kafka_image" >/dev/null 2>&1; then
+  echo "Required local image is missing: $kafka_image" >&2
+  echo "Run ./build-image.sh first." >&2
+  exit 2
+fi
 
 existing_containers="$(compose_all ps -aq)"
 existing_volumes="$(docker volume ls \

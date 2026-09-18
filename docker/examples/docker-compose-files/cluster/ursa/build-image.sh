@@ -25,6 +25,8 @@
 #   ./build-image.sh myrepo/kafka-ursa:v1     # Builds with custom name
 #   ./build-image.sh --amd64                  # Builds linux/amd64 image (x86_64)
 #   ./build-image.sh --platform linux/amd64   # Same as --amd64
+#   ./build-image.sh --push --platform linux/amd64,linux/arm64 lakestream/kafka:4.3.1.1
+#                                             # Multi-arch build via buildx, pushed to the registry
 #
 # Environment:
 #   GRADLE_ARGS   Extra arguments for the release build, e.g. GRADLE_ARGS=--offline
@@ -44,6 +46,7 @@ Usage:
 Options:
   --platform <platform>  Target platform (e.g. linux/amd64, linux/arm64)
   --amd64                Alias for --platform linux/amd64 (x86_64)
+  --push                 Build with buildx and push (multi-platform ok, image is not loaded locally)
   -h, --help              Show this help
 
 Environment:
@@ -59,6 +62,7 @@ EOF
 }
 
 PLATFORM=""
+PUSH="false"
 IMAGE_NAME="${IMAGE:-lakestream/kafka:latest}"
 IMAGE_NAME_SET="false"
 
@@ -79,6 +83,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --amd64|--x86_64)
             PLATFORM="linux/amd64"
+            shift
+            ;;
+        --push)
+            PUSH="true"
             shift
             ;;
         --*)
@@ -150,14 +158,27 @@ cp "${SCRIPT_DIR}/Dockerfile" "${BUILD_CONTEXT}/Dockerfile"
 cp -r "${DOCKER_DIR}/resources" "${BUILD_CONTEXT}/resources"
 cp -r "${DOCKER_DIR}/jvm" "${BUILD_CONTEXT}/jvm"
 cp "${DOCKER_DIR}/server.properties" "${BUILD_CONTEXT}/server.properties"
+cp "${SCRIPT_DIR}/ursa-compactor.sh" "${BUILD_CONTEXT}/ursa-compactor.sh"
+
+# The bundled compactor must match the ursa-storage runtime shipped in the tarball.
+URSA_STORAGE_VERSION=$(tar tzf "${TARBALL}" | sed -n 's#.*/ursa-storage/ursa-storage-core-\(.*\)\.jar$#\1#p' | head -1)
+if [ -z "${URSA_STORAGE_VERSION}" ]; then
+    echo "ERROR: Could not detect ursa-storage version from ${TARBALL}"
+    exit 1
+fi
+echo "Ursa storage version: ${URSA_STORAGE_VERSION}"
 
 echo ""
 echo "[3/3] Building Docker image..."
-DOCKER_BUILD_ARGS=(
-    docker build
+DOCKER_BUILD_ARGS=(docker build)
+if [[ "${PUSH}" == "true" ]]; then
+    DOCKER_BUILD_ARGS=(docker buildx build --push)
+fi
+DOCKER_BUILD_ARGS+=(
     -f "${BUILD_CONTEXT}/Dockerfile"
     -t "${IMAGE_NAME}"
     --build-arg "build_date=$(date +%Y-%m-%d)"
+    --build-arg "URSA_STORAGE_VERSION=${URSA_STORAGE_VERSION}"
 )
 if [[ -n "${PLATFORM}" ]]; then
     DOCKER_BUILD_ARGS+=(--platform "${PLATFORM}")

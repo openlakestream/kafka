@@ -276,7 +276,7 @@ services:
   # `lakehouse` adds Polaris and, with URSA_MATERIALIZATION_ENABLED=true, the
   # external Iceberg table on top of the compacted objects Kafka already reads.
   compactor:
-    image: ${COMPACTOR_IMAGE:-lakestream/compactor:latest}
+    image: ${IMAGE:-lakestream/kafka:latest}
     hostname: compactor
     restart: unless-stopped
     depends_on:

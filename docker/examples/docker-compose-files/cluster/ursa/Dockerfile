@@ -13,6 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Standalone Ursa compactor classpath, resolved from Maven Central. It lives in
+# its own directory and is only used by /opt/kafka/bin/ursa-compactor.sh; the
+# broker never sees it. Jars are platform-independent, so resolve on the build host.
+FROM --platform=$BUILDPLATFORM maven:3.9-eclipse-temurin-17 AS compactor-deps
+ARG URSA_STORAGE_VERSION=1.0.0
+WORKDIR /build
+RUN printf '%s\n' \
+      '<project xmlns="http://maven.apache.org/POM/4.0.0">' \
+      '  <modelVersion>4.0.0</modelVersion>' \
+      '  <groupId>local</groupId><artifactId>compactor-deps</artifactId><version>0</version>' \
+      '  <dependencies><dependency>' \
+      '    <groupId>org.openlakestream</groupId>' \
+      '    <artifactId>ursa-storage-compact</artifactId>' \
+      "    <version>${URSA_STORAGE_VERSION}</version>" \
+      '  </dependency></dependencies>' \
+      '</project>' > pom.xml \
+    && mvn -B -ntp dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=/ursa-compactor
+
 FROM eclipse-temurin:21-jre-alpine
 
 EXPOSE 9092
@@ -47,6 +65,8 @@ RUN mkdir -p /opt/kafka && \
 COPY --chown=appuser:appuser resources/common-scripts /etc/kafka/docker
 COPY --chown=appuser:appuser jvm/launch /etc/kafka/docker/launch
 COPY server.properties /etc/kafka/docker/server.properties
+COPY --from=compactor-deps --chown=appuser:appuser /ursa-compactor /opt/kafka/ursa-compactor
+COPY --chown=appuser:appuser ursa-compactor.sh /opt/kafka/bin/ursa-compactor.sh
 
 USER appuser
 
