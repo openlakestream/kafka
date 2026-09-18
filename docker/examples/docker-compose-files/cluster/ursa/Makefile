@@ -36,7 +36,6 @@ help:
 	@echo "Diskless Storage Demo Commands:"
 	@echo ""
 	@echo "  make build-images     - Build the Kafka and Ursa compactor images"
-	@echo "                          (URSA_STORAGE_DIR=/path/to/ursa-storage)"
 	@echo "  make up               - Start the core cluster (Oxia, MinIO, 3 brokers,"
 	@echo "                          compactor); needs both locally built images"
 	@echo "  make down             - Stop all services"
@@ -61,7 +60,7 @@ help:
 
 .PHONY: build-images
 build-images:
-	URSA_STORAGE_DIR="$(URSA_STORAGE_DIR)" ./build-images.sh
+	./build-images.sh
 
 .PHONY: up
 up:

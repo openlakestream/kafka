@@ -79,7 +79,6 @@ Classic local-log ingestion is not part of this diskless demo and will use a sep
 - Docker Compose >= 2.20 (the stack uses `depends_on: ... required: false`)
 - Python >= 3.7 (for building the Kafka image)
 - Java >= 17 (for building Kafka)
-- A local `ursa-storage` checkout (for the compactor image, which the core stack needs)
 
 ## Build the images
 
@@ -89,8 +88,8 @@ Two images are built locally, and the core stack needs both. Everything else is 
 cd docker/examples/docker-compose-files/cluster/ursa
 
 # Both images -> lakestream/kafka:latest and lakestream/compactor:latest
-URSA_STORAGE_DIR=/path/to/ursa-storage ./build-images.sh
-# or: make build-images URSA_STORAGE_DIR=/path/to/ursa-storage
+./build-images.sh
+# or: make build-images
 
 # Kafka broker image only -> lakestream/kafka:latest
 # Enough to rebuild the brokers against an existing compactor image.
@@ -103,9 +102,8 @@ Useful options:
 ./build-image.sh --amd64                 # linux/amd64 image (useful on Apple Silicon)
 ./build-image.sh myrepo/kafka:v1         # custom image name
 GRADLE_ARGS=--offline ./build-image.sh   # extra Gradle arguments
-MAVEN_ARGS=-o ./build-images.sh          # extra Maven arguments for the compactor
+URSA_STORAGE_VERSION=1.0.0 ./build-images.sh  # compactor version pulled from Maven Central
 SKIP_KAFKA_BUILD=true ./build-images.sh  # reuse the existing Kafka image
-SKIP_URSA_BUILD=true ./build-images.sh   # reuse the existing compactor package
 ```
 
 ## Quick start
@@ -443,7 +441,7 @@ docker compose logs minio
 It is not part of the default stack. Enable the `lakehouse` profile and make sure the locally built image exists:
 
 ```bash
-URSA_STORAGE_DIR=/path/to/ursa-storage ./build-images.sh
+./build-images.sh
 docker compose --profile lakehouse up -d
 make compaction-logs
 ```

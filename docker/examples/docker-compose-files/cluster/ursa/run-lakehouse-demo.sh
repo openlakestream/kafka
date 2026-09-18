@@ -55,7 +55,7 @@ compose_all() {
 for image in "$kafka_image" "$compactor_image"; do
   if ! docker image inspect "$image" >/dev/null 2>&1; then
     echo "Required local image is missing: $image" >&2
-    echo "Run URSA_STORAGE_DIR=/path/to/ursa-storage ./build-images.sh first." >&2
+    echo "Run ./build-images.sh first." >&2
     exit 2
   fi
 done

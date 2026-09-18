@@ -123,5 +123,5 @@ exec java ${URSA_JAVA_OPTS:--Xmx1024M -XX:+UseZGC} \
   -Dio.netty.tryReflectionSetAccessible=true \
   -Djava.net.preferIPv4Stack=true \
   -Dlog4j.configurationFile=/opt/ursa-demo/log4j2.properties \
-  -cp '/opt/ursa/ursa-storage-compact.jar:/opt/ursa/lib/*' \
+  -cp '/opt/ursa/lib/*' \
   io.lakestream.ursa.compact.CompactionMain --conf "$config_file"

@@ -34,9 +34,6 @@ on:
         default: true
         type: boolean
 
-env:
-  URSA_STORAGE_REF: main
-
 jobs:
   configure:
     runs-on: ubuntu-latest
@@ -135,32 +132,6 @@ jobs:
         shell: bash
         run: pip install --dry-run ./tests
 
-      # Install ursa-storage artifacts into mavenLocal so :storage can resolve
-      - name: Checkout ursa-storage
-        uses: actions/checkout@v5
-        with:
-          repository: lakestream-io/ursa-storage
-          ref: ${{ env.URSA_STORAGE_REF }}
-          path: ursa-storage
-          persist-credentials: false
-
-      - name: Setup Java (for ursa-storage build)
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 17
-          cache: maven
-          cache-dependency-path: 'ursa-storage/**/pom.xml'
-
-      - name: Install ursa-storage into Maven Local
-        working-directory: ursa-storage
-        run: mvn -ntp -B -DskipTests install -U
-
-      # Ensure the checked-out ursa-storage source tree does not affect Rat/license checks
-      # executed as part of the Gradle build in this repo.
-      - name: Remove ursa-storage source tree
-        run: rm -rf ursa-storage
-
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
         with:
@@ -238,32 +209,6 @@ jobs:
           ref: ${{ needs.configure.outputs.sha }}
       - name: Setup Python
         uses: ./.github/actions/setup-python
-
-      # Install ursa-storage artifacts into mavenLocal so tests can resolve
-      - name: Checkout ursa-storage
-        uses: actions/checkout@v5
-        with:
-          repository: lakestream-io/ursa-storage
-          ref: ${{ env.URSA_STORAGE_REF }}
-          path: ursa-storage
-          persist-credentials: false
-
-      - name: Setup Java (for ursa-storage build)
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 17
-          cache: maven
-          cache-dependency-path: 'ursa-storage/**/pom.xml'
-
-      - name: Install ursa-storage into Maven Local
-        working-directory: ursa-storage
-        run: mvn -ntp -B -DskipTests install -U
-
-      # Ensure the checked-out ursa-storage source tree does not affect Rat/license checks
-      # executed as part of the Gradle build in this repo.
-      - name: Remove ursa-storage source tree
-        run: rm -rf ursa-storage
 
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
@@ -352,32 +297,6 @@ jobs:
           ref: ${{ needs.configure.outputs.sha }}
       - name: Setup Python
         uses: ./.github/actions/setup-python
-
-      # Install ursa-storage artifacts into mavenLocal so tests can resolve
-      - name: Checkout ursa-storage
-        uses: actions/checkout@v5
-        with:
-          repository: lakestream-io/ursa-storage
-          ref: ${{ env.URSA_STORAGE_REF }}
-          path: ursa-storage
-          persist-credentials: false
-
-      - name: Setup Java (for ursa-storage build)
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 17
-          cache: maven
-          cache-dependency-path: 'ursa-storage/**/pom.xml'
-
-      - name: Install ursa-storage into Maven Local
-        working-directory: ursa-storage
-        run: mvn -ntp -B -DskipTests install -U
-
-      # Ensure the checked-out ursa-storage source tree does not affect Rat/license checks
-      # executed as part of the Gradle build in this repo.
-      - name: Remove ursa-storage source tree
-        run: rm -rf ursa-storage
 
       - name: Setup Gradle
         uses: ./.github/actions/setup-gradle
