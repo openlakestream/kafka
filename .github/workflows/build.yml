@@ -74,8 +74,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # This fork has no test-catalog branch; keep the job green so downstream jobs still run.
       - name: Checkout test-catalog
+        id: checkout-test-catalog
         uses: actions/checkout@v5
+        continue-on-error: true
         with:
           ref: 'test-catalog'
           persist-credentials: false
@@ -83,7 +86,7 @@ jobs:
           path: test-catalog
 
       - name: Checkout catalog at earlier date
-        if: ${{ needs.configure.outputs.test-catalog-days != '0' }}
+        if: ${{ steps.checkout-test-catalog.outcome == 'success' && needs.configure.outputs.test-catalog-days != '0' }}
         env:
           DAYS: ${{ needs.configure.outputs.test-catalog-days }}
         run: |
