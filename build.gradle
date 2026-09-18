@@ -119,12 +119,12 @@ ext {
   // These dependencies significantly slow down ClassGraph.scan() during plugin discovery
   // and are not needed for most integration tests.
   excludeUrsaStorageDeps = { configuration ->
-    configuration.exclude group: 'io.lakestream', module: 'ursa-storage-core'
-    configuration.exclude group: 'io.lakestream', module: 'ursa-storage-common'
-    configuration.exclude group: 'io.lakestream', module: 'ursa-storage-lakehouse-kafka-reader'
-    configuration.exclude group: 'io.lakestream', module: 'ursa-storage-kafka-runtime'
-    configuration.exclude group: 'io.lakestream', module: 'ursa-storage-lakestream'
-    configuration.exclude group: 'io.lakestream', module: 'lakestream-api'
+    configuration.exclude group: 'org.openlakestream', module: 'ursa-storage-core'
+    configuration.exclude group: 'org.openlakestream', module: 'ursa-storage-common'
+    configuration.exclude group: 'org.openlakestream', module: 'ursa-storage-lakehouse-kafka-reader'
+    configuration.exclude group: 'org.openlakestream', module: 'ursa-storage-kafka-runtime'
+    configuration.exclude group: 'org.openlakestream', module: 'ursa-storage-lakestream'
+    configuration.exclude group: 'org.openlakestream', module: 'lakestream-api'
     configuration.exclude group: 'io.github.oxia-db', module: 'oxia-testcontainers'
     configuration.exclude group: 'io.github.oxia-db', module: 'oxia-client-api'
     configuration.exclude group: 'io.github.oxia-db', module: 'oxia-client'
@@ -188,13 +188,6 @@ ext {
 allprojects {
 
   repositories {
-    mavenLocal {
-      // SpotBugs publishes a POM-packaged module alongside its executable JAR. If a local
-      // Maven repository contains only the POM, Gradle can omit the engine JAR.
-      content {
-        excludeGroup 'com.github.spotbugs'
-      }
-    }
     mavenCentral()
   }
 
@@ -1097,7 +1090,7 @@ project(':server') {
     testImplementation project(':storage:storage-api').sourceSets.test.output
     testImplementation project(':server-common').sourceSets.test.output
     testImplementation 'io.github.oxia-db:oxia-testcontainers:0.7.4'
-    testImplementation platform("io.lakestream:ursa-storage:$ursaStorageVersion")
+    testImplementation platform("org.openlakestream:ursa-storage:$ursaStorageVersion")
     testImplementation 'io.github.oxia-db:oxia-client-api'
     testRuntimeOnly 'io.github.oxia-db:oxia-client'
     testImplementation 'org.testcontainers:testcontainers:1.21.4'
@@ -1163,7 +1156,7 @@ def createIsolatedUrsaRuntimeClasspath = { Project runtimeProject, List<String> 
 
   runtimeProject.dependencies.add(
     runtimeConfiguration.name,
-    runtimeProject.dependencies.enforcedPlatform("io.lakestream:ursa-storage:$ursaStorageVersion")
+    runtimeProject.dependencies.enforcedPlatform("org.openlakestream:ursa-storage:$ursaStorageVersion")
   )
   runtimeDependencies.each { runtimeDependency ->
     runtimeProject.dependencies.add(runtimeConfiguration.name, runtimeDependency) {
@@ -1177,7 +1170,7 @@ def createIsolatedUrsaRuntimeClasspath = { Project runtimeProject, List<String> 
 
 def storageDisklessUrsaRuntimeClasspath = createIsolatedUrsaRuntimeClasspath(
   project(':storage:storage-diskless-ursa'),
-  ["io.lakestream:ursa-storage-kafka-runtime:$ursaStorageVersion"]
+  ["org.openlakestream:ursa-storage-kafka-runtime:$ursaStorageVersion"]
 )
 
 def kafkaRuntimeProvidedJarPatterns = [
@@ -1227,7 +1220,7 @@ def isolatedUrsaRuntimeFileNames = providers.provider {
   storageDisklessUrsaRuntimeClasspath.incoming.artifacts.artifacts.findAll { artifact ->
     def component = artifact.id.componentIdentifier
     component instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier
-        && (component.group == 'io.lakestream' || component.group == 'io.github.oxia-db')
+        && (component.group == 'org.openlakestream' || component.group == 'io.github.oxia-db')
   }.collect { artifact -> artifact.file.name }.toSet()
 }
 
@@ -2713,7 +2706,7 @@ project(':storage:storage-diskless-ursa') {
   }
 
   dependencies {
-    implementation platform("io.lakestream:ursa-storage:$ursaStorageVersion")
+    implementation platform("org.openlakestream:ursa-storage:$ursaStorageVersion")
     implementation project(':clients')
     implementation project(':server-common')
     implementation project(':storage')
@@ -2722,8 +2715,8 @@ project(':storage:storage-diskless-ursa') {
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation libs.metrics
     implementation libs.slf4jApi
-    implementation "io.lakestream:lakestream-api:$ursaStorageVersion"
-    runtimeOnly("io.lakestream:ursa-storage-kafka-runtime:$ursaStorageVersion") {
+    implementation "org.openlakestream:lakestream-api:$ursaStorageVersion"
+    runtimeOnly("org.openlakestream:ursa-storage-kafka-runtime:$ursaStorageVersion") {
       // Reuse the project's Kafka client classes to avoid version conflicts.
       exclude group: 'org.apache.kafka', module: 'kafka-clients'
       // Kafka still uses SLF4J 1.7; the SLF4J 2.x Log4j bridge requires SLF4JServiceProvider.

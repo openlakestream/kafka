@@ -142,8 +142,8 @@ compactor plus an Iceberg catalog:
 ```bash
 cd docker/examples/docker-compose-files/cluster/ursa
 
-# Both images: the broker, and the compactor built from a local ursa-storage checkout
-URSA_STORAGE_DIR=/path/to/ursa-storage ./build-images.sh
+# Both images: the broker, and the compactor (ursa-storage-compact from Maven Central)
+./build-images.sh
 
 make up                 # Oxia + MinIO + 3 brokers + compactor
 make create-topic       # create a diskless topic
@@ -258,8 +258,7 @@ the full set of live brokers when no in-zone broker is available. Clients need n
 
 ## Building from source
 
-You need JDK 17 and the `io.lakestream:ursa-storage` artifacts in your local Maven repository (build them from
-[lakestream-io/ursa-storage](https://github.com/lakestream-io/ursa-storage) with `mvn -DskipTests install`).
+You need JDK 17. The `org.openlakestream:ursa-storage` artifacts are resolved from Maven Central.
 
 ```bash
 ./gradlew jar                                  # build
