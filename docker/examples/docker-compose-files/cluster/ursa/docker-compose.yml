@@ -107,7 +107,7 @@ services:
       retries: 20
 
   minio:
-    image: ${MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    image: ${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
     hostname: minio
     command: ["server", "/data", "--console-address", ":9001"]
     ports:
@@ -125,7 +125,7 @@ services:
       retries: 20
 
   minio-init:
-    image: ${MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-04-16T18-13-26Z}
+    image: ${MINIO_MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z}
     depends_on:
       minio:
         condition: service_healthy
@@ -624,7 +624,7 @@ services:
 
   # Wait until the compactor has written managed Parquet objects to MinIO.
   wait-for-parquet:
-    image: ${MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-04-16T18-13-26Z}
+    image: ${MINIO_MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z}
     profiles: ["lakehouse-demo"]
     restart: "no"
     depends_on:

@@ -73,7 +73,7 @@ else
     echo "" >&2
     
     # Try to exec mc from a temporary container
-    BEARER_TOKEN=$(docker run --rm --network container:minio minio/mc:latest \
+    BEARER_TOKEN=$(docker run --rm --network container:minio quay.io/minio/mc:latest \
         sh -c "mc alias set local http://localhost:9000 $MINIO_USER $MINIO_PASS >/dev/null 2>&1 && \
                mc admin prometheus generate local 2>/dev/null" 2>/dev/null | \
         grep -oP 'bearer_token:\s*\K\S+' || echo "")
@@ -85,7 +85,7 @@ else
         echo "Error: Could not generate bearer token for metrics access" >&2
         echo "" >&2
         echo "Try using the MinIO Client (mc) directly:" >&2
-        echo "  docker run --rm --network host minio/mc:latest admin prometheus generate local" >&2
+        echo "  docker run --rm --network host quay.io/minio/mc:latest admin prometheus generate local" >&2
         exit 1
     fi
 fi
