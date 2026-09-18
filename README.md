@@ -142,8 +142,8 @@ compactor plus an Iceberg catalog:
 ```bash
 cd docker/examples/docker-compose-files/cluster/ursa
 
-# Both images: the broker, and the compactor (ursa-storage-compact from Maven Central)
-./build-images.sh
+# One image: brokers, CLI and the Ursa compactor (ursa-storage-compact from Maven Central)
+./build-image.sh
 
 make up                 # Oxia + MinIO + 3 brokers + compactor
 make create-topic       # create a diskless topic

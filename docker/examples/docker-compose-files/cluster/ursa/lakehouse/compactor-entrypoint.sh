@@ -119,9 +119,5 @@ else
   property materializationEnabled false
 fi
 
-exec java ${URSA_JAVA_OPTS:--Xmx1024M -XX:+UseZGC} \
-  -Dio.netty.tryReflectionSetAccessible=true \
-  -Djava.net.preferIPv4Stack=true \
-  -Dlog4j.configurationFile=/opt/ursa-demo/log4j2.properties \
-  -cp '/opt/ursa/lib/*' \
-  io.lakestream.ursa.compact.CompactionMain --conf "$config_file"
+export URSA_JAVA_OPTS="${URSA_JAVA_OPTS:--Xmx1024M -XX:+UseZGC} -Dlog4j.configurationFile=/opt/ursa-demo/log4j2.properties"
+exec /opt/kafka/bin/ursa-compactor.sh --conf "$config_file"

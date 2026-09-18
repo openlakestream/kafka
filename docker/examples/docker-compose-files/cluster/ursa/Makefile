@@ -35,9 +35,9 @@ PARTITIONS ?= 12
 help:
 	@echo "Diskless Storage Demo Commands:"
 	@echo ""
-	@echo "  make build-images     - Build the Kafka and Ursa compactor images"
+	@echo "  make build-image      - Build the Kafka image (brokers, CLI and Ursa compactor)"
 	@echo "  make up               - Start the core cluster (Oxia, MinIO, 3 brokers,"
-	@echo "                          compactor); needs both locally built images"
+	@echo "                          compactor); needs the locally built image"
 	@echo "  make down             - Stop all services"
 	@echo "  make destroy          - Stop all services and remove volumes"
 	@echo "  make logs             - Follow kafka-1 logs"
@@ -58,9 +58,9 @@ help:
 	@echo "  make compaction-logs  - Follow compactor logs"
 	@echo ""
 
-.PHONY: build-images
-build-images:
-	./build-images.sh
+.PHONY: build-image
+build-image:
+	./build-image.sh
 
 .PHONY: up
 up:

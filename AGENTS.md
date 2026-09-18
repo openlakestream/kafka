@@ -167,8 +167,7 @@ A single `docker-compose.yml` holds everything. `docker compose up` starts the c
 
 ```bash
 cd docker/examples/docker-compose-files/cluster/ursa
-./build-image.sh          # Build lakestream/kafka:latest
-URSA_STORAGE_DIR=/path/to/ursa-storage ./build-images.sh  # + lakestream/compactor:latest
+./build-image.sh          # Build lakestream/kafka:latest (brokers, CLI and Ursa compactor)
 make up                   # Core cluster: Oxia + MinIO + 3 brokers
 make create-topic         # Create diskless topic
 make demo                 # Profile `demo`: perf producers + consumer, torn down on exit
@@ -176,7 +175,7 @@ make lakehouse-demo       # Profiles `lakehouse` + `lakehouse-demo`: Kafka -> Ic
 make destroy              # Tear down every profile and remove volumes
 ```
 
-Architecture: 3 Kafka brokers + Oxia (metadata) + MinIO (S3 storage), plus Polaris (Iceberg catalog) and the Ursa compactor under the `lakehouse` profile. Only that profile needs the locally built compactor image. Ports (all bound to 127.0.0.1): kafka-1:29092, kafka-2:39092, kafka-3:49092, oxia:6648, minio:19000/19001, polaris:18181/18182.
+Architecture: 3 Kafka brokers + Oxia (metadata) + MinIO (S3 storage), plus the Ursa compactor (same image as the brokers), and Polaris (Iceberg catalog) under the `lakehouse` profile. Ports (all bound to 127.0.0.1): kafka-1:29092, kafka-2:39092, kafka-3:49092, oxia:6648, minio:19000/19001, polaris:18181/18182.
 
 ## Upstream Compatibility
 
