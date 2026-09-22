@@ -35,7 +35,7 @@ on:
 
 jobs:
   release:
-    if: github.repository == 'lakestream-io/kafka'
+    if: github.repository == 'openlakestream/kafka'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

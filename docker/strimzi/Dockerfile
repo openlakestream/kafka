@@ -64,8 +64,8 @@ ARG build_date
 LABEL org.label-schema.name="lakestream/kafka-strimzi" \
       org.label-schema.description="Apache Kafka ${KAFKA_VERSION} with Diskless/Ursa Storage, Strimzi ${STRIMZI_VERSION} image layout" \
       org.label-schema.build-date="${build_date}" \
-      org.label-schema.vcs-url="https://github.com/lakestream-io/kafka" \
-      org.opencontainers.image.source="https://github.com/lakestream-io/kafka"
+      org.label-schema.vcs-url="https://github.com/openlakestream/kafka" \
+      org.opencontainers.image.source="https://github.com/openlakestream/kafka"
 
 ENV KAFKA_VERSION=${KAFKA_VERSION}
 

@@ -21,7 +21,7 @@
 - *Proposal time*: 2026-01
 - *Implemented*: YES
 - *Released*: NO
-- *Repository*: https://github.com/lakestream-io/kafka
+- *Repository*: https://github.com/openlakestream/kafka
 - *Discussion Link*: N/A
 
 ## TL;DR
