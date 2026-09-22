@@ -24,7 +24,8 @@ image; see [Compactor](#compactor) below.
 
 Tags follow Strimzi's convention: `lakestream/kafka-strimzi:<strimzi>-kafka-<kafka>`,
 for example `lakestream/kafka-strimzi:1.2.0-kafka-4.3.1.1`. Every `vX.Y.Z.W` release
-tag publishes this image next to `lakestream/kafka:X.Y.Z.W`
+tag publishes this image next to `lakestream/kafka:X.Y.Z.W`, and both are also
+pushed as `latest` for final releases (versions without a `-rc1`-style suffix)
 (`.github/workflows/release_docker_image.yml`).
 
 Building
