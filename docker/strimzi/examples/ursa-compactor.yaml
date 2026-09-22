@@ -68,10 +68,15 @@ data:
     managedTableSchemaEvolutionEnabled=true
     metastoreRequestRateLimitPerSecond=500
 
-    # Compaction only; set materializationEnabled=true plus the Iceberg catalog
-    # settings (see docker/examples/.../lakehouse/compactor-entrypoint.sh) to
-    # also register external Iceberg tables.
-    materializationEnabled=false
+    # Keep this on. Without lakehouseType and catalog settings the stream
+    # materialization framework registers no table catalog and compaction is
+    # storage-only (compacted objects, no Iceberg table). Add lakehouseType=ICEBERG
+    # and the iceberg.catalog.* settings (see
+    # docker/examples/.../lakehouse/compactor-entrypoint.sh) to also write external
+    # Iceberg tables. materializationEnabled=false selects a legacy path that fails
+    # on Ursa 1.0.0 with "Unsupported lakehouse type: NONE", quarantines every
+    # partition and never reclaims WAL objects.
+    materializationEnabled=true
   log4j2.properties: |
     status = warn
     name = UrsaCompactor

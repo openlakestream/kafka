@@ -99,12 +99,21 @@ same Oxia service and bucket as the brokers. It never connects to Kafka.
 - Instances elect a leader through Oxia; the leader publishes tasks and runs the
   WAL cleaner, all instances run workers. One replica is enough to start, more
   add throughput.
-- Set `materializationEnabled=true` plus the Iceberg catalog settings to also
-  write external Iceberg tables; the compose stack's
-  `lakehouse/compactor-entrypoint.sh` lists them.
+- Keep `materializationEnabled=true`. Without `lakehouseType` and catalog settings
+  the compactor registers no table catalog and compaction is storage-only; add
+  `lakehouseType=ICEBERG` plus the `iceberg.catalog.*` settings to also write
+  external Iceberg tables (the compose stack's `lakehouse/compactor-entrypoint.sh`
+  lists them). `materializationEnabled=false` selects a legacy path that fails on
+  Ursa 1.0.0 with `Unsupported lakehouse type: NONE` and never reclaims WAL objects.
 
 Known limitation: broker scale-down
 -----------------------------------
+
+Strimzi validates `default.replication.factor`, `offsets.topic.replication.factor`
+and `transaction.state.log.replication.factor` against the broker count first;
+lower them from the example's `3` before shrinking the pool below three brokers,
+or the `Kafka` resource goes `NotReady` with an `InvalidResourceException` and the
+check below never runs.
 
 Before removing a broker, Strimzi refuses if the broker still holds partition
 replicas. Diskless partitions report their current owner as their single replica,
