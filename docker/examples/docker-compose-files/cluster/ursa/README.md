@@ -98,7 +98,11 @@ Useful options:
 ./build-image.sh --amd64                 # linux/amd64 image (useful on Apple Silicon)
 ./build-image.sh myrepo/kafka:v1         # custom image name
 GRADLE_ARGS=--offline ./build-image.sh   # extra Gradle arguments
+./build-image.sh --tarball ../../../../../core/build/distributions/kafka_2.13-4.3.1.1.tgz
+                                         # reuse a tarball instead of rebuilding it
 ```
+
+For clusters managed by the Strimzi operator, `docker/strimzi/` builds a second image with the Strimzi layout from the same tarball.
 
 ## Quick start
 

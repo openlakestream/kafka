@@ -1,0 +1,145 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Ursa compactor for a Strimzi-managed diskless cluster.
+#
+# The compactor is not a Kafka broker, so Strimzi does not manage it. It is a
+# plain Deployment of the lakestream/kafka image (which bundles the standalone
+# compactor under /opt/kafka/bin/ursa-compactor.sh) that talks to the same Oxia
+# and S3 bucket as the brokers. It never talks to Kafka itself.
+#
+# Without a running compactor, retention on diskless topics only hides records:
+# WAL objects are deleted behind a watermark that compaction alone advances.
+#
+# Instances elect a leader through Oxia. The leader publishes compaction tasks
+# and runs the WAL cleaner; every instance runs compaction workers. Start with
+# one replica and raise it for throughput; there is no split-brain risk.
+#
+# Before applying:
+#   * Replace <KAFKA_VERSION> with the released version (same as the brokers).
+#   * Keep metadataStoreUrl, oxiaStorageUrl, bucket, prefix, compactionBucket and
+#     compactionPrefix identical to the brokers' ursa.* settings in
+#     kafka-diskless.yaml, or brokers and compactor will look at different data.
+#   * The ursa-s3-credentials Secret is the one kafka-diskless.yaml creates.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ursa-compactor
+data:
+  # Everything except credentials; those are appended from the Secret at start.
+  ursa-storage.properties: |
+    # Lakestream catalog, WAL metadata and compaction task coordination.
+    metadataStoreUrl=oxia://oxia.oxia.svc:6648/default
+    oxiaStorageUrl=oxia://oxia.oxia.svc:6648/default
+
+    # Ursa WAL written by the brokers.
+    backendStorageType=S3
+    bucket=kafka-ursa
+    prefix=ursa/wal
+    cloudStorageEndpoint=http://minio.minio.svc:9000
+    region=us-east-1
+    s3PathStyleAccess=true
+
+    # Managed compacted objects that Kafka fetch reads after compaction.
+    compactionBackendStorageType=S3
+    compactionBucket=kafka-ursa
+    compactionPrefix=ursa/compacted
+    compactionBucketRegion=us-east-1
+    hadoop.fs.s3a.endpoint=http://minio.minio.svc:9000
+    hadoop.fs.s3a.path.style.access=true
+    hadoop.fs.s3a.connection.ssl.enabled=false
+
+    # Diskless compaction-task ownership stays inside Ursa.
+    internalCompactionTaskPublisherEnabled=true
+    # Brokers refuse compacted entries without a per-file index.
+    managedTableSchemaEvolutionEnabled=true
+    metastoreRequestRateLimitPerSecond=500
+
+    # Compaction only; set materializationEnabled=true plus the Iceberg catalog
+    # settings (see docker/examples/.../lakehouse/compactor-entrypoint.sh) to
+    # also register external Iceberg tables.
+    materializationEnabled=false
+  log4j2.properties: |
+    status = warn
+    name = UrsaCompactor
+    appender.console.type = Console
+    appender.console.name = STDOUT
+    appender.console.target = SYSTEM_OUT
+    appender.console.layout.type = PatternLayout
+    appender.console.layout.pattern = %d{ISO8601} %-5p [%t] %c{1} - %m%n
+    rootLogger.level = info
+    rootLogger.appenderRef.stdout.ref = STDOUT
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ursa-compactor
+  labels:
+    app: ursa-compactor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ursa-compactor
+  template:
+    metadata:
+      labels:
+        app: ursa-compactor
+    spec:
+      containers:
+        - name: compactor
+          image: lakestream/kafka:<KAFKA_VERSION>
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              cp /etc/ursa/ursa-storage.properties /tmp/ursa-storage.properties
+              printf 's3AccessKeyId=%s\ns3SecretAccessKey=%s\n' \
+                "${AWS_ACCESS_KEY_ID}" "${AWS_SECRET_ACCESS_KEY}" >> /tmp/ursa-storage.properties
+              exec /opt/kafka/bin/ursa-compactor.sh --conf /tmp/ursa-storage.properties
+          env:
+            - name: URSA_JAVA_OPTS
+              value: "-Xmx2G -XX:+UseZGC -Dlog4j.configurationFile=/etc/ursa/log4j2.properties"
+            - name: OTEL_SDK_DISABLED
+              value: "true"
+            - name: AWS_REGION
+              value: us-east-1
+            - name: AWS_EC2_METADATA_DISABLED
+              value: "true"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ursa-s3-credentials
+                  key: accessKey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ursa-s3-credentials
+                  key: secretKey
+          resources:
+            requests:
+              cpu: "1"
+              memory: 3Gi
+            limits:
+              memory: 3Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ursa
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: ursa-compactor
