@@ -116,7 +116,11 @@ if [ "${URSA_MATERIALIZATION_ENABLED:-false}" = "true" ]; then
   property iceberg.catalog.polaris.s3.access-key-id "$AWS_ACCESS_KEY_ID"
   property iceberg.catalog.polaris.s3.secret-access-key "$AWS_SECRET_ACCESS_KEY"
 else
-  property materializationEnabled false
+  # Still on: with no lakehouseType the framework registers no table catalog and
+  # compaction is storage-only. materializationEnabled=false selects a legacy path
+  # that fails on Ursa 1.0.0 with "Unsupported lakehouse type: NONE" and never
+  # reclaims WAL objects.
+  property materializationEnabled true
 fi
 
 export URSA_JAVA_OPTS="${URSA_JAVA_OPTS:--Xmx1024M -XX:+UseZGC} -Dlog4j.configurationFile=/opt/ursa-demo/log4j2.properties"
