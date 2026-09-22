@@ -1,6 +1,6 @@
 # Diskless Kafka with a Built-in Lakehouse
 
-[![CI](https://github.com/lakestream-io/kafka/actions/workflows/ci.yml/badge.svg?branch=4.3-ursa&event=push)](https://github.com/lakestream-io/kafka/actions/workflows/ci.yml?query=event%3Apush+branch%3A4.3-ursa)
+[![CI](https://github.com/openlakestream/kafka/actions/workflows/ci.yml/badge.svg?branch=4.3-ursa&event=push)](https://github.com/openlakestream/kafka/actions/workflows/ci.yml?query=event%3Apush+branch%3A4.3-ursa)
 
 A fork of [Apache Kafka](https://github.com/apache/kafka) with two additions:
 

@@ -22,7 +22,7 @@
 - *Scope*: Diskless topics only
 - *Released*: NO
 - *Status*: Implemented
-- *Repository*: https://github.com/lakestream-io/kafka
+- *Repository*: https://github.com/openlakestream/kafka
 - *Discussion Link*: N/A
 
 ## TL;DR
