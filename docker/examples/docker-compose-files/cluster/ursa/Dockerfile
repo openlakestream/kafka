@@ -40,7 +40,7 @@ USER root
 ARG build_date
 
 LABEL org.label-schema.name="lakestream/kafka" \
-      org.label-schema.description="Apache Kafka with Diskless/Ursa Storage" \
+      org.label-schema.description="Ursa for Apache Kafka (UFK): a Kafka distribution built on the Lakestream API and specification" \
       org.label-schema.build-date="${build_date}" \
       org.label-schema.vcs-url="https://github.com/openlakestream/kafka"
 

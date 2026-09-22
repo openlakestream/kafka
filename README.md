@@ -1,17 +1,26 @@
-# Diskless Kafka with a Built-in Lakehouse
+# Ursa for Apache Kafka (UFK)
 
 [![CI](https://github.com/openlakestream/kafka/actions/workflows/ci.yml/badge.svg?branch=4.3-ursa&event=push)](https://github.com/openlakestream/kafka/actions/workflows/ci.yml?query=event%3Apush+branch%3A4.3-ursa)
 
-A fork of [Apache Kafka](https://github.com/apache/kafka) with two additions:
+This repository, `openlakestream/kafka`, is Ursa for Apache Kafka (UFK): a Kafka distribution built on the
+[Lakestream](https://openlakestream.org) API and specification. Diskless topics keep their records on object
+storage through [Ursa](https://github.com/openlakestream/ursa); every other topic stays Kafka. UFK is built on
+Apache Kafka 4.3.1, and its releases are published as the `lakestream/kafka` Docker image.
 
-- **Diskless Kafka.** Topics whose durability comes from object storage instead of broker disks. Brokers hold
+Lakestream is an open API and specification for stream storage on object storage, with a stream
+materialization framework that defines how a stream becomes a lakehouse table. Ursa implements it as a storage
+engine; UFK is a Kafka distribution built on it. Both are open source under Apache 2.0.
+
+UFK adds two things to Kafka:
+
+- **Diskless topics.** Topics whose durability comes from object storage instead of broker disks. Brokers hold
   no partition data, so failover moves no bytes, scaling is a CPU and network decision, and a zone-aware
   client never pays for cross-AZ replication.
-- **Data in the lakehouse.** The records those topics write are compacted into Parquet and registered as an
-  Iceberg table, queryable from DuckDB, Trino or Spark. No copy job, no Connect sink, no second retention
-  policy — Kafka consumers and SQL engines read the same bytes out of your own bucket.
+- **Lakehouse tables.** The compaction pass that consolidates those topics' write-ahead log can also
+  materialize an Iceberg table, queryable from DuckDB, Trino or Spark, with no copy job or Connect sink in
+  between. Kafka consumers keep reading the log; query engines read the table.
 
-Everything Apache Kafka does, this fork still does. Diskless storage is an additional, per-topic option, so a
+Classic topics behave as they do in Apache Kafka. Diskless storage is an additional, per-topic option, so a
 single cluster can serve latency-sensitive workloads on classic topics and cost-sensitive workloads on
 diskless topics at the same time.
 
@@ -25,16 +34,16 @@ diskless topics at the same time.
 | Broker state             | Stateful: partition data lives on the broker     | Stateless for record data                                              |
 | Failover                 | New leader must catch up on replicated data      | Any live broker can serve the partition immediately, no data movement  |
 | Elasticity               | Adding/removing brokers moves partition data     | Scale on CPU and network alone                                         |
-| Lakehouse                | –                                                | The same compacted Parquet can be registered as an Iceberg table       |
+| Lakehouse                | –                                                | The compaction pass can also materialize an Iceberg table              |
 
 Both modes share one controller quorum, one metadata log, one set of ACLs, one consumer-group coordinator,
 and the same client protocol. Consumer offsets stay in `__consumer_offsets`, which is always a classic topic.
 
-## Drop-in replacement
+## Compatibility
 
 - **Nothing changes until you turn it on.** `ursa.storage.enable` defaults to `false` on both the broker and
   the topic, so a stock configuration behaves exactly like the Apache Kafka release it is built from
-  (currently 4.3).
+  (Apache Kafka 4.3.1).
 - **No protocol changes.** Existing producers, consumers, Kafka Streams, Kafka Connect, admin clients, and the
   `bin/` tools work unmodified against diskless topics. Clients cannot tell the difference: the broker still
   reports a leader, still serves `Fetch` and `ListOffsets`, still enforces offsets and idempotent producer
@@ -95,9 +104,9 @@ Object storage       Oxia            Compaction
 
 ## From topic to lakehouse
 
-Records written to a diskless topic are compacted out of the WAL into Parquet and registered in an Iceberg
-REST catalog, so the same data is queryable by engines like DuckDB, Trino, or Spark without a copy job, a
-Connect sink, or a second retention policy.
+Records written to a diskless topic are compacted out of the WAL, and the same compaction pass can
+materialize them into an Iceberg table registered in an Iceberg REST catalog, queryable by engines like
+DuckDB, Trino, or Spark without a copy job or a Connect sink.
 
 ```
 Kafka producer ──▶ broker ──▶ Ursa WAL (object storage)
@@ -114,8 +123,8 @@ Kafka producer ──▶ broker ──▶ Ursa WAL (object storage)
 ```
 
 Compaction runs as a separate service (the Ursa compactor) rather than inside the broker, so it never
-competes with the request path. Kafka consumers and query engines read the same bytes: one copy of the data,
-one retention policy, in your own bucket.
+competes with the request path. Kafka consumers read the compacted objects and query engines read the table:
+two outputs of one compaction pass, both in your own bucket.
 
 ### Compaction is required
 
@@ -137,19 +146,23 @@ without any catalog at all.
 ## Quick start
 
 The fastest way to see it running is the Docker Compose stack — three brokers, Oxia, MinIO, and optionally the
-compactor plus an Iceberg catalog:
+compactor plus an Iceberg catalog. The released image, `lakestream/kafka:4.3.1.1`, carries the brokers, the
+CLI and the Ursa compactor; pair it with the Compose files from its tag:
 
 ```bash
+git checkout v4.3.1.1
 cd docker/examples/docker-compose-files/cluster/ursa
-
-# One image: brokers, CLI and the Ursa compactor (ursa-storage-compact from Maven Central)
-./build-image.sh
+export IMAGE=lakestream/kafka:4.3.1.1   # keep IMAGE exported in every shell that runs make here
 
 make up                 # Oxia + MinIO + 3 brokers + compactor
 make create-topic       # create a diskless topic
 make demo               # producer/consumer perf demo
 make destroy            # tear everything down
 ```
+
+To build the image from your checkout instead, leave `IMAGE` unset and run `./build-image.sh` before
+`make up`. It builds `lakestream/kafka:latest` and resolves the compactor (`ursa-storage-compact`) from Maven
+Central.
 
 Adding the Iceberg catalog is one more command — it starts Polaris and has the compactor write the external
 table alongside the compacted objects it already writes:
@@ -280,6 +293,8 @@ The standard Apache Kafka build, test, IDE, and code-quality instructions all st
 - [Apache Kafka documentation](https://kafka.apache.org/documentation/) for everything inherited from upstream
 
 ## Relationship to upstream
+
+Upstream Kafka has no pluggable replica manager, so UFK carries the diskless path in its own `ReplicaManager`.
 
 This repository tracks Apache Kafka and keeps divergence minimal: changes are additive where possible, and the
 upstream test suite is expected to pass with diskless storage disabled. Bugs in Kafka itself belong upstream;
