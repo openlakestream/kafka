@@ -1,0 +1,45 @@
+name: Feature request
+description: Propose a new capability or a change in behavior.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Open-ended ideas, and proposals that may need a LIP, are often easier to explore in
+        [Discussions](https://github.com/openlakestream/kafka/discussions/categories/ideas) first.
+        LIPs themselves go to [openlakestream/lips](https://github.com/openlakestream/lips).
+        Materializers are built on Ursa, so propose a new one with Ursa's
+        [New materializer proposal](https://github.com/openlakestream/ursa/issues/new?template=materializer_proposal.yml)
+        form instead.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation and what gets in your way today. Leave the solution for the next field.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What alternatives have you considered?
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Does this change a public contract?
+      description: >-
+        Changes to what Kafka clients observe on diskless topics, to `ursa.*` configuration keys, to the
+        Kafka and Lakestream contract, or to how the controller manages diskless topics need a LIP (see
+        https://github.com/openlakestream/lips/blob/main/CONTRIBUTING.md). Changes to classic-topic
+        behavior usually belong upstream in Apache Kafka.
+      options:
+        - "No"
+        - "Yes, it changes client-visible behavior, configuration, the Kafka and Lakestream contract, or the controller's topic lifecycle"
+        - Not sure
+    validations:
+      required: true

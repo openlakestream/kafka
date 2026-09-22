@@ -1,0 +1,29 @@
+# Code owners review pull requests that touch their paths.
+# The last matching pattern wins, so more specific paths come later in this file.
+
+# Every pull request needs a review from one of these.
+*                                                       @codelipenghui @hangc0276 @Demogorgon314
+
+# Diskless storage and the Ursa integration: the code UFK adds to Apache Kafka.
+/storage/diskless-api/                                  @Demogorgon314 @codelipenghui
+/storage/diskless-ursa/                                 @Demogorgon314 @codelipenghui
+/server/src/test/java/org/apache/kafka/server/ursa/     @Demogorgon314 @codelipenghui
+
+# Docker images and the Docker Compose demo.
+/docker/                                                @codelipenghui @Demogorgon314
+
+# Licensing, governance, contributor and agent policy, and repository automation.
+/LICENSE                                                @codelipenghui @merlimat
+/NOTICE                                                 @codelipenghui @merlimat
+/LICENSE-binary                                         @codelipenghui @merlimat
+/NOTICE-binary                                          @codelipenghui @merlimat
+/gradle.properties                                      @codelipenghui @merlimat
+/README.md                                              @codelipenghui @merlimat
+/CONTRIBUTING.md                                        @codelipenghui @merlimat
+/SECURITY.md                                            @codelipenghui @merlimat
+/CODE_OF_CONDUCT.md                                     @codelipenghui @merlimat
+/AI_POLICY.md                                           @codelipenghui @merlimat
+/AGENTS.md                                              @codelipenghui @merlimat
+/CLAUDE.md                                              @codelipenghui @merlimat
+/.claude/                                               @codelipenghui @merlimat
+/.github/                                               @codelipenghui @merlimat

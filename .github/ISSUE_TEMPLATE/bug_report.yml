@@ -1,0 +1,89 @@
+name: Bug report
+description: Something in Ursa for Apache Kafka doesn't work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please don't report security vulnerabilities here.
+        Follow [SECURITY.md](https://github.com/openlakestream/kafka/blob/HEAD/SECURITY.md) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem, and include any error message.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      description: The smallest set of steps, configuration or code that shows the problem. Include the topic configuration.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: UFK version, image tag or commit
+      placeholder: "The lakestream/kafka image tag, or a commit SHA"
+    validations:
+      required: true
+  - type: dropdown
+    id: classic
+    attributes:
+      label: Does it also happen on a classic topic?
+      description: >-
+        Try the same steps on a topic created with `ursa.storage.enable=false`. If the problem happens
+        there too, check the Apache Kafka release UFK is built on. If it happens there as well, it is a
+        bug in Apache Kafka itself. Please report it upstream, as described in Apache Kafka's
+        contributing guide (https://kafka.apache.org/contributing.html).
+      options:
+        - "No, only on diskless topics"
+        - "Yes, on classic topics too"
+        - "I haven't checked"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Where do you think the problem is? Choose "Not sure" if you don't know.
+      options:
+        - Not sure
+        - Producing to diskless topics
+        - Fetching and ListOffsets on diskless topics
+        - Creating, altering or deleting diskless topics (controller)
+        - Idempotent producers and producer state (Oxia)
+        - Retention and compaction
+        - Zone-aware routing
+        - Docker images and the Docker Compose demo
+        - Build, tests or tooling
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Java version, operating system, object store, Oxia version, and anything else that might matter.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste log output here. It is formatted as code automatically.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched the existing issues and didn't find this problem.
+          required: true
+        - label: This isn't a security vulnerability.
+          required: true

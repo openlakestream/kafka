@@ -1,0 +1,23 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question
+    url: https://github.com/openlakestream/kafka/discussions/categories/q-a
+    about: Questions about using or building Ursa for Apache Kafka belong in GitHub Discussions.
+  - name: Share an idea or discuss a design
+    url: https://github.com/openlakestream/kafka/discussions/categories/ideas
+    about: Open-ended ideas, and proposals before they become a LIP.
+  - name: Lakestream Improvement Proposals (LIPs)
+    url: https://github.com/openlakestream/lips
+    about: Design proposals for every Lakestream component. Start a thread in Discussions Ideas first.
+  - name: Report a security vulnerability
+    url: https://github.com/openlakestream/kafka/security/advisories/new
+    about: Please report security issues privately, not in a public issue. See SECURITY.md.
+  - name: Propose a new materializer
+    url: https://github.com/openlakestream/ursa/issues/new?template=materializer_proposal.yml
+    about: Materializers are built on Ursa, so proposals go to the Ursa repository.
+  - name: Report a bug in Apache Kafka itself
+    url: https://kafka.apache.org/contributing.html
+    about: Problems that also happen on the Apache Kafka release UFK is built on belong upstream.
+  - name: Lakestream specification and documentation
+    url: https://openlakestream.org
+    about: The Lakestream API, specification, and user documentation.
