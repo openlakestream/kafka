@@ -1,38 +1,53 @@
-<!--
- Licensed to the Apache Software Foundation (ASF) under one or more
- contributor license agreements.  See the NOTICE file distributed with
- this work for additional information regarding copyright ownership.
- The ASF licenses this file to You under the Apache License, Version 2.0
- (the "License"); you may not use this file except in compliance with
- the License.  You may obtain a copy of the License at
+# Security policy
 
-    http://www.apache.org/licenses/LICENSE-2.0
+## Supported versions
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
--->
+We fix security issues in the latest release of Ursa for Apache Kafka (UFK). Fixes land on the default
+branch and ship in the next release. Older releases don't receive patches, so upgrade to the latest
+release to pick up a fix.
 
-# Security Policy
+## Reporting a vulnerability
 
-## Reporting a Vulnerability
+**Please don't report security problems in a public issue, pull request or discussion.**
 
-Report suspected security vulnerabilities privately to `security@kafka.apache.org`,
-following the [ASF security process](https://www.apache.org/security/). Do **not**
-open public GitHub issues or pull requests, file public JIRA tickets, or post to
-mailing lists for unpatched vulnerabilities.
+Report them privately, in either of these ways:
 
-Disclosed CVEs and their affected version ranges are published at
-[kafka.apache.org/cve-list](https://kafka.apache.org/cve-list).
+1. **GitHub private vulnerability reporting.** Use the *Report a vulnerability* button on the
+   [Security tab](https://github.com/openlakestream/kafka/security) of this repository. We prefer this
+   channel: it's private, it keeps the conversation in one thread, and it stays attached to the
+   repository.
+2. **Email `security@openlakestream.org`**, with the repository name in the subject line.
 
-## Security Model
+As much as you have of the following helps us act quickly:
 
-What is in and out of scope, how reports are classified, and the list of known
-non-findings are documented in the Apache Kafka security model under
-[docs/security/](./docs/security/):
+- the affected version, image tag or commit
+- what an attacker could do, and under which configuration
+- steps to reproduce the problem
+- anything you already know about the impact
 
-- Core model: [docs/security/security-model.md](./docs/security/security-model.md)
-- Kafka Connect: [docs/security/security-model-connect.md](./docs/security/security-model-connect.md)
-- Kafka Streams: [docs/security/security-model-streams.md](./docs/security/security-model-streams.md)
+A rough report sent early is better than a polished one sent late.
+
+### Vulnerabilities in Apache Kafka
+
+Most of this repository is Apache Kafka. If a problem also affects an Apache Kafka release, report it
+to the Apache Kafka security team, as described at <https://kafka.apache.org/project-security>. UFK
+picks up the fix when it syncs with Apache Kafka. If you're not sure which project a problem belongs
+to, report it to us, and we'll work it out with you.
+
+## What happens next
+
+We'll acknowledge your report, investigate it, and keep you updated as we go. We coordinate
+disclosure with you. By default we aim to publish within 90 days of the report, and sooner once a fix
+is available.
+
+When the fix is released, we publish a security advisory in this repository and credit you in it,
+unless you ask us not to.
+
+We don't run a bug bounty program.
+
+## Scope
+
+This policy covers the code in this repository, except for problems that also affect Apache Kafka,
+which go to the Apache Kafka security team as described above. Vulnerabilities in StreamNative's
+commercial products or hosted services can also be reported to `security@streamnative.io`, and we'll
+route them to the right team.

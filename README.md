@@ -254,7 +254,7 @@ client.id=orders-service,zone_id=us-east-1a
 
 The broker then picks an owner in the client's zone and reports it as the partition leader, falling back to
 the full set of live brokers when no in-zone broker is available. Clients need no code changes beyond the
-`client.id`. See [LIP-002](docs/LIP-ursa-zone-aware-owner-selection.md).
+`client.id`. See [LIP-163](https://github.com/openlakestream/lips/blob/main/proposals/LIP-163-Ursa-Zone-Aware-Owner-Selection.md).
 
 ## Limitations of diskless topics
 
@@ -281,14 +281,15 @@ You need JDK 17. The `org.openlakestream:ursa-storage` artifacts are resolved fr
 ```
 
 The standard Apache Kafka build, test, IDE, and code-quality instructions all still apply — see the
-[upstream README](https://github.com/apache/kafka/blob/trunk/README.md). Fork-specific conventions live in
-[AGENTS.md](AGENTS.md).
+[upstream README](https://github.com/apache/kafka/blob/trunk/README.md). UFK's own conventions live in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
-- [LIP-001: Diskless Storage with Ursa Integration](docs/LIP-diskless-storage-with-ursa-integration.md)
-- [LIP-002: Ursa Zone-Aware Owner Selection](docs/LIP-ursa-zone-aware-owner-selection.md)
+- [LIP-162: Diskless Storage with Ursa Integration](https://github.com/openlakestream/lips/blob/main/proposals/LIP-162-Diskless-Storage-with-Ursa-Integration.md)
+- [LIP-163: Ursa Zone-Aware Owner Selection](https://github.com/openlakestream/lips/blob/main/proposals/LIP-163-Ursa-Zone-Aware-Owner-Selection.md)
 - [Docker Compose stack](docker/examples/docker-compose-files/cluster/ursa/README.md)
+- [Materializers](docs/developer/materializers.md): what the compactor's materializers get from Kafka
 - [AGENTS.md](AGENTS.md) — architecture, module layout, and build conventions
 - [Apache Kafka documentation](https://kafka.apache.org/documentation/) for everything inherited from upstream
 
@@ -299,6 +300,13 @@ Upstream Kafka has no pluggable replica manager, so UFK carries the diskless pat
 This repository tracks Apache Kafka and keeps divergence minimal: changes are additive where possible, and the
 upstream test suite is expected to pass with diskless storage disabled. Bugs in Kafka itself belong upstream;
 issues with diskless storage or the lakehouse path belong here.
+
+## Contributing
+
+Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers what belongs here and what belongs
+upstream, how to build and test, and how to open a pull request. If you use AI tools, read the
+[AI policy](AI_POLICY.md). Coding agents start with [AGENTS.md](AGENTS.md). Report security problems
+privately, as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
