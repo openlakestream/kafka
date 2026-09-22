@@ -186,6 +186,12 @@ jobs:
       - name: Docker compose smoke
         if: ${{ !inputs.is-public-fork }}
         run: python committer-tools/docker_cluster_smoke.py --skip-build
+      - name: Strimzi image smoke
+        if: ${{ !inputs.is-public-fork }}
+        run: |
+          TARBALL=$(ls core/build/distributions/kafka_2.13-*.tgz | grep -v -- '-site-docs.tgz' | head -1)
+          docker/strimzi/build-image.sh --tarball "${TARBALL}" lakestream/kafka-strimzi:ci-smoke
+          docker/strimzi/verify-image.sh lakestream/kafka-strimzi:ci-smoke
 
   test:
     needs: [configure, validate, load-catalog]

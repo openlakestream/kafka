@@ -177,6 +177,15 @@ make destroy              # Tear down every profile and remove volumes
 
 Architecture: 3 Kafka brokers + Oxia (metadata) + MinIO (S3 storage), plus the Ursa compactor (same image as the brokers), and Polaris (Iceberg catalog) under the `lakehouse` profile. Ports (all bound to 127.0.0.1): kafka-1:29092, kafka-2:39092, kafka-3:49092, oxia:6648, minio:19000/19001, polaris:18181/18182.
 
+## Strimzi Image
+
+`lakestream/kafka-strimzi:<strimzi>-kafka-<kafka>` is the same distribution in the Strimzi image layout, for clusters managed by the Strimzi cluster operator. `docker/strimzi/Dockerfile` starts from `quay.io/strimzi/kafka:<strimzi>-kafka-<upstream kafka>` and swaps in this fork's tarball, merging `libs/` by artifact name so Strimzi's agents and third-party libs stay while no artifact appears twice. The Strimzi and base Kafka versions default in `docker/strimzi/build-image.sh` (`STRIMZI_VERSION`, `STRIMZI_KAFKA_VERSION`) and must share the Kafka minor with the tarball. `docker/strimzi/verify-image.sh` checks the layout; CI runs it, and `release_docker_image.yml` publishes the image next to `lakestream/kafka`. Deployment notes and a sample `Kafka` resource live in `docker/strimzi/README.md` and `docker/strimzi/examples/`.
+
+```bash
+docker/strimzi/build-image.sh --tarball core/build/distributions/kafka_2.13-<version>.tgz
+docker/strimzi/verify-image.sh lakestream/kafka-strimzi:1.2.0-kafka-<version>
+```
+
 ## Upstream Compatibility
 
 This is a fork — changes should minimize divergence from upstream Apache Kafka. When modifying core Kafka code:

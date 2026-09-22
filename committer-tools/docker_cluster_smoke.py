@@ -18,13 +18,11 @@
 #
 
 import argparse
-import datetime
 import os
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 
 
 def run_gradlew(project_dir: str) -> None:
@@ -52,52 +50,28 @@ def get_tarball_path(project_dir: str) -> str:
 
 
 def build_kafka_image(project_dir: str, tarball: str, image_tag: str) -> None:
-    dockerfile = os.path.join(
+    """Build the broker image from an existing tarball with the compose directory's
+    build script, so the build context (entrypoint scripts, compactor jars, ursa
+    version detection) is assembled in one place."""
+    build_script = os.path.join(
         project_dir,
         "docker",
         "examples",
         "docker-compose-files",
         "cluster",
         "ursa",
-        "Dockerfile",
+        "build-image.sh",
     )
-    resources_dir = os.path.join(project_dir, "docker", "resources")
-    jvm_dir = os.path.join(project_dir, "docker", "jvm")
-    server_properties = os.path.join(project_dir, "docker", "server.properties")
+    if not os.path.exists(build_script):
+        print("Error: Missing docker build script:", build_script)
+        sys.exit(1)
 
-    for path in [dockerfile, resources_dir, jvm_dir, server_properties]:
-        if not os.path.exists(path):
-            print("Error: Missing required docker build input:", path)
-            sys.exit(1)
-
-    docker = shutil.which("docker")
-    if not docker:
+    if not shutil.which("docker"):
         print("Error: docker CLI not found on PATH.")
         sys.exit(1)
 
-    with tempfile.TemporaryDirectory() as build_ctx:
-        shutil.copyfile(tarball, os.path.join(build_ctx, "kafka.tgz"))
-        shutil.copyfile(dockerfile, os.path.join(build_ctx, "Dockerfile"))
-        shutil.copytree(resources_dir, os.path.join(build_ctx, "resources"))
-        shutil.copytree(jvm_dir, os.path.join(build_ctx, "jvm"))
-        shutil.copyfile(server_properties, os.path.join(build_ctx, "server.properties"))
-
-        build_date = datetime.date.today().isoformat()
-        print("Building docker image:", image_tag)
-        subprocess.run(
-            [
-                docker,
-                "build",
-                "-f",
-                os.path.join(build_ctx, "Dockerfile"),
-                "-t",
-                image_tag,
-                "--build-arg",
-                f"build_date={build_date}",
-                build_ctx,
-            ],
-            check=True,
-        )
+    print("Building docker image:", image_tag)
+    subprocess.run([build_script, "--tarball", tarball, image_tag], check=True)
 
 
 # `down` only removes containers for services in the enabled profiles, so the

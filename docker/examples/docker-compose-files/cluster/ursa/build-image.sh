@@ -18,10 +18,12 @@
 # Build Docker image for Kafka with Diskless/Ursa Storage
 #
 # Usage:
-#   ./build-image.sh [--platform <platform>] [IMAGE_NAME:TAG]
+#   ./build-image.sh [--tarball <kafka_2.13-*.tgz>] [--platform <platform>] [--push] [IMAGE_NAME:TAG]
 #
 # Examples:
 #   ./build-image.sh                          # Builds lakestream/kafka:latest
+#   ./build-image.sh --tarball core/build/distributions/kafka_2.13-4.3.1.1.tgz
+#                                             # Reuse an existing release tarball
 #   ./build-image.sh myrepo/kafka-ursa:v1     # Builds with custom name
 #   ./build-image.sh --amd64                  # Builds linux/amd64 image (x86_64)
 #   ./build-image.sh --platform linux/amd64   # Same as --amd64
@@ -41,9 +43,10 @@ DOCKER_DIR="${PROJECT_ROOT}/docker"
 usage() {
     cat <<'EOF'
 Usage:
-  ./build-image.sh [--platform <platform>] [IMAGE_NAME:TAG]
+  ./build-image.sh [--tarball <kafka_2.13-*.tgz>] [--platform <platform>] [--push] [IMAGE_NAME:TAG]
 
 Options:
+  --tarball <path>       Use this release tarball instead of running ./gradlew releaseTarGz
   --platform <platform>  Target platform (e.g. linux/amd64, linux/arm64)
   --amd64                Alias for --platform linux/amd64 (x86_64)
   --push                 Build with buildx and push (multi-platform ok, image is not loaded locally)
@@ -61,6 +64,7 @@ Examples:
 EOF
 }
 
+TARBALL=""
 PLATFORM=""
 PUSH="false"
 IMAGE_NAME="${IMAGE:-lakestream/kafka:latest}"
@@ -71,6 +75,16 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             usage
             exit 0
+            ;;
+        --tarball)
+            if [[ $# -lt 2 ]]; then
+                echo "ERROR: --tarball requires a value" >&2
+                usage >&2
+                exit 1
+            fi
+            # Absolute, since the script cd's to the project root before using it.
+            if [[ "$2" == /* ]]; then TARBALL="$2"; else TARBALL="${PWD}/$2"; fi
+            shift 2
             ;;
         --platform)
             if [[ $# -lt 2 ]]; then
@@ -119,34 +133,17 @@ echo ""
 
 cd "${PROJECT_ROOT}"
 
-echo "[1/3] Building Kafka release tarball..."
-GRADLE_BUILD_ARGS=(./gradlew releaseTarGz --no-daemon -q)
-if [[ -n "${GRADLE_ARGS:-}" ]]; then
-    # Word splitting is intended: GRADLE_ARGS may carry several flags.
-    # shellcheck disable=SC2206
-    GRADLE_BUILD_ARGS+=(${GRADLE_ARGS})
+if [[ -z "${TARBALL}" ]]; then
+    echo "[1/3] Building Kafka release tarball..."
+    TARBALL=$("${DOCKER_DIR}/release-tarball.sh")
+else
+    echo "[1/3] Using provided Kafka release tarball..."
+    if [[ ! -f "${TARBALL}" ]]; then
+        echo "ERROR: Tarball not found: ${TARBALL}" >&2
+        exit 1
+    fi
 fi
-# The tarball's doc generators each run in a forked JVM whose classpath carries
-# slf4j-api without a binding, so every one of them prints the same three-line
-# "StaticLoggerBinder" warning on stderr. Gradle's -q silences its own output but
-# not a child JVM's, so filter out just those lines. stdout goes straight through
-# on fd 3; the rest of stderr, including real build failures, is left intact.
-exec 3>&1
-set +e
-"${GRADLE_BUILD_ARGS[@]}" 2>&1 1>&3 | grep -v '^SLF4J: ' >&2
-gradle_status=${PIPESTATUS[0]}
-set -e
-exec 3>&-
-if [[ ${gradle_status} -ne 0 ]]; then
-    exit "${gradle_status}"
-fi
-
-TARBALL=$(find "${PROJECT_ROOT}/core/build/distributions" -name "kafka_2.13-*.tgz" -not -name "*-site-docs.tgz" | head -1)
-if [ -z "$TARBALL" ]; then
-    echo "ERROR: Could not find kafka tarball in core/build/distributions/"
-    exit 1
-fi
-echo "Found tarball: ${TARBALL}"
+echo "Tarball: ${TARBALL}"
 
 echo ""
 echo "[2/3] Preparing build context..."
