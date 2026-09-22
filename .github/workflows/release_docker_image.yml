@@ -20,6 +20,10 @@
 #     the Strimzi image layout for clusters managed by the Strimzi operator
 #     (see docker/strimzi/README.md; Strimzi version defaults live in
 #     docker/strimzi/build-image.sh)
+# Each image is also pushed as `latest` (lakestream/kafka:latest and
+# lakestream/kafka-strimzi:latest) unless the version carries a pre-release
+# suffix such as `-rc1`, so `latest` always points at the most recent final
+# release.
 # Requires the DOCKER_USER and DOCKER_PASSWORD repository secrets.
 
 name: Release Docker Image
@@ -49,19 +53,32 @@ jobs:
         with:
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_PASSWORD }}
-      - name: Build and push
+      - name: Resolve version and tags
         env:
           VERSION: ${{ github.ref_name }}
         run: |
           VERSION="${VERSION#v}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          # Pre-release versions (e.g. 4.3.1.2-rc1) must not move `latest`.
+          if [[ "${VERSION}" == *-* ]]; then
+            echo "Pre-release ${VERSION}: not tagging latest"
+            echo "KAFKA_LATEST_TAG_ARGS=" >> "$GITHUB_ENV"
+            echo "STRIMZI_LATEST_TAG_ARGS=" >> "$GITHUB_ENV"
+          else
+            echo "KAFKA_LATEST_TAG_ARGS=--tag lakestream/kafka:latest" >> "$GITHUB_ENV"
+            echo "STRIMZI_LATEST_TAG_ARGS=--tag lakestream/kafka-strimzi:latest" >> "$GITHUB_ENV"
+          fi
+      - name: Build and push
+        run: |
+          # shellcheck disable=SC2086  # intentionally word-split: empty or "--tag <name>"
           GRADLE_ARGS="-Pversion=${VERSION}" \
             docker/examples/docker-compose-files/cluster/ursa/build-image.sh \
-            --push --platform linux/amd64,linux/arm64 "lakestream/kafka:${VERSION}"
+            --push --platform linux/amd64,linux/arm64 \
+            ${KAFKA_LATEST_TAG_ARGS} "lakestream/kafka:${VERSION}"
       - name: Build and push Strimzi image
-        env:
-          VERSION: ${{ github.ref_name }}
         run: |
-          VERSION="${VERSION#v}"
+          # shellcheck disable=SC2086  # intentionally word-split: empty or "--tag <name>"
           docker/strimzi/build-image.sh \
             --tarball "core/build/distributions/kafka_2.13-${VERSION}.tgz" \
-            --push --platform linux/amd64,linux/arm64
+            --push --platform linux/amd64,linux/arm64 \
+            ${STRIMZI_LATEST_TAG_ARGS}

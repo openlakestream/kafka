@@ -18,7 +18,7 @@
 # Build Docker image for Kafka with Diskless/Ursa Storage
 #
 # Usage:
-#   ./build-image.sh [--tarball <kafka_2.13-*.tgz>] [--platform <platform>] [--push] [IMAGE_NAME:TAG]
+#   ./build-image.sh [--tarball <kafka_2.13-*.tgz>] [--platform <platform>] [--push] [--tag <name:tag>]... [IMAGE_NAME:TAG]
 #
 # Examples:
 #   ./build-image.sh                          # Builds lakestream/kafka:latest
@@ -29,6 +29,8 @@
 #   ./build-image.sh --platform linux/amd64   # Same as --amd64
 #   ./build-image.sh --push --platform linux/amd64,linux/arm64 lakestream/kafka:4.3.1.1
 #                                             # Multi-arch build via buildx, pushed to the registry
+#   ./build-image.sh --tag lakestream/kafka:latest lakestream/kafka:4.3.1.1
+#                                             # Same image under two tags
 #
 # Environment:
 #   GRADLE_ARGS   Extra arguments for the release build, e.g. GRADLE_ARGS=--offline
@@ -43,13 +45,14 @@ DOCKER_DIR="${PROJECT_ROOT}/docker"
 usage() {
     cat <<'EOF'
 Usage:
-  ./build-image.sh [--tarball <kafka_2.13-*.tgz>] [--platform <platform>] [--push] [IMAGE_NAME:TAG]
+  ./build-image.sh [--tarball <kafka_2.13-*.tgz>] [--platform <platform>] [--push] [--tag <name:tag>]... [IMAGE_NAME:TAG]
 
 Options:
   --tarball <path>       Use this release tarball instead of running ./gradlew releaseTarGz
   --platform <platform>  Target platform (e.g. linux/amd64, linux/arm64)
   --amd64                Alias for --platform linux/amd64 (x86_64)
   --push                 Build with buildx and push (multi-platform ok, image is not loaded locally)
+  --tag <name:tag>       Also tag the image with this name (repeatable), e.g. --tag lakestream/kafka:latest
   -h, --help              Show this help
 
 Environment:
@@ -67,6 +70,7 @@ EOF
 TARBALL=""
 PLATFORM=""
 PUSH="false"
+EXTRA_TAGS=()
 IMAGE_NAME="${IMAGE:-lakestream/kafka:latest}"
 IMAGE_NAME_SET="false"
 
@@ -103,6 +107,15 @@ while [[ $# -gt 0 ]]; do
             PUSH="true"
             shift
             ;;
+        --tag)
+            if [[ $# -lt 2 ]]; then
+                echo "ERROR: --tag requires a value" >&2
+                usage >&2
+                exit 1
+            fi
+            EXTRA_TAGS+=("$2")
+            shift 2
+            ;;
         --*)
             echo "ERROR: Unknown option: $1" >&2
             usage >&2
@@ -126,6 +139,9 @@ echo "Building Kafka Diskless Storage Docker Image"
 echo "=============================================="
 echo "Project root: ${PROJECT_ROOT}"
 echo "Image name: ${IMAGE_NAME}"
+if [[ ${#EXTRA_TAGS[@]} -gt 0 ]]; then
+    echo "Extra tags: ${EXTRA_TAGS[*]}"
+fi
 if [[ -n "${PLATFORM}" ]]; then
     echo "Platform: ${PLATFORM}"
 fi
@@ -177,6 +193,9 @@ DOCKER_BUILD_ARGS+=(
     --build-arg "build_date=$(date +%Y-%m-%d)"
     --build-arg "URSA_STORAGE_VERSION=${URSA_STORAGE_VERSION}"
 )
+for tag in ${EXTRA_TAGS[@]+"${EXTRA_TAGS[@]}"}; do
+    DOCKER_BUILD_ARGS+=(-t "${tag}")
+done
 if [[ -n "${PLATFORM}" ]]; then
     DOCKER_BUILD_ARGS+=(--platform "${PLATFORM}")
 fi
@@ -187,6 +206,9 @@ echo ""
 echo "=============================================="
 echo "SUCCESS: Docker image built"
 echo "Image: ${IMAGE_NAME}"
+for tag in ${EXTRA_TAGS[@]+"${EXTRA_TAGS[@]}"}; do
+    echo "Also tagged: ${tag}"
+done
 echo ""
 echo "To run the diskless cluster:"
 echo "  cd ${SCRIPT_DIR}"

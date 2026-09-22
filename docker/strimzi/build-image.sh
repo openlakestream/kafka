@@ -18,12 +18,13 @@
 # Build the Strimzi-compatible image for Kafka with Diskless/Ursa Storage.
 #
 # Usage:
-#   ./build-image.sh [--tarball <kafka_2.13-*.tgz>] [--platform <platform>] [--push] [IMAGE_NAME:TAG]
+#   ./build-image.sh [--tarball <kafka_2.13-*.tgz>] [--platform <platform>] [--push] [--tag <name:tag>]... [IMAGE_NAME:TAG]
 #
 # Examples:
 #   ./build-image.sh                                   # Builds the tarball, then lakestream/kafka-strimzi:1.2.0-kafka-<version>
 #   ./build-image.sh --tarball core/build/distributions/kafka_2.13-4.3.1.1.tgz
 #   ./build-image.sh --push --platform linux/amd64,linux/arm64
+#   ./build-image.sh --tag lakestream/kafka-strimzi:latest   # Same image under a second tag
 #   STRIMZI_VERSION=1.3.0 STRIMZI_KAFKA_VERSION=4.3.2 ./build-image.sh
 #
 # Environment:
@@ -45,12 +46,13 @@ STRIMZI_KAFKA_VERSION="${STRIMZI_KAFKA_VERSION:-4.3.1}"
 usage() {
     cat <<'EOF'
 Usage:
-  ./build-image.sh [--tarball <kafka_2.13-*.tgz>] [--platform <platform>] [--push] [IMAGE_NAME:TAG]
+  ./build-image.sh [--tarball <kafka_2.13-*.tgz>] [--platform <platform>] [--push] [--tag <name:tag>]... [IMAGE_NAME:TAG]
 
 Options:
   --tarball <path>       Use this release tarball instead of running ./gradlew releaseTarGz
   --platform <platform>  Target platform (e.g. linux/amd64, linux/arm64)
   --push                 Build with buildx and push (multi-platform ok, image is not loaded locally)
+  --tag <name:tag>       Also tag the image with this name (repeatable), e.g. --tag lakestream/kafka-strimzi:latest
   -h, --help             Show this help
 
 Environment:
@@ -65,6 +67,7 @@ EOF
 TARBALL=""
 PLATFORM=""
 PUSH="false"
+EXTRA_TAGS=()
 IMAGE_NAME=""
 
 while [[ $# -gt 0 ]]; do
@@ -94,6 +97,15 @@ while [[ $# -gt 0 ]]; do
         --push)
             PUSH="true"
             shift
+            ;;
+        --tag)
+            if [[ $# -lt 2 ]]; then
+                echo "ERROR: --tag requires a value" >&2
+                usage >&2
+                exit 1
+            fi
+            EXTRA_TAGS+=("$2")
+            shift 2
             ;;
         --*)
             echo "ERROR: Unknown option: $1" >&2
@@ -159,6 +171,9 @@ if [[ -z "${IMAGE_NAME}" ]]; then
     IMAGE_NAME="lakestream/kafka-strimzi:${STRIMZI_VERSION}-kafka-${KAFKA_VERSION}"
 fi
 echo "Image name: ${IMAGE_NAME}"
+if [[ ${#EXTRA_TAGS[@]} -gt 0 ]]; then
+    echo "Extra tags: ${EXTRA_TAGS[*]}"
+fi
 
 echo ""
 echo "[2/3] Preparing build context..."
@@ -182,6 +197,9 @@ DOCKER_BUILD_ARGS+=(
     --build-arg "STRIMZI_KAFKA_VERSION=${STRIMZI_KAFKA_VERSION}"
     --build-arg "KAFKA_VERSION=${KAFKA_VERSION}"
 )
+for tag in ${EXTRA_TAGS[@]+"${EXTRA_TAGS[@]}"}; do
+    DOCKER_BUILD_ARGS+=(-t "${tag}")
+done
 if [[ -n "${PLATFORM}" ]]; then
     DOCKER_BUILD_ARGS+=(--platform "${PLATFORM}")
 fi
@@ -192,6 +210,9 @@ echo ""
 echo "=============================================="
 echo "SUCCESS: Docker image built"
 echo "Image: ${IMAGE_NAME}"
+for tag in ${EXTRA_TAGS[@]+"${EXTRA_TAGS[@]}"}; do
+    echo "Also tagged: ${tag}"
+done
 echo ""
 if [[ "${PUSH}" != "true" ]]; then
     echo "To verify the image layout:"
