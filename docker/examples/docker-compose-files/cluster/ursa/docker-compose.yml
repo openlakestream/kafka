@@ -107,15 +107,15 @@ services:
       retries: 20
 
   minio:
-    image: ${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    image: rustfs/rustfs:latest
     hostname: minio
-    command: ["server", "/data", "--console-address", ":9001"]
+    #command: ["server", "/data", "--console-address", ":9001"]
     ports:
       - "127.0.0.1:19000:9000"
       - "127.0.0.1:19001:9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      RUSTFS_ROOT_USER: minioadmin
+      RUSTFS_ROOT_PASSWORD: minioadmin
     volumes:
       - minio-data:/data
     healthcheck:
@@ -125,16 +125,19 @@ services:
       retries: 20
 
   minio-init:
-    image: ${MINIO_MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z}
+    image: amazon/aws-cli:latest
     depends_on:
       minio:
         condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        mc alias set local http://minio:9000 minioadmin minioadmin
-        mc mb local/kafka-ursa --ignore-existing
-        mc mb local/lakehouse --ignore-existing
+        aws --endpoint-url http://minio:9000 s3 mb s3://kafka-ursa || true
+        aws --endpoint-url http://minio:9000 s3 mb s3://lakehouse || true
 
   polaris:
     image: ${POLARIS_IMAGE:-apache/polaris:1.7.0}
@@ -623,8 +626,9 @@ services:
     entrypoint: ["/bin/sh", "/opt/ursa-demo/avro-consumer-check.sh"]
 
   # Wait until the compactor has written managed Parquet objects to MinIO.
+
   wait-for-parquet:
-    image: ${MINIO_MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z}
+    image: amazon/aws-cli:latest
     profiles: ["lakehouse-demo"]
     restart: "no"
     depends_on:
@@ -633,6 +637,9 @@ services:
       minio:
         condition: service_healthy
     environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
       # Must cover the compactor's compaction bucket and prefix. The default
       # prefix spans both `ursa/wal` and `ursa/compacted`; only compaction
       # writes objects with a `.parquet` suffix.
@@ -641,22 +648,11 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null
         echo "Waiting for Parquet objects under s3://$${COMPACTION_BUCKET}/$${COMPACTION_PREFIX}..."
-        for attempt in $$(seq 1 180); do
-          # The mc image ships no grep, so match with the shell itself. The
-          # pattern is anchored: a partial upload named `*.parquet.tmp` is not
-          # a compacted object.
-          listing="$$(mc ls --recursive "local/$${COMPACTION_BUCKET}/$${COMPACTION_PREFIX}" 2>/dev/null || true)"
-          for name in $$listing; do
-            case "$$name" in
+        for attempt in $$(seq 1 180); do           listing="$$(aws --endpoint-url http://minio:9000 s3 ls "s3://$${COMPACTION_BUCKET}/$${COMPACTION_PREFIX}" --recursive 2>/dev/null || true)"
+          for name in $$listing; do             case "$$name" in
               *.parquet)
-                echo "Parquet found: $$name"
-                exit 0
-                ;;
-            esac
-          done
-          echo "No Parquet yet, waiting... ($$attempt/180)"
+                echo "Parquet found: $$name"                 exit 0                 ;;             esac           done           echo "No Parquet yet, waiting... ($$attempt/180)"
           sleep 2
         done
         echo "Timed out waiting for Parquet under s3://$${COMPACTION_BUCKET}/$${COMPACTION_PREFIX}" >&2
