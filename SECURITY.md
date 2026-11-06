@@ -32,7 +32,8 @@ A rough report sent early is better than a polished one sent late.
 Most of this repository is Apache Kafka. If a problem also affects an Apache Kafka release, report it
 to the Apache Kafka security team, as described at <https://kafka.apache.org/project-security>. UFK
 picks up the fix when it syncs with Apache Kafka. If you're not sure which project a problem belongs
-to, report it to us, and we'll work it out with you.
+to, report it to us, and we'll work it out with you. What Apache Kafka treats as in or out of scope
+is in its [security model](docs/security/security-model.md).
 
 ## What happens next
 

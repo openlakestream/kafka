@@ -14,7 +14,7 @@ file.
 
 - **Never add a `Signed-off-by:` line, even if asked.** Only the human can certify the Developer
   Certificate of Origin. When a commit is ready, tell them to review it and run
-  `git commit --amend -s --no-edit`, or `git rebase --signoff origin/4.3-ursa` for several commits.
+  `git commit --amend -s --no-edit`, or `git rebase --signoff origin/4.4-ursa` for several commits.
 - **End each commit message with exactly one AI trailer: `Assisted-by: <tool>`.** This repository
   configures Claude Code to use `Assisted-by: Claude Code` (see `.claude/settings.json`). If your tool
   adds its own `Co-authored-by:` trailer, that counts; don't add both.
@@ -34,7 +34,7 @@ file.
 
 Ursa for Apache Kafka (UFK) is a Kafka distribution built on the Lakestream API and specification.
 Diskless topics keep their records on object storage through **Ursa**; every other topic stays Kafka.
-It is built on Apache Kafka 4.3.1. On a diskless topic, brokers hold no partition data: message
+It is built on Apache Kafka 4.4.0. On a diskless topic, brokers hold no partition data: message
 durability is offloaded to Ursa's storage layer on object storage, and producer state to **Oxia**, a
 distributed key-value store. Diskless storage is opt-in per topic. The primary goal is to stay
 compatible with upstream Kafka while adding the Ursa storage bypass.
@@ -295,3 +295,5 @@ UFK stays close to upstream Apache Kafka, so changes should minimize divergence 
   and [Write a materializer](https://github.com/openlakestream/ursa/blob/main/docs/developer/materializer-guide.md)
 - The [upstream Apache Kafka README](https://github.com/apache/kafka/blob/trunk/README.md) for the
   general build, IDE and test setup
+- Apache Kafka's own [agent guide](https://github.com/apache/kafka/blob/4.4.0/AGENTS.md), which this
+  file replaces in UFK, for the parts of the code that UFK leaves alone

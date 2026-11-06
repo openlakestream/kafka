@@ -1,11 +1,11 @@
 # Ursa for Apache Kafka (UFK)
 
-[![CI](https://github.com/openlakestream/kafka/actions/workflows/ci.yml/badge.svg?branch=4.3-ursa&event=push)](https://github.com/openlakestream/kafka/actions/workflows/ci.yml?query=event%3Apush+branch%3A4.3-ursa)
+[![CI](https://github.com/openlakestream/kafka/actions/workflows/ci.yml/badge.svg?branch=4.4-ursa&event=push)](https://github.com/openlakestream/kafka/actions/workflows/ci.yml?query=event%3Apush+branch%3A4.4-ursa)
 
 This repository, `openlakestream/kafka`, is Ursa for Apache Kafka (UFK): a Kafka distribution built on the
 [Lakestream](https://openlakestream.org) API and specification. Diskless topics keep their records on object
 storage through [Ursa](https://github.com/openlakestream/ursa); every other topic stays Kafka. UFK is built on
-Apache Kafka 4.3.1, and its releases are published as the `lakestream/kafka` Docker image.
+Apache Kafka 4.4.0, and its releases are published as the `lakestream/kafka` Docker image.
 
 Lakestream is an open API and specification for stream storage on object storage, with a stream
 materialization framework that defines how a stream becomes a lakehouse table. Ursa implements it as a storage
@@ -43,7 +43,7 @@ and the same client protocol. Consumer offsets stay in `__consumer_offsets`, whi
 
 - **Nothing changes until you turn it on.** `ursa.storage.enable` defaults to `false` on both the broker and
   the topic, so a stock configuration behaves exactly like the Apache Kafka release it is built from
-  (Apache Kafka 4.3.1).
+  (Apache Kafka 4.4.0).
 - **No protocol changes.** Existing producers, consumers, Kafka Streams, Kafka Connect, admin clients, and the
   `bin/` tools work unmodified against diskless topics. Clients cannot tell the difference: the broker still
   reports a leader, still serves `Fetch` and `ListOffsets`, still enforces offsets and idempotent producer

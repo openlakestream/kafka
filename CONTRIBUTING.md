@@ -3,7 +3,7 @@
 Thanks for your interest in Ursa for Apache Kafka (UFK). UFK is a Kafka distribution built on the
 Lakestream API and specification. Diskless topics keep their records on object storage through
 [Ursa](https://github.com/openlakestream/ursa); every other topic stays Kafka. It is built on
-[Apache Kafka](https://kafka.apache.org) 4.3.1.
+[Apache Kafka](https://kafka.apache.org) 4.4.0.
 
 [Lakestream](https://openlakestream.org) is an open API and specification for stream storage on
 object storage, with a stream materialization framework that defines how a stream becomes a
@@ -149,7 +149,7 @@ If you add, remove or upgrade a dependency, keep `LICENSE-binary` in sync and ru
 |---|---|---|
 | Validate | Every pull request | `./gradlew check releaseTarGz -x test`: compilation, checkstyle, SpotBugs, spotless, license headers and the release tarball. Then the `LICENSE-binary` check and, for branches in this repository, a Docker Compose smoke test. |
 | Isolated tests | Every pull request that isn't a draft | The diskless integration tests, on JDK 17 |
-| Full test suite | Pushes to the development and release branches (`4.3-ursa`, `4.3.2-ursa`), weekends, and pull requests that a maintainer labels `run-junit-tests` | The whole Apache Kafka suite, on JDK 17 and 25. It takes several hours. |
+| Full test suite | Pushes to the development and release branches (`4.4-ursa`, `4.4.0-ursa`), weekends, and pull requests that a maintainer labels `run-junit-tests` | The whole Apache Kafka suite, on JDK 17 and 25. It takes several hours. |
 
 For more:
 
@@ -232,7 +232,7 @@ that you wrote the change, or otherwise have the right to submit it under the pr
 full text is at [developercertificate.org](https://developercertificate.org/).
 
 A DCO check runs on every pull request. If you forgot to sign off, fix the last commit with
-`git commit --amend -s --no-edit`, or a series with `git rebase --signoff origin/4.3-ursa`, and then
+`git commit --amend -s --no-edit`, or a series with `git rebase --signoff origin/4.4-ursa`, and then
 force-push your branch.
 
 We don't use a CLA. The DCO sign-off is all we ask.
@@ -258,9 +258,9 @@ accepted. The [AI policy](AI_POLICY.md) explains what counts.
    `git remote add fork https://github.com/<your-username>/kafka.git`. This repository isn't a GitHub
    fork of Apache Kafka, so if you already have a repository named `kafka`, give this fork another
    name and use it in the URL. Create a branch for your change, and push it to `fork`.
-2. Open the pull request against `4.3-ursa`, the default branch. It's the development branch for the
-   Apache Kafka 4.3 line, so its name changes when UFK moves to a new line such as 4.4. Release
-   branches such as `4.3.2-ursa` don't take pull requests; see
+2. Open the pull request against `4.4-ursa`, the default branch. It's the development branch for the
+   Apache Kafka 4.4 line, so its name changes when UFK moves to a new line such as 4.5. Release
+   branches such as `4.4.0-ursa` don't take pull requests; see
    [Branches and releases](docs/developer/branches-and-releases.md).
 3. Keep each pull request to one logical change. Smaller pull requests get reviewed sooner.
 4. Fill in the pull request template: what changed and why, compatibility, how you tested it, and AI

@@ -73,7 +73,7 @@ the right to submit the work. A tool can't make that statement, so:
 
 - AI tools and agents never add a `Signed-off-by` line.
 - You add it yourself after you've reviewed the change: `git commit -s`, `git commit --amend -s
-  --no-edit` for the last commit, or `git rebase --signoff origin/4.3-ursa` for a series.
+  --no-edit` for the last commit, or `git rebase --signoff origin/4.4-ursa` for a series.
 - Your sign-off covers the whole commit, including the parts a tool helped with.
 
 ## 4. A human approves every outward action
