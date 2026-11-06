@@ -3365,9 +3365,7 @@ public class SharePartition implements AutoCloseable {
         if (partitionDataStartOffset != PartitionFactory.UNINITIALIZED_START_OFFSET) {
             return CompletableFuture.completedFuture(partitionDataStartOffset);
         }
-        ShareGroupAutoOffsetResetStrategy offsetResetStrategy = groupConfigManager.groupConfig(groupId)
-                .map(GroupConfig::shareAutoOffsetReset)
-                .orElseGet(GroupConfig::defaultShareAutoOffsetReset);
+        ShareGroupAutoOffsetResetStrategy offsetResetStrategy = configProvider.autoOffsetReset(groupId);
 
         long timestampToSearch = switch (offsetResetStrategy.type()) {
             case LATEST -> ListOffsetsRequest.LATEST_TIMESTAMP;

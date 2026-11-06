@@ -830,6 +830,8 @@ public class SharePartitionManager implements AutoCloseable {
             DelayedShareFetch delayedShareFetch = new DelayedShareFetch(
                 shareFetch,
                 replicaManager,
+                logReader,
+                metadataProvider,
                 fencedSharePartitionHandler(),
                 sharePartitions,
                 shareGroupMetrics,
@@ -881,7 +883,7 @@ public class SharePartitionManager implements AutoCloseable {
                         topicPartitionFetchOffsets,
                         fetchResult,
                         sharePartitions,
-                        replicaManager,
+                        metadataProvider,
                         fencedSharePartitionHandler(),
                         unknownErrorFetchPartitionData()
                     ));

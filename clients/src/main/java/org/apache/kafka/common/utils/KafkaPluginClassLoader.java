@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.common.utils;
 
+import org.apache.kafka.common.utils.internals.ChildFirstClassLoader;
+
 import java.io.IOException;
 import java.net.URL;
 import java.util.Enumeration;

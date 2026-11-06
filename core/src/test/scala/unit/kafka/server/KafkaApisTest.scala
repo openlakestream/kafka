@@ -3107,7 +3107,7 @@ class KafkaApisTest extends Logging {
       anyString())
     ).thenAnswer(_ => responseCallback.getValue.apply(Map(tp -> new PartitionResponse(Errors.NOT_LEADER_OR_FOLLOWER))))
 
-    when(clientRequestQuotaManager.maybeRecordAndGetThrottleTimeMs(any[RequestChannel.Request](),
+    when(clientRequestQuotaManager.maybeRecordAndGetThrottleTimeMs(any[Request](),
       any[Long])).thenReturn(0)
     when(clientQuotaManager.maybeRecordAndGetThrottleTimeMs(
       any[Session](), anyString, anyDouble, anyLong)).thenReturn(0)
@@ -3186,7 +3186,7 @@ class KafkaApisTest extends Logging {
           ))
       )
     )
-    when(clientRequestQuotaManager.maybeRecordAndGetThrottleTimeMs(any[RequestChannel.Request](), any[Long]))
+    when(clientRequestQuotaManager.maybeRecordAndGetThrottleTimeMs(any[Request](), any[Long]))
       .thenReturn(0)
 
     val metadataRequest = new MetadataRequest.Builder(util.List.of(topic), false).build()

@@ -273,6 +273,7 @@ bundled under ./libs.
 - commons-digester-2.1
 - commons-lang3-3.18.0
 - commons-logging-1.3.5
+- commons-net-3.13.0
 - commons-validator-1.10.1
 - error_prone_annotations-2.45.0
 - failureaccess-1.0.3
@@ -283,15 +284,15 @@ bundled under ./libs.
 - hk2-utils-3.0.6
 - j2objc-annotations-3.0.0
 - jackson-annotations-2.21
-- jackson-core-2.21.5
-- jackson-databind-2.21.5
-- jackson-dataformat-csv-2.21.5
-- jackson-dataformat-yaml-2.21.5
-- jackson-datatype-jdk8-2.21.5
-- jackson-jakarta-rs-base-2.21.5
-- jackson-jakarta-rs-json-provider-2.21.5
-- jackson-module-blackbird-2.21.5
-- jackson-module-jakarta-xmlbind-annotations-2.21.5
+- jackson-core-2.21.7
+- jackson-databind-2.21.7
+- jackson-dataformat-csv-2.21.7
+- jackson-dataformat-yaml-2.21.7
+- jackson-datatype-jdk8-2.21.7
+- jackson-jakarta-rs-base-2.21.7
+- jackson-jakarta-rs-json-provider-2.21.7
+- jackson-module-blackbird-2.21.7
+- jackson-module-jakarta-xmlbind-annotations-2.21.7
 - jakarta.activation-2.0.1
 - jakarta.activation-api-2.1.0
 - jakarta.annotation-api-2.1.1
@@ -302,7 +303,6 @@ bundled under ./libs.
 - jakarta.xml.bind-api-3.0.1
 - javassist-3.30.2-GA
 - javax.activation-api-1.2.0
-- javax.annotation-api-1.3.2
 - jaxb-api-2.3.1
 - jersey-client-3.1.10
 - jersey-common-3.1.10
@@ -310,17 +310,19 @@ bundled under ./libs.
 - jersey-container-servlet-core-3.1.10
 - jersey-hk2-3.1.10
 - jersey-server-3.1.10
-- jetty-alpn-client-12.0.37
-- jetty-client-12.0.37
-- jetty-ee10-servlet-12.0.37
-- jetty-ee10-servlets-12.0.37
-- jetty-http-12.0.37
-- jetty-io-12.0.37
-- jetty-security-12.0.37
-- jetty-server-12.0.37
-- jetty-session-12.0.37
-- jetty-util-12.0.37
-- jline-3.30.4
+- jetty-alpn-client-12.0.39
+- jetty-client-12.0.39
+- jetty-ee10-servlet-12.0.39
+- jetty-ee10-servlets-12.0.39
+- jetty-http-12.0.39
+- jetty-io-12.0.39
+- jetty-security-12.0.39
+- jetty-server-12.0.39
+- jetty-session-12.0.39
+- jetty-util-12.0.39
+- jline-native-3.30.16
+- jline-reader-3.30.16
+- jline-terminal-3.30.16
 - jopt-simple-5.0.4
 - jose4j-0.9.6
 - jspecify-1.0.0
@@ -329,8 +331,8 @@ bundled under ./libs.
 - log4j-api-2.25.5
 - log4j-core-2.25.5
 - log4j-slf4j-impl-2.25.5
-- lz4-java-1.11.1
-- maven-artifact-3.9.15
+- lz4-java-1.11.2
+- maven-artifact-3.9.16
 - metrics-core-2.2.0
 - opentelemetry-proto-1.3.2-alpha
 - osgi-resource-locator-1.0.3
@@ -345,8 +347,8 @@ bundled under ./libs.
 - slf4j-api-1.7.36
 - snakeyaml-2.5
 - snappy-java-1.1.10.7
-- swagger-annotations-2.2.39
-- zstd-jni-1.5.6-10
+- swagger-annotations-2.2.52
+- zstd-jni-1.5.7-17
 -------------------------------------------------------------------------------
 Additional bundled dependencies present in ./ursa-storage.
 
@@ -502,7 +504,10 @@ bundled under ./ursa-storage.
 - httpcore-4.4.16
 - identity-spi-2.32.28
 - istack-commons-runtime-3.0.12
+- jackson-core-2.21.5
+- jackson-databind-2.21.5
 - jackson-dataformat-xml-2.21.5
+- jackson-datatype-jdk8-2.21.5
 - jackson-datatype-jsr310-2.21.5
 - jackson-module-parameter-names-2.21.5
 - jakarta.activation-1.2.2
@@ -512,6 +517,7 @@ bundled under ./ursa-storage.
 - jakarta.servlet.jsp-api-2.3.6
 - jakarta.ws.rs-api-2.1.6
 - jakarta.xml.bind-api-2.3.3
+- javax.annotation-api-1.3.2
 - jaxb-runtime-2.3.9
 - jcip-annotations-1.0-1
 - jettison-1.5.4
@@ -533,6 +539,7 @@ bundled under ./ursa-storage.
 - lakestream-api-1.0.0
 - lambda-2.32.28
 - lang-tag-1.7
+- lz4-java-1.11.1
 - metrics-core-3.2.4
 - metrics-spi-2.32.28
 - msal4j-1.17.2
@@ -635,6 +642,7 @@ bundled under ./ursa-storage.
 - zero-allocation-hashing-0.16
 - zookeeper-3.8.6
 - zookeeper-jute-3.8.6
+- zstd-jni-1.5.6-10
 ===============================================================================
 This product bundles various third-party components under other open source
 licenses. This section summarizes those components and their licenses.
@@ -666,6 +674,7 @@ see: licenses/CDDL+GPL-1.1
 - jakarta.servlet-api-6.0.0
 - jakarta.xml.bind-api-3.0.1
 - javax.activation-api-1.2.0
+- javax.annotation-api-1.3.2
 - jaxb-api-2.3.1
 - activation-1.1.1
 
@@ -682,6 +691,7 @@ MIT License
 BSD 2-Clause
 
 - zstd-jni-1.5.7-17, see: licenses/zstd-jni-BSD-2-clause
+- zstd-jni-1.5.6-10, see: licenses/zstd-jni-BSD-2-clause
 - HdrHistogram-2.2.2, see: licenses/hdrHistogram-BSD-2-clause
 
 ---------------------------------------

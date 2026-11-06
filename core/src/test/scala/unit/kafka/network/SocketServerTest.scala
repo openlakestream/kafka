@@ -36,7 +36,7 @@ import org.apache.kafka.common.security.auth.{KafkaPrincipal, SecurityProtocol}
 import org.apache.kafka.common.security.scram.internals.ScramMechanism
 import org.apache.kafka.common.utils._
 import org.apache.kafka.common.utils.internals.{AppInfoParser, LogContext}
-import org.apache.kafka.network.{CallbackRequest, NoOpResponse, Request, RequestConvertToJson, Response, SendResponse, ShutdownRequest, SocketServerConfigs, WakeupRequest}
+import org.apache.kafka.network.{CallbackRequest, CloseConnectionResponse, NoOpResponse, Request, RequestConvertToJson, Response, SendResponse, ShutdownRequest, SocketServerConfigs, WakeupRequest}
 import org.apache.kafka.security.CredentialProvider
 import org.apache.kafka.server.{ApiVersionManager, SimpleApiVersionManager}
 import org.apache.kafka.server.common.{FinalizedFeatures, MetadataVersion}
@@ -513,7 +513,7 @@ class SocketServerTest {
       assertEquals(1, received1.header.correlationId)
       assertEquals(2, received2.header.correlationId)
 
-      testableServer.dataPlaneRequestChannel.sendResponse(new RequestChannel.CloseConnectionResponse(received1))
+      testableServer.dataPlaneRequestChannel.sendResponse(new CloseConnectionResponse(received1))
       TestUtils.waitUntilTrue(() => openOrClosingChannel(received1, testableServer).isEmpty, "Channel not closed")
 
       processRequest(testableServer.dataPlaneRequestChannel, received2)

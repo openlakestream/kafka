@@ -16,7 +16,11 @@
  */
 package kafka.server.share;
 
+import kafka.server.ReplicaManager;
+
 import org.apache.kafka.common.TopicIdPartition;
+import org.apache.kafka.common.errors.NotLeaderOrFollowerException;
+import org.apache.kafka.common.errors.OffsetNotAvailableException;
 import org.apache.kafka.common.message.ShareFetchResponseData;
 import org.apache.kafka.common.message.ShareFetchResponseData.AcquiredRecords;
 import org.apache.kafka.common.protocol.Errors;
@@ -136,7 +140,7 @@ public class ShareFetchUtils {
             Map<TopicIdPartition, Long> fetchOffsets,
             Map<TopicIdPartition, FetchPartitionData> fetchPartitionData,
             LinkedHashMap<TopicIdPartition, SharePartition> sharePartitions,
-            ReplicaManager replicaManager,
+            PartitionMetadataProvider metadataProvider,
             BiConsumer<SharePartitionKey, Throwable> exceptionHandler,
             FetchPartitionData defaultFetchPartitionData
     ) {
@@ -148,7 +152,7 @@ public class ShareFetchUtils {
                 fetchPartitionData != null && fetchPartitionData.containsKey(topicIdPartition) ?
                     fetchPartitionData.get(topicIdPartition) : defaultFetchPartitionData
             )));
-        return processFetchResponse(shareFetch, shareFetchPartitionDataList, sharePartitions, replicaManager, exceptionHandler);
+        return processFetchResponse(shareFetch, shareFetchPartitionDataList, sharePartitions, metadataProvider, exceptionHandler);
     }
 
     /**

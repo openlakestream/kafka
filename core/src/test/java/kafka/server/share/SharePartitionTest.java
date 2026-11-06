@@ -83,8 +83,6 @@ import org.apache.kafka.server.storage.log.FetchPartitionData;
 import org.apache.kafka.server.util.timer.MockTimer;
 import org.apache.kafka.server.util.timer.Timer;
 import org.apache.kafka.server.util.timer.TimerTask;
-import org.apache.kafka.storage.diskless.DisklessStorageReplicaManagerSupport;
-import org.apache.kafka.storage.diskless.ListOffsetsPartitionResponse;
 import org.apache.kafka.storage.internals.log.OffsetResultHolder;
 import org.apache.kafka.test.TestUtils;
 
@@ -487,31 +485,26 @@ public class SharePartitionTest {
         GroupConfigManager groupConfigManager = Mockito.mock(GroupConfigManager.class);
         GroupConfig groupConfig = Mockito.mock(GroupConfig.class);
         Mockito.when(groupConfigManager.groupConfig(GROUP_ID)).thenReturn(Optional.of(groupConfig));
-        Mockito.when(groupConfig.shareAutoOffsetReset()).thenReturn(ShareGroupAutoOffsetResetStrategy.EARLIEST);
+        Mockito.when(groupConfig.shareAutoOffsetReset()).thenReturn(Optional.of(ShareGroupAutoOffsetResetStrategy.EARLIEST));
 
-        ReplicaManager replicaManager = Mockito.mock(ReplicaManager.class);
-        DisklessStorageReplicaManagerSupport disklessStorageSupport = Mockito.mock(DisklessStorageReplicaManagerSupport.class);
-        Mockito.when(replicaManager.disklessStorageSupport()).thenReturn(disklessStorageSupport);
-        Mockito.when(disklessStorageSupport.isDisklessStorageTopic(TOPIC_ID_PARTITION.topic())).thenReturn(true);
-        Mockito.when(disklessStorageSupport.handleListOffsets(Mockito.any(), Mockito.isNull())).thenReturn(CompletableFuture.completedFuture(
-            Map.of(TOPIC_ID_PARTITION, ListOffsetsPartitionResponse.success(
-                TOPIC_ID_PARTITION,
-                42L,
-                ListOffsetsRequest.EARLIEST_TIMESTAMP
-            ))
-        ));
+        PartitionMetadataProvider metadataProvider = Mockito.mock(PartitionMetadataProvider.class);
+        Mockito.when(metadataProvider.isDiskless(TOPIC_ID_PARTITION)).thenReturn(true);
+        Mockito.when(metadataProvider.disklessOffsetForTimestamp(
+                Mockito.eq(TOPIC_ID_PARTITION), Mockito.eq(ListOffsetsRequest.EARLIEST_TIMESTAMP), Mockito.anyInt()))
+            .thenReturn(CompletableFuture.completedFuture(42L));
 
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withPersister(persister)
-            .withGroupConfigManager(groupConfigManager)
-            .withReplicaManager(replicaManager)
+            .withConfigProvider(new ShareGroupConfigProvider(groupConfigManager))
+            .withMetadataProvider(metadataProvider)
             .build();
 
         CompletableFuture<Void> result = sharePartition.maybeInitialize();
         assertTrue(result.isDone());
         assertFalse(result.isCompletedExceptionally());
 
-        Mockito.verify(disklessStorageSupport).handleListOffsets(Mockito.any(), Mockito.isNull());
+        Mockito.verify(metadataProvider).disklessOffsetForTimestamp(
+            Mockito.eq(TOPIC_ID_PARTITION), Mockito.eq(ListOffsetsRequest.EARLIEST_TIMESTAMP), Mockito.anyInt());
         Mockito.verify(groupConfigManager).groupConfig(GROUP_ID);
 
         assertEquals(SharePartitionState.ACTIVE, sharePartition.partitionState());
@@ -540,15 +533,13 @@ public class SharePartitionTest {
         Mockito.when(groupConfigManager.groupConfig(GROUP_ID))
             .thenThrow(new IllegalStateException("group config unavailable"));
 
-        ReplicaManager replicaManager = Mockito.mock(ReplicaManager.class);
-        DisklessStorageReplicaManagerSupport disklessStorageSupport = Mockito.mock(DisklessStorageReplicaManagerSupport.class);
-        Mockito.when(replicaManager.disklessStorageSupport()).thenReturn(disklessStorageSupport);
-        Mockito.when(disklessStorageSupport.isDisklessStorageTopic(TOPIC_ID_PARTITION.topic())).thenReturn(true);
+        PartitionMetadataProvider metadataProvider = Mockito.mock(PartitionMetadataProvider.class);
+        Mockito.when(metadataProvider.isDiskless(TOPIC_ID_PARTITION)).thenReturn(true);
 
         SharePartition sharePartition = SharePartitionBuilder.builder()
             .withPersister(persister)
-            .withGroupConfigManager(groupConfigManager)
-            .withReplicaManager(replicaManager)
+            .withConfigProvider(new ShareGroupConfigProvider(groupConfigManager))
+            .withMetadataProvider(metadataProvider)
             .build();
 
         CompletableFuture<Void> result = sharePartition.maybeInitialize();
@@ -558,7 +549,7 @@ public class SharePartitionTest {
         assertFutureThrows(IllegalStateException.class, result);
         assertEquals(SharePartitionState.FAILED, sharePartition.partitionState());
         Mockito.verify(groupConfigManager).groupConfig(GROUP_ID);
-        Mockito.verify(disklessStorageSupport, Mockito.never()).handleListOffsets(Mockito.any(), Mockito.any());
+        Mockito.verify(metadataProvider, Mockito.never()).disklessOffsetForTimestamp(Mockito.any(), Mockito.anyLong(), Mockito.anyInt());
     }
 
     @Test

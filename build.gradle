@@ -2840,11 +2840,10 @@ project(':storage:storage-diskless-api') {
     implementation project(':storage:storage-api')
     implementation libs.slf4jApi
 
-    testImplementation project(':clients').sourceSets.test.output
+    testImplementation testFixtures(project(':clients'))
     testImplementation project(':core')
-    testImplementation project(':core').sourceSets.test.output
     testImplementation project(':server')
-    testImplementation project(':server-common').sourceSets.test.output
+    testImplementation testFixtures(project(':server-common'))
     testImplementation project(':test-common:test-common-internal-api')
     testImplementation project(':test-common:test-common-runtime')
     testImplementation project(':test-common:test-common-util')
@@ -2890,7 +2889,7 @@ project(':storage:storage-diskless-ursa') {
     runtimeOnly 'io.github.oxia-db:oxia-client'
     implementation 'io.netty:netty-buffer'
 
-    testImplementation project(':clients').sourceSets.test.output
+    testImplementation testFixtures(project(':clients'))
     testImplementation libs.junitJupiter
     testImplementation libs.mockitoCore
     testImplementation testLog4j2Libs
