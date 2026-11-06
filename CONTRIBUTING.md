@@ -149,7 +149,7 @@ If you add, remove or upgrade a dependency, keep `LICENSE-binary` in sync and ru
 |---|---|---|
 | Validate | Every pull request | `./gradlew check releaseTarGz -x test`: compilation, checkstyle, SpotBugs, spotless, license headers and the release tarball. Then the `LICENSE-binary` check and, for branches in this repository, a Docker Compose smoke test. |
 | Isolated tests | Every pull request that isn't a draft | The diskless integration tests, on JDK 17 |
-| Full test suite | Pushes to `4.3-ursa`, weekends, and pull requests that a maintainer labels `run-junit-tests` | The whole Apache Kafka suite, on JDK 17 and 25. It takes several hours. |
+| Full test suite | Pushes to the development and release branches (`4.3-ursa`, `4.3.2-ursa`), weekends, and pull requests that a maintainer labels `run-junit-tests` | The whole Apache Kafka suite, on JDK 17 and 25. It takes several hours. |
 
 For more:
 
@@ -258,8 +258,10 @@ accepted. The [AI policy](AI_POLICY.md) explains what counts.
    `git remote add fork https://github.com/<your-username>/kafka.git`. This repository isn't a GitHub
    fork of Apache Kafka, so if you already have a repository named `kafka`, give this fork another
    name and use it in the URL. Create a branch for your change, and push it to `fork`.
-2. Open the pull request against `4.3-ursa`, the default branch. Its name follows the Apache Kafka
-   release that UFK is built on, so it changes when UFK moves to a newer release.
+2. Open the pull request against `4.3-ursa`, the default branch. It's the development branch for the
+   Apache Kafka 4.3 line, so its name changes when UFK moves to a new line such as 4.4. Release
+   branches such as `4.3.2-ursa` don't take pull requests; see
+   [Branches and releases](docs/developer/branches-and-releases.md).
 3. Keep each pull request to one logical change. Smaller pull requests get reviewed sooner.
 4. Fill in the pull request template: what changed and why, compatibility, how you tested it, and AI
    assistance.

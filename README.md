@@ -290,6 +290,7 @@ The standard Apache Kafka build, test, IDE, and code-quality instructions all st
 - [LIP-163: Ursa Zone-Aware Owner Selection](https://github.com/openlakestream/lips/blob/main/proposals/LIP-163-Ursa-Zone-Aware-Owner-Selection.md)
 - [Docker Compose stack](docker/examples/docker-compose-files/cluster/ursa/README.md)
 - [Materializers](docs/developer/materializers.md): what the compactor's materializers get from Kafka
+- [Branches and releases](docs/developer/branches-and-releases.md): development and release branches, and how a release is cut
 - [AGENTS.md](AGENTS.md) — architecture, module layout, and build conventions
 - [Apache Kafka documentation](https://kafka.apache.org/documentation/) for everything inherited from upstream
 

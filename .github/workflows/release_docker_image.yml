@@ -21,9 +21,9 @@
 #     (see docker/strimzi/README.md; Strimzi version defaults live in
 #     docker/strimzi/build-image.sh)
 # Each image is also pushed as `latest` (lakestream/kafka:latest and
-# lakestream/kafka-strimzi:latest) unless the version carries a pre-release
-# suffix such as `-rc1`, so `latest` always points at the most recent final
-# release.
+# lakestream/kafka-strimzi:latest) when the version is the highest final
+# release, so neither a pre-release such as `-rc1` nor a fix released from an
+# older release branch moves `latest`.
 # Requires the DOCKER_USER and DOCKER_PASSWORD repository secrets.
 
 name: Release Docker Image
@@ -59,9 +59,11 @@ jobs:
         run: |
           VERSION="${VERSION#v}"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-          # Pre-release versions (e.g. 4.3.1.2-rc1) must not move `latest`.
-          if [[ "${VERSION}" == *-* ]]; then
-            echo "Pre-release ${VERSION}: not tagging latest"
+          # `latest` follows the highest final release. Pre-releases (e.g. 4.3.1.2-rc1) and fixes
+          # released from an older release branch (e.g. 4.3.2.2 after 4.4.0.1) must not move it.
+          HIGHEST=$(git ls-remote --tags --refs origin 'refs/tags/v*' | sed 's|.*refs/tags/v||' | grep -v -- - | sort -V | tail -n 1)
+          if [[ "${VERSION}" != "${HIGHEST}" ]]; then
+            echo "${VERSION} is not the highest final release (${HIGHEST}): not tagging latest"
             echo "KAFKA_LATEST_TAG_ARGS=" >> "$GITHUB_ENV"
             echo "STRIMZI_LATEST_TAG_ARGS=" >> "$GITHUB_ENV"
           else
