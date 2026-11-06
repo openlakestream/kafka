@@ -113,7 +113,7 @@ ext {
 
   commitId = determineCommitId()
 
-  ursaStorageVersion = '1.0.0'
+  ursaStorageVersion = '1.0.1'
 
   // Closure to exclude the isolated Ursa runtime from unrelated test classpaths.
   // These dependencies significantly slow down ClassGraph.scan() during plugin discovery

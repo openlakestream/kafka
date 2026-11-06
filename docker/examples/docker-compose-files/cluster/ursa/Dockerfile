@@ -17,7 +17,7 @@
 # its own directory and is only used by /opt/kafka/bin/ursa-compactor.sh; the
 # broker never sees it. Jars are platform-independent, so resolve on the build host.
 FROM --platform=$BUILDPLATFORM maven:3.9-eclipse-temurin-17 AS compactor-deps
-ARG URSA_STORAGE_VERSION=1.0.0
+ARG URSA_STORAGE_VERSION=1.0.1
 WORKDIR /build
 RUN printf '%s\n' \
       '<project xmlns="http://maven.apache.org/POM/4.0.0">' \
