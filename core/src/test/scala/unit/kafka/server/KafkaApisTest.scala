@@ -31,7 +31,6 @@ import org.apache.kafka.common.acl.AclOperation
 import org.apache.kafka.common.compress.Compression
 import org.apache.kafka.common.config.{ConfigResource, TopicConfig}
 import org.apache.kafka.common.config.ConfigResource.Type.{BROKER, BROKER_LOGGER}
-import org.apache.kafka.common.config.TopicConfig
 import org.apache.kafka.common.errors.{ClusterAuthorizationException, UnsupportedVersionException}
 import org.apache.kafka.common.internals.{Plugin, Topic}
 import org.apache.kafka.common.internals.Topic.SHARE_GROUP_STATE_TOPIC_NAME

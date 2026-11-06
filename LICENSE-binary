@@ -282,15 +282,15 @@ bundled under ./libs.
 - hk2-utils-3.0.6
 - j2objc-annotations-3.0.0
 - jackson-annotations-2.21
-- jackson-core-2.21.5
-- jackson-databind-2.21.5
-- jackson-dataformat-csv-2.21.5
-- jackson-dataformat-yaml-2.21.5
-- jackson-datatype-jdk8-2.21.5
-- jackson-jakarta-rs-base-2.21.5
-- jackson-jakarta-rs-json-provider-2.21.5
-- jackson-module-blackbird-2.21.5
-- jackson-module-jakarta-xmlbind-annotations-2.21.5
+- jackson-core-2.21.7
+- jackson-databind-2.21.7
+- jackson-dataformat-csv-2.21.7
+- jackson-dataformat-yaml-2.21.7
+- jackson-datatype-jdk8-2.21.7
+- jackson-jakarta-rs-base-2.21.7
+- jackson-jakarta-rs-json-provider-2.21.7
+- jackson-module-blackbird-2.21.7
+- jackson-module-jakarta-xmlbind-annotations-2.21.7
 - jakarta.activation-2.0.1
 - jakarta.activation-api-2.1.0
 - jakarta.annotation-api-2.1.1
@@ -301,7 +301,6 @@ bundled under ./libs.
 - jakarta.xml.bind-api-3.0.1
 - javassist-3.30.2-GA
 - javax.activation-api-1.2.0
-- javax.annotation-api-1.3.2
 - jaxb-api-2.3.1
 - jersey-client-3.1.10
 - jersey-common-3.1.10
@@ -319,7 +318,9 @@ bundled under ./libs.
 - jetty-server-12.0.37
 - jetty-session-12.0.37
 - jetty-util-12.0.37
-- jline-3.30.4
+- jline-native-3.30.15
+- jline-reader-3.30.15
+- jline-terminal-3.30.15
 - jopt-simple-5.0.4
 - jose4j-0.9.6
 - jspecify-1.0.0
@@ -328,7 +329,7 @@ bundled under ./libs.
 - log4j-api-2.25.5
 - log4j-core-2.25.5
 - log4j-slf4j-impl-2.25.5
-- lz4-java-1.11.1
+- lz4-java-1.11.4
 - maven-artifact-3.9.15
 - metrics-core-2.2.0
 - opentelemetry-proto-1.3.2-alpha
@@ -343,7 +344,7 @@ bundled under ./libs.
 - scala-reflect-2.13.18
 - slf4j-api-1.7.36
 - snakeyaml-2.5
-- snappy-java-1.1.10.7
+- snappy-java-1.1.10.11
 - swagger-annotations-2.2.39
 - zstd-jni-1.5.6-10
 -------------------------------------------------------------------------------
@@ -501,7 +502,10 @@ bundled under ./ursa-storage.
 - httpcore-4.4.16
 - identity-spi-2.32.28
 - istack-commons-runtime-3.0.12
+- jackson-core-2.21.5
+- jackson-databind-2.21.5
 - jackson-dataformat-xml-2.21.5
+- jackson-datatype-jdk8-2.21.5
 - jackson-datatype-jsr310-2.21.5
 - jackson-module-parameter-names-2.21.5
 - jakarta.activation-1.2.2
@@ -511,6 +515,7 @@ bundled under ./ursa-storage.
 - jakarta.servlet.jsp-api-2.3.6
 - jakarta.ws.rs-api-2.1.6
 - jakarta.xml.bind-api-2.3.3
+- javax.annotation-api-1.3.2
 - jaxb-runtime-2.3.9
 - jcip-annotations-1.0-1
 - jettison-1.5.4
@@ -532,6 +537,7 @@ bundled under ./ursa-storage.
 - lakestream-api-1.0.0
 - lambda-2.32.28
 - lang-tag-1.7
+- lz4-java-1.11.1
 - metrics-core-3.2.4
 - metrics-spi-2.32.28
 - msal4j-1.17.2
@@ -616,6 +622,7 @@ bundled under ./ursa-storage.
 - sdk-core-2.32.28
 - shared-resourcemapping-0.33.0
 - slog-0.9.5
+- snappy-java-1.1.10.7
 - stax2-api-4.2.2
 - sts-2.32.28
 - third-party-jackson-core-2.32.28
@@ -665,6 +672,7 @@ see: licenses/CDDL+GPL-1.1
 - jakarta.servlet-api-6.0.0
 - jakarta.xml.bind-api-3.0.1
 - javax.activation-api-1.2.0
+- javax.annotation-api-1.3.2
 - jaxb-api-2.3.1
 - activation-1.1.1
 
