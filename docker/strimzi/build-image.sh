@@ -34,6 +34,11 @@
 #                          Kafka minor with the tarball (default: 4.3.1)
 #   GRADLE_ARGS            Extra arguments for the release build, e.g. GRADLE_ARGS=--offline
 #
+# Exits with status 78 (EX_CONFIG) without building anything when the Strimzi
+# base image is for another Kafka minor than the tarball. CI and the release
+# workflow treat that status as "no Strimzi release ships this Kafka minor yet"
+# and skip the Strimzi image.
+#
 
 set -euo pipefail
 
@@ -164,7 +169,7 @@ strimzi_kafka_minor="$(echo "${STRIMZI_KAFKA_VERSION}" | cut -d. -f1,2)"
 if [[ "${kafka_minor}" != "${strimzi_kafka_minor}" ]]; then
     echo "ERROR: Tarball is Kafka ${KAFKA_VERSION} but the Strimzi base image is Kafka ${STRIMZI_KAFKA_VERSION}." >&2
     echo "       Set STRIMZI_VERSION/STRIMZI_KAFKA_VERSION to a Strimzi release that ships Kafka ${kafka_minor}.x." >&2
-    exit 1
+    exit 78
 fi
 
 if [[ -z "${IMAGE_NAME}" ]]; then

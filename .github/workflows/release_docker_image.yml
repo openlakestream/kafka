@@ -19,7 +19,8 @@
 #   * lakestream/kafka-strimzi:<strimzi>-kafka-X.Y.Z.W, the same distribution in
 #     the Strimzi image layout for clusters managed by the Strimzi operator
 #     (see docker/strimzi/README.md; Strimzi version defaults live in
-#     docker/strimzi/build-image.sh)
+#     docker/strimzi/build-image.sh). While no Strimzi release ships the
+#     tarball's Kafka minor, this image is skipped with a warning.
 # Each image is also pushed as `latest` (lakestream/kafka:latest and
 # lakestream/kafka-strimzi:latest) when the version is the highest final
 # release, so neither a pre-release such as `-rc1` nor a fix released from an
@@ -79,8 +80,15 @@ jobs:
             ${KAFKA_LATEST_TAG_ARGS} "lakestream/kafka:${VERSION}"
       - name: Build and push Strimzi image
         run: |
+          rc=0
           # shellcheck disable=SC2086  # intentionally word-split: empty or "--tag <name>"
           docker/strimzi/build-image.sh \
             --tarball "core/build/distributions/kafka_2.13-${VERSION}.tgz" \
             --push --platform linux/amd64,linux/arm64 \
-            ${STRIMZI_LATEST_TAG_ARGS}
+            ${STRIMZI_LATEST_TAG_ARGS} || rc=$?
+          # 78: the Strimzi base image is for another Kafka minor, so no Strimzi release ships this one yet
+          if [[ $rc -eq 78 ]]; then
+            echo "::warning::No Strimzi release ships this Kafka minor yet; lakestream/kafka-strimzi is not published for ${VERSION}."
+            rc=0
+          fi
+          exit $rc
