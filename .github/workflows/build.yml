@@ -190,7 +190,14 @@ jobs:
         if: ${{ !inputs.is-public-fork }}
         run: |
           TARBALL=$(ls core/build/distributions/kafka_2.13-*.tgz | grep -v -- '-site-docs.tgz' | head -1)
-          docker/strimzi/build-image.sh --tarball "${TARBALL}" lakestream/kafka-strimzi:ci-smoke
+          rc=0
+          docker/strimzi/build-image.sh --tarball "${TARBALL}" lakestream/kafka-strimzi:ci-smoke || rc=$?
+          # 78: the Strimzi base image is for another Kafka minor, so no Strimzi release ships this one yet
+          if [[ $rc -eq 78 ]]; then
+            echo "::warning::No Strimzi release ships this Kafka minor yet; skipping the Strimzi image smoke test."
+            exit 0
+          fi
+          [[ $rc -eq 0 ]] || exit $rc
           docker/strimzi/verify-image.sh lakestream/kafka-strimzi:ci-smoke
 
   test:

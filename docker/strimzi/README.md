@@ -29,6 +29,12 @@ pushed as `latest` for the highest final release, so neither a `-rc1`-style
 pre-release nor a fix released from an older release branch moves `latest`
 (`.github/workflows/release_docker_image.yml`).
 
+A new Kafka minor needs a Strimzi release that ships it. Until there is one,
+`build-image.sh` exits with status 78 without building anything, and CI and the
+release workflow skip this image with a warning; `lakestream/kafka` is still
+published. Once Strimzi ships the minor, set the `STRIMZI_VERSION` and
+`STRIMZI_KAFKA_VERSION` defaults in `build-image.sh` to that release.
+
 Building
 --------
 
