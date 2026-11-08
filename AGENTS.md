@@ -273,7 +273,7 @@ Architecture: 3 Kafka brokers + Oxia (metadata) + MinIO (S3 storage) + the Ursa 
 
 ```bash
 docker/strimzi/build-image.sh --tarball core/build/distributions/kafka_2.13-<version>.tgz
-docker/strimzi/verify-image.sh lakestream/kafka-strimzi:1.2.0-kafka-<version>
+docker/strimzi/verify-image.sh lakestream/kafka-strimzi:1.3.1-kafka-<version>
 ```
 
 ## Upstream compatibility

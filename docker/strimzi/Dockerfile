@@ -30,8 +30,8 @@
 # The isolated ./ursa-storage/ runtime is copied as-is; the default
 # `ursa.storage.class.path` resolves it through KAFKA_HOME=/opt/kafka.
 
-ARG STRIMZI_VERSION=1.2.0
-ARG STRIMZI_KAFKA_VERSION=4.3.1
+ARG STRIMZI_VERSION=1.3.1
+ARG STRIMZI_KAFKA_VERSION=4.3.2
 ARG STRIMZI_BASE_IMAGE=quay.io/strimzi/kafka:${STRIMZI_VERSION}-kafka-${STRIMZI_KAFKA_VERSION}
 
 FROM ${STRIMZI_BASE_IMAGE} AS merge
