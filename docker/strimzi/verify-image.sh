@@ -48,9 +48,12 @@ for f in kafka_run.sh kafka_readiness.sh kafka_liveness.sh dynamic_resources.sh 
     [[ -x "/opt/kafka/${f}" ]] || fail "missing executable /opt/kafka/${f}"
 done
 # Sourced by kafka_run.sh rather than executed, so only their presence matters.
-for f in set_kafka_jmx_options.sh set_kafka_gc_options.sh to_bytes.gawk; do
+for f in set_kafka_jmx_options.sh set_kafka_gc_options.sh; do
     [[ -f "/opt/kafka/${f}" ]] || fail "missing /opt/kafka/${f}"
 done
+# dynamic_resources.sh uses the Strimzi to_bytes script: to_bytes.gawk before Strimzi 1.3, to_bytes.awk since.
+to_bytes="$(grep -o "to_bytes\.[a-z]*" /opt/kafka/dynamic_resources.sh | head -n 1 || true)"
+[[ -n "${to_bytes}" && -f "/opt/kafka/${to_bytes}" ]] || fail "missing the to_bytes script that dynamic_resources.sh uses (${to_bytes:-none found})"
 ok "Strimzi entrypoints and Kafka scripts present"
 
 for d in /opt/cruise-control /opt/kafka-exporter /opt/prometheus-jmx-exporter /opt/kafka/plugins; do
