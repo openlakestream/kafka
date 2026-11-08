@@ -23,7 +23,7 @@ artifact appears twice on the classpath. The Ursa compactor is not part of this
 image; see [Compactor](#compactor) below.
 
 Tags follow Strimzi's convention: `lakestream/kafka-strimzi:<strimzi>-kafka-<kafka>`,
-for example `lakestream/kafka-strimzi:1.2.0-kafka-4.3.1.1`. Every `vX.Y.Z.W` release
+for example `lakestream/kafka-strimzi:1.3.1-kafka-4.3.2.2`. Every `vX.Y.Z.W` release
 tag publishes this image next to `lakestream/kafka:X.Y.Z.W`, and both are also
 pushed as `latest` for the highest final release, so neither a `-rc1`-style
 pre-release nor a fix released from an older release branch moves `latest`
@@ -33,20 +33,20 @@ Building
 --------
 
 ```bash
-# Build the release tarball, then the image (defaults: Strimzi 1.2.0 on Kafka 4.3.1)
+# Build the release tarball, then the image (defaults: Strimzi 1.3.1 on Kafka 4.3.2)
 docker/strimzi/build-image.sh
 
 # Reuse an existing tarball
-docker/strimzi/build-image.sh --tarball core/build/distributions/kafka_2.13-4.3.1.1.tgz
+docker/strimzi/build-image.sh --tarball core/build/distributions/kafka_2.13-4.3.2.2.tgz
 
 # Another Strimzi release; the base Kafka version must share the minor with the tarball
-STRIMZI_VERSION=1.3.0 STRIMZI_KAFKA_VERSION=4.3.2 docker/strimzi/build-image.sh
+STRIMZI_VERSION=1.2.0 STRIMZI_KAFKA_VERSION=4.3.1 docker/strimzi/build-image.sh
 
 # Multi-arch build pushed to the registry
 docker/strimzi/build-image.sh --push --platform linux/amd64,linux/arm64
 
 # Check the layout of a built image (also run in CI)
-docker/strimzi/verify-image.sh lakestream/kafka-strimzi:1.2.0-kafka-4.3.1.1
+docker/strimzi/verify-image.sh lakestream/kafka-strimzi:1.3.1-kafka-4.3.2.2
 ```
 
 Deploying
@@ -61,9 +61,9 @@ apiVersion: kafka.strimzi.io/v1
 kind: Kafka
 spec:
   kafka:
-    version: 4.3.1                                   # a version Strimzi ships
+    version: 4.3.2                                   # a version Strimzi ships
     metadataVersion: 4.3-IV0
-    image: lakestream/kafka-strimzi:1.2.0-kafka-4.3.1.1   # ours
+    image: lakestream/kafka-strimzi:1.3.1-kafka-4.3.2.2   # ours
     config:
       ursa.storage.enable: true
       ursa.catalog.oxia.service.url: oxia://oxia.oxia.svc:6648/default
@@ -74,8 +74,8 @@ spec:
 ```
 
 - `spec.kafka.version` must be a Kafka version the installed Strimzi release knows,
-  because the operator validates it against its compiled-in list. Strimzi 1.2.0 knows
-  4.2.0, 4.2.1, 4.3.0 and 4.3.1; use the one matching the image's base
+  because the operator validates it against its compiled-in list. Strimzi 1.3.1 knows
+  4.2.0 to 4.2.2 and 4.3.0 to 4.3.2; use the one matching the image's base
   (`STRIMZI_KAFKA_VERSION`). `spec.kafka.image` then overrides which image runs.
 - Broker settings go in `spec.kafka.config`. Use the `env` config provider and
   `template.kafkaContainer.env` to pull credentials from a Secret, as in the example.
@@ -137,3 +137,4 @@ Verified against Strimzi 1.2.0 on a local cluster: deploy from the examples,
 produce and consume through `<cluster>-kafka-bootstrap`, a manual rolling update
 of the broker pool, a blocked scale-down, and a scale-down with the annotation
 followed by consuming every record from a partition the removed broker had owned.
+The image on the Strimzi 1.3.1 base has so far only been checked with `verify-image.sh`.

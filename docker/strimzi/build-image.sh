@@ -21,17 +21,17 @@
 #   ./build-image.sh [--tarball <kafka_2.13-*.tgz>] [--platform <platform>] [--push] [--tag <name:tag>]... [IMAGE_NAME:TAG]
 #
 # Examples:
-#   ./build-image.sh                                   # Builds the tarball, then lakestream/kafka-strimzi:1.2.0-kafka-<version>
-#   ./build-image.sh --tarball core/build/distributions/kafka_2.13-4.3.1.1.tgz
+#   ./build-image.sh                                   # Builds the tarball, then lakestream/kafka-strimzi:1.3.1-kafka-<version>
+#   ./build-image.sh --tarball core/build/distributions/kafka_2.13-4.3.2.2.tgz
 #   ./build-image.sh --push --platform linux/amd64,linux/arm64
 #   ./build-image.sh --tag lakestream/kafka-strimzi:latest   # Same image under a second tag
-#   STRIMZI_VERSION=1.3.0 STRIMZI_KAFKA_VERSION=4.3.2 ./build-image.sh
+#   STRIMZI_VERSION=1.2.0 STRIMZI_KAFKA_VERSION=4.3.1 ./build-image.sh
 #
 # Environment:
-#   STRIMZI_VERSION        Strimzi release whose Kafka image is the base (default: 1.2.0)
+#   STRIMZI_VERSION        Strimzi release whose Kafka image is the base (default: 1.3.1)
 #   STRIMZI_KAFKA_VERSION  Apache Kafka version of that base image. It must be a
 #                          version this Strimzi release ships and share the
-#                          Kafka minor with the tarball (default: 4.3.1)
+#                          Kafka minor with the tarball (default: 4.3.2)
 #   GRADLE_ARGS            Extra arguments for the release build, e.g. GRADLE_ARGS=--offline
 #
 
@@ -40,8 +40,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKER_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-STRIMZI_VERSION="${STRIMZI_VERSION:-1.2.0}"
-STRIMZI_KAFKA_VERSION="${STRIMZI_KAFKA_VERSION:-4.3.1}"
+STRIMZI_VERSION="${STRIMZI_VERSION:-1.3.1}"
+STRIMZI_KAFKA_VERSION="${STRIMZI_KAFKA_VERSION:-4.3.2}"
 
 usage() {
     cat <<'EOF'
@@ -56,8 +56,8 @@ Options:
   -h, --help             Show this help
 
 Environment:
-  STRIMZI_VERSION        Strimzi release whose Kafka image is the base (default: 1.2.0)
-  STRIMZI_KAFKA_VERSION  Apache Kafka version of that base image (default: 4.3.1)
+  STRIMZI_VERSION        Strimzi release whose Kafka image is the base (default: 1.3.1)
+  STRIMZI_KAFKA_VERSION  Apache Kafka version of that base image (default: 4.3.2)
   GRADLE_ARGS            Extra arguments for the release build (default: empty)
 
 The image name defaults to lakestream/kafka-strimzi:<STRIMZI_VERSION>-kafka-<tarball version>.
