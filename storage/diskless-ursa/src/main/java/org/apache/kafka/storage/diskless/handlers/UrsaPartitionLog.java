@@ -159,6 +159,7 @@ final class UrsaPartitionLog {
         if (closed.get()) {
             throw ownershipLostException();
         }
+        failIfOpenFailed();
         return producerStateManagers.computeIfAbsent(zone, zoneId -> new ProducerStateManager(
                 topicIdPartition,
                 oxiaClientSupplier,
@@ -167,6 +168,20 @@ final class UrsaPartitionLog {
                 producerStateSnapshotIntervalMs,
                 producerStateSnapshotRecordThreshold,
                 producerStateScheduler));
+    }
+
+    /**
+     * Rethrows the failure of a log open that already failed. Such a partition log stays open on
+     * purpose (see {@link #createInitFuture}), so {@code closed} does not stop a write that was
+     * already queued on it from asking for a producer state manager. A manager created here would
+     * claim the partition's Oxia snapshot key before its recovery fails on the failed log, which
+     * silently takes the snapshot ownership away from the live partition log that replaced this one.
+     */
+    private void failIfOpenFailed() {
+        CompletableFuture<Log> opened = initFuture;
+        if (opened != null && opened.isCompletedExceptionally()) {
+            opened.join();
+        }
     }
 
     synchronized void installProducerStateManager(String zone, ProducerStateManager producerStateManager) {
