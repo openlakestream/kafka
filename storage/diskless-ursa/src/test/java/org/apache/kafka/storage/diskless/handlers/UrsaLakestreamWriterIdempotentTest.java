@@ -116,6 +116,44 @@ class UrsaLakestreamWriterIdempotentTest {
     }
 
     @Test
+    void testWriteToPartitionLogWhoseOpenFailedDoesNotTouchProducerState() throws Exception {
+        TopicIdPartition tp = testTopicPartition(0);
+        IllegalStateException openFailure = new IllegalStateException("open failed");
+        AtomicInteger oxiaLookups = new AtomicInteger();
+        UrsaStorageState state = mock(UrsaStorageState.class);
+        when(state.time()).thenReturn(new MockTime());
+        when(state.timer()).thenReturn(timer);
+        when(state.timestampType(tp.topic())).thenReturn(TimestampType.CREATE_TIME);
+        UrsaPartitionLog partitionLog = new UrsaPartitionLog(
+                tp,
+                state,
+                mock(DisklessLogMetrics.class),
+                CompletableFuture.failedFuture(openFailure),
+                () -> {
+                    oxiaLookups.incrementAndGet();
+                    return null;
+                },
+                0L,
+                0,
+                timer);
+        when(state.getOrCreatePartitionLog(tp)).thenReturn(partitionLog);
+        UrsaLakestreamWriter writer = new UrsaLakestreamWriter(state);
+
+        try {
+            // A producer state manager would claim the partition's Oxia snapshot key, which takes
+            // the snapshot ownership away from the partition log that replaced this failed one.
+            PartitionResponse response = writer.write(
+                    Map.of(tp, idempotentRecords(4_444L, 0, "late")),
+                    DisklessClientZone.NO_ZONE).get(5, TimeUnit.SECONDS).get(tp);
+
+            assertEquals(Errors.KAFKA_STORAGE_ERROR, response.error);
+            assertEquals(0, oxiaLookups.get(), "no producer state manager may be created");
+        } finally {
+            writer.close();
+        }
+    }
+
+    @Test
     void testQueuedWriteDoesNotPrepareOrAppendAfterPartitionClose() throws Exception {
         TopicIdPartition tp = testTopicPartition(0);
         Log logInstance = emptyLog();
