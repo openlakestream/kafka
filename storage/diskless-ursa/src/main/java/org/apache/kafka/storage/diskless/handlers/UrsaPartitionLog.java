@@ -40,6 +40,7 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -83,6 +84,8 @@ final class UrsaPartitionLog {
     private final AtomicBoolean closed = new AtomicBoolean();
     private final CompletableFuture<Void> closeFuture = new CompletableFuture<>();
     private volatile PartitionReader reader;
+    /** Set under this monitor before a failed open cleans up producer state; see {@link #failIfOpenFailed}. */
+    private volatile Throwable openFailure;
 
     UrsaPartitionLog(TopicIdPartition topicIdPartition,
                      UrsaStorageState state,
@@ -159,6 +162,7 @@ final class UrsaPartitionLog {
         if (closed.get()) {
             throw ownershipLostException();
         }
+        failIfOpenFailed();
         return producerStateManagers.computeIfAbsent(zone, zoneId -> new ProducerStateManager(
                 topicIdPartition,
                 oxiaClientSupplier,
@@ -167,6 +171,28 @@ final class UrsaPartitionLog {
                 producerStateSnapshotIntervalMs,
                 producerStateSnapshotRecordThreshold,
                 producerStateScheduler));
+    }
+
+    /**
+     * Rethrows the failure of a log open that already failed. Such a partition log stays open on
+     * purpose (see {@link #createInitFuture}), so {@code closed} does not stop a write that was
+     * already queued on it from asking for a producer state manager. A manager created here would
+     * claim the partition's Oxia snapshot key before its recovery fails on the failed log, which
+     * silently takes the snapshot ownership away from the live partition log that replaced this one.
+     *
+     * <p>The init future alone is not enough: a failed open cleans up producer state before it fails
+     * the init future, and that cleanup already releases queued writes. {@code openFailure} is set
+     * first. The init future still covers a log that opened but could not be installed.
+     */
+    private void failIfOpenFailed() {
+        Throwable failure = openFailure;
+        if (failure != null) {
+            throw new CompletionException(failure);
+        }
+        CompletableFuture<Log> opened = initFuture;
+        if (opened != null && opened.isCompletedExceptionally()) {
+            opened.join();
+        }
     }
 
     synchronized void installProducerStateManager(String zone, ProducerStateManager producerStateManager) {
@@ -289,9 +315,15 @@ final class UrsaPartitionLog {
                 log.warn("Failed to open Log for partition {}, evicting from cache", topicIdPartition, error);
                 // The writer stays open on purpose: this partition log was never leased, so a
                 // request that still reaches it must report the open failure rather than a lost
-                // leadership. Every in-flight write drains through the failed init future below.
-                // Cleanup runs first: the failed init future releases queued writes, and a
-                // draining produce must not recreate a ProducerStateManager after the cleanup.
+                // leadership. Every in-flight write drains through the cleanup and the failed init
+                // future below, and a draining produce must not create a ProducerStateManager.
+                // The failure is recorded first, because the cleanup fails the in-flight idempotent
+                // write's prepare, which releases the next queued write before the init future
+                // fails. It is recorded under the monitor, so a manager that was being created
+                // concurrently is already in the map that the cleanup walks.
+                synchronized (this) {
+                    openFailure = error;
+                }
                 cleanupProducerStates(false);
                 initialized.completeExceptionally(error);
                 // An already-failed future invokes this callback inside the map's mapping function,

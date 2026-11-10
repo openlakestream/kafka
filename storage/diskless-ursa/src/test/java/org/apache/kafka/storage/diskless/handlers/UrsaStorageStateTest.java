@@ -33,6 +33,7 @@ import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.server.metrics.KafkaMetricsGroup;
 import org.apache.kafka.server.metrics.KafkaYammerMetrics;
 import org.apache.kafka.storage.diskless.DisklessClientZone;
+import org.apache.kafka.storage.diskless.DisklessFutures;
 import org.apache.kafka.storage.diskless.idempotent.ProducerStateManager;
 import org.apache.kafka.storage.internals.log.LogMetricNames;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
@@ -52,6 +53,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import io.lakestream.api.Log;
 import io.lakestream.api.LogEntryHeader;
@@ -205,6 +207,42 @@ class UrsaStorageStateTest {
             // The failed init future is what releases queued writes, and a draining produce would
             // recreate a ProducerStateManager if the cleanup had not already run.
             assertFalse(initAlreadyFailed.get());
+        }
+    }
+
+    @Test
+    void testWriteReleasedByFailedOpenCleanupDoesNotCreateProducerState() throws Exception {
+        TopicIdPartition tp = new TopicIdPartition(Uuid.randomUuid(), new TopicPartition("failed-open-drain-topic", 0));
+        CompletableFuture<Log> open = new CompletableFuture<>();
+        StreamCatalog catalog = mock(StreamCatalog.class);
+        when(catalog.openLog(any(), anyInt())).thenReturn(open);
+        IOException openFailure = new IOException("open failed");
+
+        try (UrsaStorageState state = newState(catalog)) {
+            UrsaPartitionLog partitionLog = state.getOrCreatePartitionLog(tp);
+            AtomicReference<Throwable> releasedWriteError = new AtomicReference<>();
+            ProducerStateManager inFlightManager = mock(ProducerStateManager.class);
+            when(inFlightManager.cleanup(false)).thenAnswer(invocation -> {
+                // The real cleanup fails the in-flight idempotent write's pending prepare, which
+                // releases the next queued write before the init future fails. Asking for a
+                // manager here is what that write does when it wins the partition-log monitor.
+                try {
+                    partitionLog.getOrCreateProducerStateManager(DisklessClientZone.NO_ZONE);
+                } catch (Throwable error) {
+                    releasedWriteError.set(error);
+                }
+                return CompletableFuture.completedFuture(null);
+            });
+            partitionLog.installProducerStateManager(DisklessClientZone.NO_ZONE, inFlightManager);
+
+            open.completeExceptionally(openFailure);
+
+            verify(inFlightManager, timeout(5000)).cleanup(false);
+            // A manager would claim the partition's Oxia snapshot key, which takes the snapshot
+            // ownership away from the partition log that replaces this failed one.
+            assertNotNull(releasedWriteError.get(),
+                    "A write released by the cleanup must not create a ProducerStateManager");
+            assertSame(openFailure, DisklessFutures.unwrap(releasedWriteError.get()));
         }
     }
 
