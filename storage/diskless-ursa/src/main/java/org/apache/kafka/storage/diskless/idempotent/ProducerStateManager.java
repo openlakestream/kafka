@@ -77,6 +77,14 @@ public class ProducerStateManager implements Closeable {
     private static final long MAX_SNAPSHOT_VALUE_BYTES = 4L * 1024L * 1024L;
     private static final int SNAPSHOT_CLAIM_MAX_ATTEMPTS = 3;
     private static final long CURSOR_CLOSE_RETRY_DELAY_MS = 100L;
+    /**
+     * How many reads in a row may come back empty before the log end during replay. An empty read
+     * there means the cursor could not see entries that the log reports, for example while an entry
+     * range is being compacted. It is retried rather than taken as the end of the log: recovery that
+     * stopped early would accept appends without the producer state of the entries it never read.
+     */
+    static final int REPLAY_EMPTY_READ_MAX_RETRIES = 20;
+    static final long REPLAY_EMPTY_READ_RETRY_DELAY_MS = 100L;
 
     public enum RecoveryState {
         NOT_STARTED,
@@ -930,6 +938,7 @@ public class ProducerStateManager implements Closeable {
                 CompletableFuture<Void> replayFuture = new CompletableFuture<>();
                 CompletableFuture<Void> result = new CompletableFuture<>();
                 AtomicInteger replayEntries = new AtomicInteger();
+                AtomicInteger emptyReads = new AtomicInteger();
                 replayFuture.whenComplete((__, error) -> {
                     closeReplayCursor(cursor).whenComplete((closeIgnored, closeError) -> {
                         if (error != null) {
@@ -947,7 +956,7 @@ public class ProducerStateManager implements Closeable {
                         }
                     });
                 });
-                scheduleNextReplayRead(cursor, endOffset, replayEntries, replayFuture);
+                scheduleNextReplayRead(cursor, endOffset, replayEntries, emptyReads, replayFuture, 0L);
                 return result;
             });
     }
@@ -998,6 +1007,7 @@ public class ProducerStateManager implements Closeable {
     private void asyncReplayEntries(LogCursor cursor,
                                     long endOffset,
                                     final AtomicInteger replayedEntries,
+                                    AtomicInteger emptyReads,
                                     CompletableFuture<Void> replayFuture) {
         if (replayFuture.isDone()) {
             return;
@@ -1039,7 +1049,7 @@ public class ProducerStateManager implements Closeable {
                 }
                 return;
             }
-            processReplayBatch(entries, cursor, endOffset, replayedEntries, replayFuture);
+            processReplayBatch(entries, cursor, endOffset, replayedEntries, emptyReads, replayFuture);
         });
     }
 
@@ -1047,15 +1057,33 @@ public class ProducerStateManager implements Closeable {
                                     LogCursor cursor,
                                     long endOffset,
                                     AtomicInteger replayedEntries,
+                                    AtomicInteger emptyReads,
                                     CompletableFuture<Void> replayFuture) {
         boolean replayComplete = false;
+        boolean retryEmptyRead = false;
         Throwable processingError = null;
         if (!replayFuture.isDone()) {
             if (closed.get()) {
                 processingError = replayClosedException();
             } else if (entries == null || entries.isEmpty()) {
-                replayComplete = true;
+                long nextOffset;
+                synchronized (this) {
+                    nextOffset = nextOffsetToRecover;
+                }
+                if (nextOffset >= endOffset) {
+                    replayComplete = true;
+                } else if (emptyReads.incrementAndGet() > REPLAY_EMPTY_READ_MAX_RETRIES) {
+                    // Never complete with state that is missing entries the log reports: the next
+                    // append would be accepted without them and a retried batch could be duplicated.
+                    processingError = new IllegalStateException(String.format(
+                            "Producer-state replay for %s read no entries at offset %d before the log end %d "
+                                    + "after %d attempts",
+                            topicIdPartition, nextOffset, endOffset, REPLAY_EMPTY_READ_MAX_RETRIES + 1));
+                } else {
+                    retryEmptyRead = true;
+                }
             } else {
+                emptyReads.set(0);
                 for (LogEntry entry : entries) {
                     try {
                         if (closed.get()) {
@@ -1090,7 +1118,8 @@ public class ProducerStateManager implements Closeable {
         } else if (replayComplete) {
             replayFuture.complete(null);
         } else {
-            scheduleNextReplayRead(cursor, endOffset, replayedEntries, replayFuture);
+            long delayMs = retryEmptyRead ? REPLAY_EMPTY_READ_RETRY_DELAY_MS : 0L;
+            scheduleNextReplayRead(cursor, endOffset, replayedEntries, emptyReads, replayFuture, delayMs);
         }
     }
 
@@ -1115,7 +1144,9 @@ public class ProducerStateManager implements Closeable {
     private void scheduleNextReplayRead(LogCursor cursor,
                                         long endOffset,
                                         AtomicInteger replayedEntries,
-                                        CompletableFuture<Void> replayFuture) {
+                                        AtomicInteger emptyReads,
+                                        CompletableFuture<Void> replayFuture,
+                                        long delayMs) {
         if (replayFuture.isDone()) {
             return;
         }
@@ -1123,9 +1154,13 @@ public class ProducerStateManager implements Closeable {
             replayFuture.completeExceptionally(replayClosedException());
             return;
         }
+        Runnable read = () -> asyncReplayEntries(cursor, endOffset, replayedEntries, emptyReads, replayFuture);
         try {
-            scheduler.execute(() -> asyncReplayEntries(
-                cursor, endOffset, replayedEntries, replayFuture));
+            if (delayMs > 0) {
+                scheduler.schedule(read, delayMs, TimeUnit.MILLISECONDS);
+            } else {
+                scheduler.execute(read);
+            }
         } catch (RuntimeException scheduleError) {
             replayFuture.completeExceptionally(scheduleError);
         }

@@ -871,6 +871,57 @@ class ProducerStateManagerTest {
     }
 
     @Test
+    void testReplayRetriesEmptyReadBeforeLogEnd() throws Exception {
+        TopicIdPartition tp = testTopicPartition();
+        LogEntry first = newReplayEntry(7L, (short) 0, 0, "first", 0L, 1);
+        LogEntry second = newReplayEntry(7L, (short) 0, 1, "second", 1L, 1);
+        LogEntry third = newReplayEntry(7L, (short) 0, 2, "third", 2L, 1);
+        // The log reports entries up to offset 2, but one read in the middle comes back empty, as a
+        // cursor's read does while it cannot see a range that is being compacted.
+        Log replayLog = scriptedReplayLog(mockLogOffset(2L, 1),
+                List.of(List.of(first), List.of(), List.of(second, third)));
+
+        ProducerStateManager manager = newManager(
+                tp, () -> null, () -> CompletableFuture.completedFuture(replayLog));
+        try {
+            // Sequence 3 follows only when all three replayed entries are in the producer state.
+            ProducerStateManager.PrepareResult result = manager.prepareAppend(List.of(
+                    batch(7L, (short) 0, 3, 3, 1, 3000L)
+            )).get(10, TimeUnit.SECONDS);
+
+            assertInstanceOf(ProducerStateManager.Ready.class, result);
+            assertEquals(3L, manager.nextOffsetToRecoverForTesting());
+        } finally {
+            manager.close();
+        }
+    }
+
+    @Test
+    void testReplayFailsWhenReadsStayEmptyBeforeLogEnd() throws Exception {
+        TopicIdPartition tp = testTopicPartition();
+        LogEntry first = newReplayEntry(7L, (short) 0, 0, "first", 0L, 1);
+        // Entries 1 and 2 never become readable: recovery must not complete with the state of entry 0.
+        Log replayLog = scriptedReplayLog(mockLogOffset(2L, 1), List.of(List.of(first)));
+
+        ProducerStateManager manager = newManager(
+                tp, () -> null, () -> CompletableFuture.completedFuture(replayLog));
+        try {
+            ExecutionException prepareError = assertThrows(ExecutionException.class, () -> manager.prepareAppend(
+                    List.of(batch(7L, (short) 0, 1, 1, 1, 3000L))
+            ).get(10, TimeUnit.SECONDS));
+            Throwable rootCause = prepareError;
+            while (rootCause.getCause() != null) {
+                rootCause = rootCause.getCause();
+            }
+
+            assertInstanceOf(IllegalStateException.class, rootCause);
+            assertTrue(rootCause.getMessage().contains("before the log end 3"), rootCause.getMessage());
+        } finally {
+            manager.close();
+        }
+    }
+
+    @Test
     void testReplayFailureClosesEntireEntryBatch() throws Exception {
         TopicIdPartition tp = testTopicPartition();
         RuntimeException entryFailure = new RuntimeException("entry offset unavailable");
@@ -1160,6 +1211,21 @@ class ProducerStateManagerTest {
             }
         });
 
+        return logInstance;
+    }
+
+    /** A log whose replay cursor answers the given reads in order, and empty reads after them. */
+    private static Log scriptedReplayLog(LogOffset lastOffset, List<List<LogEntry>> reads) {
+        Log logInstance = mock(Log.class);
+        LogCursor cursor = mock(LogCursor.class);
+        when(logInstance.getLastOffset()).thenReturn(CompletableFuture.completedFuture(lastOffset));
+        when(logInstance.openEphemeralCursor(anyString(), anyLong())).thenReturn(
+                CompletableFuture.completedFuture(cursor));
+        AtomicInteger readCount = new AtomicInteger(0);
+        when(cursor.readEntries(anyInt(), anyLong(), any(), anyLong())).thenAnswer(invocation -> {
+            int read = readCount.getAndIncrement();
+            return CompletableFuture.completedFuture(read < reads.size() ? reads.get(read) : List.<LogEntry>of());
+        });
         return logInstance;
     }
 
